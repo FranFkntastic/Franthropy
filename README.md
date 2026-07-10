@@ -1,12 +1,42 @@
-# Franthropy.Dalamud
+# Franthropy
 
-Shared Dalamud helper primitives for FranFkntastic plugins.
+Shared FFXIV toolkit libraries for Franthropy plugins and tools.
 
-This is a normal .NET class library, not a Dalamud plugin. Consumer plugins reference it as a source dependency and package the built `Franthropy.Dalamud.dll` with their own plugin release.
+## Projects
 
-Initial helpers cover:
+- `src/Franthropy.Dalamud` - Dalamud-aware helper primitives such as world catalog lookups and Lifestream market-board travel command construction.
 
-- Canonical FFXIV world lookup from host-provided world records.
-- Lifestream market-board travel command building.
-- Explicit operation result types for command handoff.
+## Current Scope
 
+The first foundation scope is intentionally small:
+
+- world catalog lookup
+- Lifestream market-board travel command construction
+
+Market-board read models, purchase automation, Universalis helpers, and Craft Architect integration are future phases.
+
+## Repository Identity
+
+The local checkout is expected to be named `Franthropy`. Package metadata still points at the current GitHub remote until the repository is renamed there too.
+
+## Consuming Locally
+
+Consumer repositories should reference the specific project they need. During local development, sibling checkouts are expected:
+
+```text
+FFXIV-Development/
+  ComplicatedMarketBoard/
+  Franthropy/
+```
+
+ComplicatedMarketBoard can then reference:
+
+```text
+..\Franthropy\src\Franthropy.Dalamud\Franthropy.Dalamud.csproj
+```
+
+## Build
+
+```powershell
+dotnet test .\Franthropy.sln -c Debug
+```
