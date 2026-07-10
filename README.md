@@ -15,10 +15,6 @@ The first foundation scope is intentionally small:
 
 Market-board read models, purchase automation, Universalis helpers, and Craft Architect integration are future phases.
 
-## Repository Identity
-
-The local checkout is expected to be named `Franthropy`. Package metadata still points at the current GitHub remote until the repository is renamed there too.
-
 ## Consuming Locally
 
 Consumer repositories should reference the specific project they need. During local development, sibling checkouts are expected:
