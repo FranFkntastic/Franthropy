@@ -50,8 +50,12 @@ public sealed class DalamudDesynthesisUiTransaction
             return menuSelectionSubmitted ? DalamudUiTransactionResult.Pending("Waiting for SalvageDialog.") : SelectDesynthesis(fingerprint);
 
         var salvage = AgentSalvage.Instance();
-        if (salvage == null || salvage->DesynthItemId != fingerprint.ItemId || salvage->DesynthItemSlot.ItemId != fingerprint.ItemId)
-            return DalamudUiTransactionResult.Fail("UnexpectedConfirmation", "SalvageDialog does not identify the expected item.");
+        var dialogItemId = salvage == null ? 0 : NormalizeItemId(salvage->DesynthItemId);
+        var dialogSlotItemId = salvage == null ? 0 : NormalizeItemId(salvage->DesynthItemSlot.ItemId);
+        if (salvage == null || dialogItemId != fingerprint.ItemId || dialogSlotItemId != fingerprint.ItemId)
+            return DalamudUiTransactionResult.Fail(
+                "UnexpectedConfirmation",
+                $"SalvageDialog item identity mismatch: expected={fingerprint.ItemId}, dialog={dialogItemId}, slot={dialogSlotItemId}.");
         if (dialog->DesynthesizeButton == null || !dialog->DesynthesizeButton->IsEnabled)
             return DalamudUiTransactionResult.Fail("ConfirmationUnavailable", "The desynthesis button is unavailable.");
         return DalamudUiTransactionResult.Completed("ConfirmationReady", "The visible desynthesis confirmation identifies the expected item and is enabled.");
@@ -153,4 +157,6 @@ public sealed class DalamudDesynthesisUiTransaction
                 labels.Add(parameter.GetValueAsString());
         return labels;
     }
+
+    public static uint NormalizeItemId(uint itemId) => itemId >= 1_000_000 ? itemId % 1_000_000 : itemId;
 }
