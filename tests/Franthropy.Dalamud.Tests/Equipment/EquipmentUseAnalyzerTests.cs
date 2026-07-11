@@ -53,6 +53,24 @@ public sealed class EquipmentUseAnalyzerTests
         Assert.Equal(EquipmentUseStatus.MissingBaseline, result.Status);
     }
 
+    [Theory]
+    [InlineData(3, 21)] // MRD -> WAR
+    [InlineData(29, 30)] // ROG -> NIN
+    public void UpgradedJobGearset_SatisfiesItsBaseClassFamily(uint classId, uint jobId)
+    {
+        var candidate = Definition(100, 20, 20, classId, jobId);
+        var baseline = Definition(200, 30, 30, classId, jobId);
+        var result = analyzer.Analyze(
+            candidate,
+            [Job(classId, 50, true), Job(jobId, 50, true, classId)],
+            [Gearset(1, jobId, 200)],
+            Definitions(candidate, baseline));
+
+        Assert.True(result.IsStrictlyObsolete);
+        var comparison = Assert.Single(result.Comparisons);
+        Assert.Equal(jobId, comparison.Job.ClassJobId);
+    }
+
     [Fact]
     public void UnknownUnlockState_PreventsObsoleteResult()
     {
@@ -84,8 +102,8 @@ public sealed class EquipmentUseAnalyzerTests
         Assert.Single(diagnostics.Blocking);
     }
 
-    private static CharacterJobSnapshot Job(uint id, uint level, bool? unlocked) =>
-        new(id, $"J{id}", $"Job {id}", level, unlocked, null, "Tank");
+    private static CharacterJobSnapshot Job(uint id, uint level, bool? unlocked, uint? parentId = null) =>
+        new(id, $"J{id}", $"Job {id}", level, unlocked, parentId, "Tank");
 
     private static GearsetSnapshot Gearset(int id, uint jobId, uint itemId) =>
         new(id, $"Set {id}", jobId, [new(EquipmentSlot.Body, itemId)], true);

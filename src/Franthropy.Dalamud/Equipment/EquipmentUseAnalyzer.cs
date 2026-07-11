@@ -33,15 +33,21 @@ public sealed class EquipmentUseAnalyzer
         IReadOnlyList<GearsetSnapshot> gearsets,
         IReadOnlyDictionary<uint, EquipmentItemDefinition> definitions)
     {
-        var eligibleJobs = jobs.Where(job => candidate.EligibleClassJobIds.Contains(job.ClassJobId)).ToArray();
-        if (eligibleJobs.Any(job => job.IsUnlocked is null))
+        var eligibleFamilies = jobs
+            .Where(job => candidate.EligibleClassJobIds.Contains(job.ClassJobId))
+            .GroupBy(job => job.ParentClassJobId ?? job.ClassJobId)
+            .Select(group => group.ToArray())
+            .ToArray();
+        if (eligibleFamilies.Any(family => !family.Any(job => job.IsUnlocked == true) && family.Any(job => job.IsUnlocked is null)))
             return new EquipmentUseAnalysis(EquipmentUseStatus.UnknownJobUnlockState, []);
 
-        var unlockedJobs = eligibleJobs.Where(job => job.IsUnlocked == true).ToArray();
-        if (unlockedJobs.Length == 0)
+        var unlockedFamilies = eligibleFamilies
+            .Where(family => family.Any(job => job.IsUnlocked == true))
+            .ToArray();
+        if (unlockedFamilies.Length == 0)
             return new EquipmentUseAnalysis(EquipmentUseStatus.NoUnlockedEligibleJob, []);
 
-        var comparisons = unlockedJobs.Select(job => Compare(candidate, job, gearsets, definitions)).ToArray();
+        var comparisons = unlockedFamilies.Select(family => Compare(candidate, family, gearsets, definitions)).ToArray();
         var overall = comparisons.All(comparison => comparison.Status == EquipmentUseStatus.Obsolete)
             ? EquipmentUseStatus.Obsolete
             : comparisons.First(comparison => comparison.Status != EquipmentUseStatus.Obsolete).Status;
@@ -50,15 +56,21 @@ public sealed class EquipmentUseAnalyzer
 
     private static EquipmentJobComparison Compare(
         EquipmentItemDefinition candidate,
-        CharacterJobSnapshot job,
+        IReadOnlyList<CharacterJobSnapshot> family,
         IReadOnlyList<GearsetSnapshot> gearsets,
         IReadOnlyDictionary<uint, EquipmentItemDefinition> definitions)
     {
+        var unlocked = family.Where(job => job.IsUnlocked == true).ToArray();
+        var job = unlocked
+            .OrderByDescending(value => value.ParentClassJobId.HasValue)
+            .ThenByDescending(value => value.Level)
+            .First();
         if (job.Level < candidate.EquipLevel)
             return new EquipmentJobComparison(job, EquipmentUseStatus.FutureUse, null, []);
 
+        var familyIds = family.Select(value => value.ClassJobId).ToHashSet();
         var contributing = gearsets
-            .Where(gearset => gearset.IsValid && gearset.ClassJobId == job.ClassJobId)
+            .Where(gearset => gearset.IsValid && familyIds.Contains(gearset.ClassJobId))
             .Where(gearset => gearset.Items.Any(item => item.Slot == candidate.Slot))
             .ToArray();
 
@@ -68,7 +80,7 @@ public sealed class EquipmentUseAnalyzer
             .Where(definition => definition is not null)
             .Cast<EquipmentItemDefinition>()
             .Where(definition => definition.Slot == candidate.Slot)
-            .Where(definition => definition.EligibleClassJobIds.Contains(job.ClassJobId))
+            .Where(definition => definition.EligibleClassJobIds.Overlaps(familyIds))
             .OrderByDescending(definition => definition.ItemLevel)
             .ToArray();
 
@@ -82,4 +94,3 @@ public sealed class EquipmentUseAnalyzer
         return new EquipmentJobComparison(job, status, best, contributing);
     }
 }
-
