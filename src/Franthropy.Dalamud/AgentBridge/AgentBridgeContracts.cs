@@ -17,6 +17,7 @@ public sealed record AgentBridgeRequest
     public string? Token { get; init; }
     public string? Command { get; init; }
     public string? Target { get; init; }
+    public long? FrameId { get; init; }
     public bool FullViewport { get; init; }
 }
 
