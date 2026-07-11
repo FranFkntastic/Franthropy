@@ -60,7 +60,19 @@ public sealed class DalamudDesynthesisUiTransaction
         var button = FindButton(dialog, ConfirmButton);
         if (button is null || !button->IsEnabled)
             return DalamudUiTransactionResult.Pending("Waiting for the visible Desynthesize button to become unambiguous and enabled.");
-        button->ClickAddonButton(dialog);
+        try
+        {
+            button->ClickAddonButton(dialog);
+        }
+        catch (NullReferenceException)
+        {
+            // Some addons synchronously destroy their button tree while ECommons is still
+            // unwinding the normal UI click. A vanished dialog is positive evidence that the
+            // callback was dispatched; a still-visible dialog is not.
+            var afterClick = gameGui.GetAddonByName<AtkUnitBase>("SalvageDialog", 1);
+            if (afterClick != null && afterClick->IsVisible)
+                return DalamudUiTransactionResult.Fail("ConfirmationClickFailed", "The Desynthesize click faulted while its dialog remained visible.");
+        }
         return DalamudUiTransactionResult.Completed("ConfirmationSubmitted", "Clicked the visible Desynthesize button through the addon UI.");
     }
 
