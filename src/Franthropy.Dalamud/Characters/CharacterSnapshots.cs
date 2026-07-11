@@ -18,7 +18,9 @@ public sealed record CharacterJobSnapshot(
     uint Level,
     bool? IsUnlocked,
     uint? ParentClassJobId,
-    string? Role);
+    string? Role,
+    Equipment.EquipmentStatSemantic? PrimaryStat = null,
+    Equipment.EquipmentDiscipline Discipline = Equipment.EquipmentDiscipline.Unknown);
 
 public enum SnapshotComponentStatus
 {

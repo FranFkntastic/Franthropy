@@ -19,6 +19,34 @@ public enum EquipmentSlot
     SoulCrystal,
 }
 
+public enum EquipmentStatSemantic
+{
+    Unknown,
+    Strength, Dexterity, Vitality, Intelligence, Mind,
+    CriticalHit, Determination, DirectHit, SkillSpeed, SpellSpeed, Tenacity, Piety,
+    Craftsmanship, Control, CraftingPoints, Gathering, Perception, GatheringPoints,
+    PhysicalDamage, MagicalDamage, PhysicalDefense, MagicalDefense,
+    PiercingResistance,
+}
+
+public enum EquipmentDiscipline { Unknown, Combat, Crafter, Gatherer }
+public enum EquipmentRarity { Unknown, Normal, Uncommon, Rare, Relic }
+public enum ExpertDeliveryEligibility { Unknown, Ineligible, Eligible }
+
+public sealed record EquipmentStatValue(uint BaseParamId, EquipmentStatSemantic Semantic, int Value, bool IsSpecial, string? SourceName = null);
+
+public sealed record EquipmentStatProfile(
+    IReadOnlyList<EquipmentStatValue> Parameters,
+    int PhysicalDamage,
+    int MagicalDamage,
+    int PhysicalDefense,
+    int MagicalDefense,
+    bool IsComplete)
+{
+    public bool HasFunctionalStats => Parameters.Any(value => value.Value > 0) ||
+        PhysicalDamage > 0 || MagicalDamage > 0 || PhysicalDefense > 0 || MagicalDefense > 0;
+}
+
 public sealed record EquipmentInstanceFingerprint(
     CharacterScope Character,
     string Container,
@@ -54,7 +82,11 @@ public sealed record EquipmentItemDefinition(
     bool? IsDiscardable,
     bool? IsArmoireEligible,
     bool? IsRecoverable,
-    bool IsExplicitlyProtectedFamily);
+    bool IsExplicitlyProtectedFamily,
+    EquipmentStatProfile? StatProfile = null,
+    EquipmentRarity NormalizedRarity = EquipmentRarity.Unknown,
+    ExpertDeliveryEligibility ExpertDeliveryEligibility = ExpertDeliveryEligibility.Unknown,
+    string? ExpertDeliveryProvenance = null);
 
 public sealed record GearsetItemReference(EquipmentSlot Slot, uint ItemId);
 

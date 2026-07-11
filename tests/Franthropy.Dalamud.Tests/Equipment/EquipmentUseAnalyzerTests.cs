@@ -50,7 +50,8 @@ public sealed class EquipmentUseAnalyzerTests
     {
         var candidate = Definition(100, 20, 20, 1);
         var result = analyzer.Analyze(candidate, [Job(1, 50, true)], [], Definitions(candidate));
-        Assert.Equal(EquipmentUseStatus.MissingBaseline, result.Status);
+        Assert.Equal(EquipmentUseStatus.EvaluationFailure, result.Status);
+        Assert.Equal("JobComparisonFailed", result.FailureCode);
     }
 
     [Theory]
@@ -76,7 +77,42 @@ public sealed class EquipmentUseAnalyzerTests
     {
         var candidate = Definition(100, 20, 20, 1);
         var result = analyzer.Analyze(candidate, [Job(1, 50, null)], [], Definitions(candidate));
-        Assert.Equal(EquipmentUseStatus.UnknownJobUnlockState, result.Status);
+        Assert.Equal(EquipmentUseStatus.EvaluationFailure, result.Status);
+        Assert.Equal("JobUnlockStateUnavailable", result.FailureCode);
+    }
+
+    [Fact]
+    public void UnobtainedEligibleFamily_IsNotAConsumer()
+    {
+        var candidate = Definition(100, 20, 20, 1);
+        var result = analyzer.Analyze(candidate, [Job(1, 50, false)], [], Definitions(candidate));
+        Assert.Equal(EquipmentUseStatus.NoObtainedEligibleJob, result.Status);
+    }
+
+    [Fact]
+    public void StatRegression_PreventsItemLevelFromProvingObsolescence()
+    {
+        var candidate = Definition(100, 20, 20, 1) with
+        {
+            StatProfile = new EquipmentStatProfile([new(1, EquipmentStatSemantic.Strength, 25, false)], 0, 0, 20, 20, true),
+        };
+        var baseline = Definition(200, 30, 30, 1) with
+        {
+            StatProfile = new EquipmentStatProfile([new(1, EquipmentStatSemantic.Strength, 24, false)], 0, 0, 30, 30, true),
+        };
+        var result = analyzer.Analyze(candidate, [Job(1, 50, true)], [Gearset(1, 1, 200)], Definitions(candidate, baseline));
+        Assert.Equal(EquipmentUseStatus.BaselineNotBetter, result.Status);
+    }
+
+    [Fact]
+    public void StatlessAllClassesEquipment_IsLikelyCosmetic()
+    {
+        var candidate = Definition(100, 1, 1, 1, 2) with
+        {
+            StatProfile = new EquipmentStatProfile([], 0, 0, 0, 0, true),
+        };
+        var result = analyzer.Analyze(candidate, [Job(1, 50, true), Job(2, 50, true)], [], Definitions(candidate));
+        Assert.Equal(EquipmentUseStatus.LikelyCosmetic, result.Status);
     }
 
     [Fact]
@@ -103,7 +139,7 @@ public sealed class EquipmentUseAnalyzerTests
     }
 
     private static CharacterJobSnapshot Job(uint id, uint level, bool? unlocked, uint? parentId = null) =>
-        new(id, $"J{id}", $"Job {id}", level, unlocked, parentId, "Tank");
+        new(id, $"J{id}", $"Job {id}", level, unlocked, parentId, "Tank", EquipmentStatSemantic.Strength, EquipmentDiscipline.Combat);
 
     private static GearsetSnapshot Gearset(int id, uint jobId, uint itemId) =>
         new(id, $"Set {id}", jobId, [new(EquipmentSlot.Body, itemId)], true);
@@ -129,7 +165,11 @@ public sealed class EquipmentUseAnalyzerTests
             IsDiscardable: true,
             IsArmoireEligible: false,
             IsRecoverable: true,
-            IsExplicitlyProtectedFamily: false);
+            IsExplicitlyProtectedFamily: false,
+            StatProfile: new EquipmentStatProfile(
+                [new(1, EquipmentStatSemantic.Strength, checked((int)itemLevel), false)],
+                checked((int)itemLevel), 0, checked((int)itemLevel), checked((int)itemLevel), true),
+            NormalizedRarity: EquipmentRarity.Normal);
 
     private static IReadOnlyDictionary<uint, EquipmentItemDefinition> Definitions(params EquipmentItemDefinition[] values) =>
         values.ToDictionary(value => value.ItemId);
