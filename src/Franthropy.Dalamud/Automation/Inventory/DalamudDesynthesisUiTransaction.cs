@@ -59,7 +59,7 @@ public sealed class DalamudDesynthesisUiTransaction
             return menuSelectionSubmitted ? DalamudUiTransactionResult.Pending("Waiting for SalvageDialog.") : SelectDesynthesis(fingerprint);
         var button = FindButton(dialog, ConfirmButton);
         if (button is null || !button->IsEnabled)
-            return DalamudUiTransactionResult.Fail("ConfirmationUnavailable", "The visible Desynthesize button is unavailable or ambiguous.");
+            return DalamudUiTransactionResult.Pending("Waiting for the visible Desynthesize button to become unambiguous and enabled.");
         button->ClickAddonButton(dialog);
         return DalamudUiTransactionResult.Completed("ConfirmationSubmitted", "Clicked the visible Desynthesize button through the addon UI.");
     }
