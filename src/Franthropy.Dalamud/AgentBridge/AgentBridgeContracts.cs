@@ -19,7 +19,16 @@ public sealed record AgentBridgeRequest
     public string? Target { get; init; }
     public long? FrameId { get; init; }
     public bool FullViewport { get; init; }
+    public string? TransactionId { get; init; }
 }
+
+public sealed record AgentBridgeUiCaptureTransactionReceipt(
+    string TransactionId,
+    string Target,
+    long FrameId,
+    DateTimeOffset RequestedAtUtc,
+    DateTimeOffset ReadyAtUtc,
+    DateTimeOffset ExpiresAtUtc);
 
 public sealed record AgentBridgeResponse
 {
