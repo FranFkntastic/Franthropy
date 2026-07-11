@@ -1,8 +1,9 @@
 using System.Collections.Generic;
 using System.Linq;
 using Dalamud.Plugin.Services;
+using Dalamud.Utility;
+using ECommons.Automation.UIInput;
 using FFXIVClientStructs.FFXIV.Client.Game;
-using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Franthropy.Dalamud.Equipment;
@@ -21,17 +22,25 @@ public sealed class DalamudDesynthesisUiTransaction
     private static readonly DalamudContextMenuOptionSpec DesynthesisOption = new(
         "Desynthesis",
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Desynthesis", "Desynthesize" });
+    private static readonly DalamudContextMenuOptionSpec ConfirmButton = new(
+        "ConfirmDesynthesis",
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Desynthesize", "Desynthesis" });
+    private static readonly DalamudContextMenuOptionSpec CancelButton = new(
+        "Cancel",
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Cancel" });
     private readonly IGameGui gameGui;
     private bool ownsUi;
     private bool menuSelectionSubmitted;
+
+    public bool MenuSelectionSubmitted => menuSelectionSubmitted;
 
     public DalamudDesynthesisUiTransaction(IGameGui gameGui) => this.gameGui = gameGui;
 
     public unsafe DalamudUiTransactionResult Begin(EquipmentInstanceFingerprint fingerprint)
     {
-        var dialog = gameGui.GetAddonByName<AddonSalvageDialog>("SalvageDialog", 1);
+        var dialog = gameGui.GetAddonByName<AtkUnitBase>("SalvageDialog", 1);
         var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
-        if ((dialog != null && dialog->AtkUnitBase.IsVisible) || (menu != null && menu->IsVisible))
+        if ((dialog != null && dialog->IsVisible) || (menu != null && menu->IsVisible))
             return DalamudUiTransactionResult.Fail("ConflictingUi", "Desynthesis or item context UI is already visible.");
         var opened = OpenExactSlotContextMenu(fingerprint);
         if (!opened.Success)
@@ -45,20 +54,14 @@ public sealed class DalamudDesynthesisUiTransaction
     {
         if (!ownsUi)
             return DalamudUiTransactionResult.Fail("UiOwnershipLost", "The desynthesis UI transaction is not owned.");
-        var dialog = gameGui.GetAddonByName<AddonSalvageDialog>("SalvageDialog", 1);
-        if (dialog == null || !dialog->AtkUnitBase.IsVisible)
+        var dialog = gameGui.GetAddonByName<AtkUnitBase>("SalvageDialog", 1);
+        if (dialog == null || !dialog->IsVisible)
             return menuSelectionSubmitted ? DalamudUiTransactionResult.Pending("Waiting for SalvageDialog.") : SelectDesynthesis(fingerprint);
-
-        var salvage = AgentSalvage.Instance();
-        var dialogItemId = salvage == null ? 0 : NormalizeItemId(salvage->DesynthItemId);
-        var dialogSlotItemId = salvage == null ? 0 : NormalizeItemId(salvage->DesynthItemSlot.ItemId);
-        if (salvage == null || dialogItemId != fingerprint.ItemId || dialogSlotItemId != fingerprint.ItemId)
-            return DalamudUiTransactionResult.Fail(
-                "UnexpectedConfirmation",
-                $"SalvageDialog item identity mismatch: expected={fingerprint.ItemId}, dialog={dialogItemId}, slot={dialogSlotItemId}.");
-        if (dialog->DesynthesizeButton == null || !dialog->DesynthesizeButton->IsEnabled)
-            return DalamudUiTransactionResult.Fail("ConfirmationUnavailable", "The desynthesis button is unavailable.");
-        return DalamudUiTransactionResult.Completed("ConfirmationReady", "The visible desynthesis confirmation identifies the expected item and is enabled.");
+        var button = FindButton(dialog, ConfirmButton);
+        if (button is null || !button->IsEnabled)
+            return DalamudUiTransactionResult.Fail("ConfirmationUnavailable", "The visible Desynthesize button is unavailable or ambiguous.");
+        button->ClickAddonButton(dialog);
+        return DalamudUiTransactionResult.Completed("ConfirmationSubmitted", "Clicked the visible Desynthesize button through the addon UI.");
     }
 
     public void Complete()
@@ -80,9 +83,13 @@ public sealed class DalamudDesynthesisUiTransaction
         var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
         if (menu != null && menu->IsVisible)
             menu->Close(true);
-        var dialog = gameGui.GetAddonByName<AddonSalvageDialog>("SalvageDialog", 1);
-        if (dialog != null && dialog->AtkUnitBase.IsVisible)
-            dialog->AtkUnitBase.Close(true);
+        var dialog = gameGui.GetAddonByName<AtkUnitBase>("SalvageDialog", 1);
+        if (dialog != null && dialog->IsVisible)
+        {
+            var cancel = FindButton(dialog, CancelButton);
+            if (cancel is not null && cancel->IsEnabled)
+                cancel->ClickAddonButton(dialog);
+        }
     }
 
     public unsafe DalamudUiTransactionResult OpenExactSlotContextMenu(EquipmentInstanceFingerprint fingerprint)
@@ -158,5 +165,21 @@ public sealed class DalamudDesynthesisUiTransaction
         return labels;
     }
 
-    public static uint NormalizeItemId(uint itemId) => itemId >= 1_000_000 ? itemId % 1_000_000 : itemId;
+    private static unsafe AtkComponentButton* FindButton(AtkUnitBase* addon, DalamudContextMenuOptionSpec option)
+    {
+        AtkComponentButton* match = null;
+        for (uint componentId = 1; componentId <= 100; componentId++)
+        {
+            var button = addon->GetComponentButtonById(componentId);
+            if (button == null || button->ButtonTextNode == null)
+                continue;
+            var label = button->ButtonTextNode->NodeText.ExtractText();
+            if (!DalamudContextMenuOptionParser.Find([label], option).Success)
+                continue;
+            if (match != null)
+                return null;
+            match = button;
+        }
+        return match;
+    }
 }

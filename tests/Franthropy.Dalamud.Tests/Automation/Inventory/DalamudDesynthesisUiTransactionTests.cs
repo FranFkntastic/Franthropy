@@ -28,11 +28,4 @@ public sealed class DalamudDesynthesisUiTransactionTests
         Assert.Equal("OptionMissing", result.Code);
     }
 
-    [Theory]
-    [InlineData(2406, 2406)]
-    [InlineData(1002406, 2406)]
-    public void NormalizeItemId_RemovesGameQualityOffset(uint observed, uint expected)
-    {
-        Assert.Equal(expected, DalamudDesynthesisUiTransaction.NormalizeItemId(observed));
-    }
 }
