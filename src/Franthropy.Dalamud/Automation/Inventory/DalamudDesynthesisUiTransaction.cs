@@ -18,6 +18,9 @@ public sealed record DalamudUiTransactionResult(bool Success, string Code, strin
 
 public sealed class DalamudDesynthesisUiTransaction
 {
+    private static readonly DalamudContextMenuOptionSpec DesynthesisOption = new(
+        "Desynthesis",
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Desynthesis", "Desynthesize" });
     private readonly IGameGui gameGui;
     private bool ownsUi;
     private bool menuSelectionSubmitted;
@@ -110,14 +113,6 @@ public sealed class DalamudDesynthesisUiTransaction
         return $"target={agent->TargetInventoryId}:{agent->TargetInventorySlotId}; {string.Join(" | ", entries)}";
     }
 
-    public static int FindDesynthesisEntry(IReadOnlyList<string> labels)
-    {
-        for (var index = 0; index < labels.Count; index++)
-            if (labels[index].Equals("Desynthesis", StringComparison.OrdinalIgnoreCase) || labels[index].Equals("Desynthesize", StringComparison.OrdinalIgnoreCase))
-                return index;
-        return -1;
-    }
-
     private unsafe DalamudUiTransactionResult SelectDesynthesis(EquipmentInstanceFingerprint fingerprint)
     {
         var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
@@ -128,8 +123,13 @@ public sealed class DalamudDesynthesisUiTransaction
         var agent = AgentInventoryContext.Instance();
         if (agent == null || agent->TargetInventoryId != inventoryType || agent->TargetInventorySlotId != fingerprint.SlotIndex)
             return DalamudUiTransactionResult.Fail("UnexpectedContextMenu", "The visible context menu targets a different slot.");
-        var index = FindDesynthesisEntry(ReadLabels(agent));
-        if (index < 0 || index >= agent->ContextItemCount)
+        var match = DalamudContextMenuOptionParser.Find(ReadLabels(agent), DesynthesisOption);
+        if (!match.Success)
+            return DalamudUiTransactionResult.Fail(
+                match.Code == "OptionAmbiguous" ? "DesynthesisEntryAmbiguous" : "DesynthesisEntryUnavailable",
+                match.Code == "OptionAmbiguous" ? "Multiple context-menu entries matched Desynthesis." : "The exact slot's context menu does not offer Desynthesis.");
+        var index = match.Index;
+        if (index >= agent->ContextItemCount)
             return DalamudUiTransactionResult.Fail("DesynthesisEntryUnavailable", "The exact slot's context menu does not offer Desynthesis.");
         if (agent->IsContextItemDisabled(index))
             return DalamudUiTransactionResult.Fail("DesynthesisEntryDisabled", "The Desynthesis entry is disabled.");
