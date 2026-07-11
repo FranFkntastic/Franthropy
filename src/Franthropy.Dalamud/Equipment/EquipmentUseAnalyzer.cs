@@ -62,7 +62,7 @@ public sealed class EquipmentUseAnalyzer
     {
         var unlocked = family.Where(job => job.IsUnlocked == true).ToArray();
         var job = unlocked
-            .OrderByDescending(value => value.ParentClassJobId.HasValue)
+            .OrderByDescending(value => value.ParentClassJobId is not null && value.ParentClassJobId != value.ClassJobId)
             .ThenByDescending(value => value.Level)
             .First();
         if (job.Level < candidate.EquipLevel)

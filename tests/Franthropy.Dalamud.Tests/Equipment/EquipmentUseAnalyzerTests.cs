@@ -62,7 +62,7 @@ public sealed class EquipmentUseAnalyzerTests
         var baseline = Definition(200, 30, 30, classId, jobId);
         var result = analyzer.Analyze(
             candidate,
-            [Job(classId, 50, true), Job(jobId, 50, true, classId)],
+            [Job(classId, 50, true, classId), Job(jobId, 50, true, classId)],
             [Gearset(1, jobId, 200)],
             Definitions(candidate, baseline));
 
