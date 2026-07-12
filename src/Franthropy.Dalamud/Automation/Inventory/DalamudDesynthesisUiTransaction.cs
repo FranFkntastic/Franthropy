@@ -75,6 +75,13 @@ public sealed class DalamudDesynthesisUiTransaction
         stableMenuMisses = 0;
     }
 
+    public unsafe bool IsUiSettled()
+    {
+        var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
+        var dialog = gameGui.GetAddonByName<AtkUnitBase>("SalvageDialog", 1);
+        return (menu == null || !menu->IsVisible) && (dialog == null || !dialog->IsVisible);
+    }
+
     public unsafe void CloseOwnedUi()
     {
         if (!ownsUi)
