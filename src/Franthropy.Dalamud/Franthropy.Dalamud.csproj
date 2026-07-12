@@ -54,6 +54,7 @@
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
     <Compile Remove="Automation\Inventory\DalamudDesynthesisUiTransaction.cs" />
+    <Compile Remove="Automation\Inventory\DalamudExpertDeliveryUiTransaction.cs" />
   </ItemGroup>
 
 </Project>
