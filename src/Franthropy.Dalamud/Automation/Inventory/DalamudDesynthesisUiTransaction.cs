@@ -136,6 +136,27 @@ public sealed class DalamudDesynthesisUiTransaction
         return $"target={agent->TargetInventoryId}:{agent->TargetInventorySlotId}; {string.Join(" | ", entries)}";
     }
 
+    public unsafe DalamudUiTransactionResult ProbeContextMenu(EquipmentInstanceFingerprint fingerprint)
+    {
+        if (!Enum.TryParse<InventoryType>(fingerprint.Container, out var inventoryType))
+            return DalamudUiTransactionResult.Fail("UnsupportedContainer", $"Inventory container {fingerprint.Container} is not recognized.");
+        var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
+        var agent = AgentInventoryContext.Instance();
+        if (menu == null || !menu->IsReady || !menu->IsVisible || agent == null)
+            return DalamudUiTransactionResult.Pending("Waiting for the exact slot's context menu.");
+        if (agent->TargetInventoryId != inventoryType || agent->TargetInventorySlotId != fingerprint.SlotIndex)
+            return DalamudUiTransactionResult.Fail("UnexpectedContextMenu", "The visible context menu targets a different slot.");
+        var labels = ReadLabels(agent);
+        var match = DalamudContextMenuOptionParser.Find(labels, DesynthesisOption);
+        if (!match.Success)
+            return match.Code == "OptionAmbiguous"
+                ? DalamudUiTransactionResult.Fail("DesynthesisEntryAmbiguous", "Multiple context-menu entries matched Desynthesis.")
+                : DalamudUiTransactionResult.Pending("Waiting for stable Desynthesis context-menu labels.");
+        if (match.Index >= agent->ContextItemCount || agent->IsContextItemDisabled(match.Index))
+            return DalamudUiTransactionResult.Fail("DesynthesisEntryDisabled", "The Desynthesis entry is unavailable or disabled.");
+        return DalamudUiTransactionResult.Completed("DesynthesisProbePassed", "The exact item's normal context menu offers an enabled Desynthesis command.");
+    }
+
     private unsafe DalamudUiTransactionResult SelectDesynthesis(EquipmentInstanceFingerprint fingerprint)
     {
         var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);

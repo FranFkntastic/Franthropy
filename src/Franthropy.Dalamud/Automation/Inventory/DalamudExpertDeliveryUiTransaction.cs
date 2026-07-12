@@ -27,17 +27,9 @@ public sealed class DalamudExpertDeliveryUiTransaction
     {
         if (ownsUi)
             return DalamudUiTransactionResult.Fail("ExpertDeliveryAlreadyOwned", "An Expert Delivery transaction is already active.");
-        var list = gameGui.GetAddonByName<AtkUnitBase>("GrandCompanySupplyList", 1);
-        if (list == null || !list->IsReady || !list->IsVisible ||
-            list->UldManager.NodeListCount <= 24 || list->UldManager.SearchNodeById(24) == null ||
-            !list->UldManager.SearchNodeById(24)->IsVisible())
-            return DalamudUiTransactionResult.Fail("ExpertDeliveryListUnavailable", "Open the Grand Company Expert Delivery list before starting the run.");
-        var entries = ReadEntries(list);
-        var resolution = ExpertDeliverySelection.SelectExactItem(fingerprint.ItemId, entries, out var selected);
-        if (!resolution.Success || selected is null)
-            return resolution;
-        if (maximumSeals <= currentSeals || selected.Seals > maximumSeals - currentSeals)
-            return DalamudUiTransactionResult.Fail("ExpertDeliverySealCap", "This delivery would exceed the current company-seal capacity.");
+        var probe = Probe(fingerprint, currentSeals, maximumSeals, out var list, out var selected);
+        if (!probe.Success || list == null || selected is null)
+            return probe;
         var values = stackalloc AtkValue[3];
         values[0] = new() { Type = AtkValueType.Int, Int = 1 };
         values[1] = new() { Type = AtkValueType.Int, Int = selected.Index };
@@ -49,6 +41,31 @@ public sealed class DalamudExpertDeliveryUiTransaction
         rewardSubmitted = false;
         secondarySubmitted = false;
         return DalamudUiTransactionResult.Completed("ExpertDeliveryRowSubmitted", "Selected the approved item through the visible Expert Delivery list.");
+    }
+
+    public unsafe DalamudUiTransactionResult Probe(EquipmentInstanceFingerprint fingerprint, uint currentSeals, uint maximumSeals)
+        => Probe(fingerprint, currentSeals, maximumSeals, out _, out _);
+
+    private unsafe DalamudUiTransactionResult Probe(
+        EquipmentInstanceFingerprint fingerprint,
+        uint currentSeals,
+        uint maximumSeals,
+        out AtkUnitBase* list,
+        out ExpertDeliveryListEntry? selected)
+    {
+        list = gameGui.GetAddonByName<AtkUnitBase>("GrandCompanySupplyList", 1);
+        selected = null;
+        if (list == null || !list->IsReady || !list->IsVisible ||
+            list->UldManager.NodeListCount <= 24 || list->UldManager.SearchNodeById(24) == null ||
+            !list->UldManager.SearchNodeById(24)->IsVisible())
+            return DalamudUiTransactionResult.Fail("ExpertDeliveryListUnavailable", "Open the Grand Company Expert Delivery list before starting the run.");
+        var entries = ReadEntries(list);
+        var resolution = ExpertDeliverySelection.SelectExactItem(fingerprint.ItemId, entries, out selected);
+        if (!resolution.Success || selected is null)
+            return resolution;
+        if (maximumSeals <= currentSeals || selected.Seals > maximumSeals - currentSeals)
+            return DalamudUiTransactionResult.Fail("ExpertDeliverySealCap", "This delivery would exceed the current company-seal capacity.");
+        return DalamudUiTransactionResult.Completed("ExpertDeliveryProbePassed", "The exact item is visible and can be delivered without exceeding the company-seal cap.");
     }
 
     public unsafe DalamudUiTransactionResult Advance()
