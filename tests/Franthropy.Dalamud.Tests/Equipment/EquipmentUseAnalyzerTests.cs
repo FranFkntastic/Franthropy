@@ -138,6 +138,58 @@ public sealed class EquipmentUseAnalyzerTests
         Assert.Single(diagnostics.Blocking);
     }
 
+    [Fact]
+    public void LooseOwnedItem_CanProveCandidateObsolete()
+    {
+        var candidate = Definition(100, 20, 20, 1);
+        var upgrade = Definition(200, 30, 30, 1);
+        var candidateInstance = Instance(100, "Inventory1", 1);
+        var upgradeInstance = Instance(200, "ArmoryBody", 2);
+
+        var result = analyzer.Analyze(candidateInstance, candidate, [Job(1, 50, true)], [],
+            [candidateInstance, upgradeInstance], Definitions(candidate, upgrade));
+
+        Assert.True(result.IsStrictlyObsolete);
+        var witness = Assert.Single(Assert.Single(result.Comparisons).WitnessRequirement!.ViableWitnesses);
+        Assert.Equal(upgradeInstance.Fingerprint, witness.Fingerprint);
+        Assert.False(witness.IsGearsetReferenced);
+    }
+
+    [Fact]
+    public void HighQualityWitness_UsesExactSpecialProfile()
+    {
+        var candidate = Definition(100, 20, 25, 1);
+        var hqUpgrade = Definition(200, 20, 20, 1) with
+        {
+            HighQualityStatProfile = new EquipmentStatProfile(
+                [new(1, EquipmentStatSemantic.Strength, 30, true)], 30, 0, 30, 30, true),
+        };
+        var candidateInstance = Instance(100, "Inventory1", 1);
+        var hqInstance = Instance(200, "Inventory1", 2, highQuality: true);
+
+        var result = analyzer.Analyze(candidateInstance, candidate, [Job(1, 50, true)], [],
+            [candidateInstance, hqInstance], Definitions(candidate, hqUpgrade));
+
+        Assert.True(result.IsStrictlyObsolete);
+        Assert.Equal(30, Assert.Single(result.Comparisons).WitnessRequirement!.ViableWitnesses[0]
+            .EffectiveStatProfile.Parameters.Single().Value);
+    }
+
+    [Fact]
+    public void RingRequiresTwoJointlyFeasibleDominatingInstances()
+    {
+        var candidate = Definition(100, 20, 20, 1) with { Slot = EquipmentSlot.Ring };
+        var upgrade = Definition(200, 30, 30, 1) with { Slot = EquipmentSlot.Ring, IsUnique = true };
+        var candidateInstance = Instance(100, "Inventory1", 1);
+        var first = Instance(200, "Inventory1", 2);
+        var second = Instance(200, "Inventory1", 3);
+
+        var result = analyzer.Analyze(candidateInstance, candidate, [Job(1, 50, true)], [],
+            [candidateInstance, first, second], Definitions(candidate, upgrade));
+
+        Assert.Equal(EquipmentUseStatus.BaselineNotBetter, result.Status);
+    }
+
     private static CharacterJobSnapshot Job(uint id, uint level, bool? unlocked, uint? parentId = null) =>
         new(id, $"J{id}", $"Job {id}", level, unlocked, parentId, "Tank", EquipmentStatSemantic.Strength, EquipmentDiscipline.Combat);
 
@@ -174,9 +226,9 @@ public sealed class EquipmentUseAnalyzerTests
     private static IReadOnlyDictionary<uint, EquipmentItemDefinition> Definitions(params EquipmentItemDefinition[] values) =>
         values.ToDictionary(value => value.ItemId);
 
-    private static EquipmentInstanceSnapshot Instance(uint itemId, string container, int slot) =>
+    private static EquipmentInstanceSnapshot Instance(uint itemId, string container, int slot, bool highQuality = false) =>
         new(
-            new EquipmentInstanceFingerprint(Scope, container, slot, itemId, false, 1, 30000, 0, null, [], null, []),
+            new EquipmentInstanceFingerprint(Scope, container, slot, itemId, highQuality, 1, 30000, 0, null, [], null, []),
             DateTimeOffset.UtcNow,
             false);
 }

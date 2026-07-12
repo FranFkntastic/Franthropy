@@ -86,7 +86,38 @@ public sealed record EquipmentItemDefinition(
     EquipmentStatProfile? StatProfile = null,
     EquipmentRarity NormalizedRarity = EquipmentRarity.Unknown,
     ExpertDeliveryEligibility ExpertDeliveryEligibility = ExpertDeliveryEligibility.Unknown,
-    string? ExpertDeliveryProvenance = null);
+    string? ExpertDeliveryProvenance = null,
+    EquipmentStatProfile? HighQualityStatProfile = null,
+    bool IsUnique = false,
+    uint EquipSlotCategoryId = 0,
+    sbyte MainHandOccupancy = 0,
+    sbyte OffHandOccupancy = 0,
+    bool FitsLeftRing = true,
+    bool FitsRightRing = true);
+
+public sealed record EquipmentDominanceWitness(
+    EquipmentInstanceFingerprint Fingerprint,
+    uint ItemId,
+    string ItemName,
+    EquipmentStatProfile EffectiveStatProfile,
+    bool IsGearsetReferenced);
+
+public sealed record EquipmentWitnessRequirement(
+    CharacterJobSnapshot Job,
+    EquipmentSlot Slot,
+    int RequiredCount,
+    IReadOnlyList<EquipmentDominanceWitness> ViableWitnesses,
+    string? Diagnostic = null);
+
+public static class EquipmentInstanceStats
+{
+    public static EquipmentStatProfile? Resolve(
+        EquipmentInstanceSnapshot instance,
+        EquipmentItemDefinition definition) =>
+        instance.Fingerprint.IsHighQuality
+            ? definition.HighQualityStatProfile
+            : definition.StatProfile;
+}
 
 public sealed record GearsetItemReference(EquipmentSlot Slot, uint ItemId);
 
