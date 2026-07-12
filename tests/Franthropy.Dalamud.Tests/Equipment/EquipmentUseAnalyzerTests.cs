@@ -5,6 +5,43 @@ namespace Franthropy.Dalamud.Tests.Equipment;
 
 public sealed class EquipmentUseAnalyzerTests
 {
+    [Fact]
+    public void Analyze_IgnoresIncompleteProspectiveWitnessWhenCompleteWitnessExists()
+    {
+        var candidate = Definition(100, 10, 5, 1) with
+        {
+            Slot = EquipmentSlot.Ring,
+            FitsLeftRing = true,
+            FitsRightRing = true,
+        };
+        var incomplete = Definition(101, 10, 10, 1) with
+        {
+            Slot = EquipmentSlot.Ring,
+            StatProfile = Definition(101, 10, 10, 1).StatProfile! with { IsComplete = false },
+            FitsLeftRing = true,
+            FitsRightRing = true,
+        };
+        var first = Definition(102, 10, 10, 1) with
+        {
+            Slot = EquipmentSlot.Ring,
+            FitsLeftRing = true,
+            FitsRightRing = true,
+        };
+        var second = Definition(103, 10, 11, 1) with
+        {
+            Slot = EquipmentSlot.Ring,
+            FitsLeftRing = true,
+            FitsRightRing = true,
+        };
+        var candidateInstance = Instance(100, "ArmoryRing", 0);
+        var result = new EquipmentUseAnalyzer().Analyze(candidateInstance, candidate, [Job(1, 50, true)], [],
+            [candidateInstance, Instance(101, "ArmoryRing", 1), Instance(102, "ArmoryRing", 2), Instance(103, "ArmoryRing", 3)],
+            new Dictionary<uint, EquipmentItemDefinition> { [100] = candidate, [101] = incomplete, [102] = first, [103] = second });
+
+        Assert.Equal(EquipmentUseStatus.Obsolete, result.Status);
+        Assert.DoesNotContain(result.Comparisons[0].WitnessRequirement!.ViableWitnesses, witness => witness.ItemId == 101);
+    }
+
     private static readonly CharacterScope Scope = new(1, "Tester", 21);
     private readonly EquipmentUseAnalyzer analyzer = new();
 

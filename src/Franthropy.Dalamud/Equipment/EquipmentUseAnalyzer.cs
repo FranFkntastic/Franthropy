@@ -143,6 +143,7 @@ public sealed class EquipmentUseAnalyzer
 
         var gearsetItemIds = contributing.SelectMany(set => set.Items.Where(item => item.Slot == candidate.Slot)).Select(item => item.ItemId).ToHashSet();
         var usable = new List<(EquipmentInstanceSnapshot Instance, EquipmentItemDefinition Definition, EquipmentStatProfile Stats, bool Gearset)>();
+        var incompleteWitnessNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var instance in ownedInstances)
         {
             if (instance.Fingerprint == candidateInstance.Fingerprint || instance.Fingerprint.MateriaIds.Count > 0)
@@ -159,11 +160,20 @@ public sealed class EquipmentUseAnalyzer
                 continue;
             var stats = EquipmentInstanceStats.Resolve(instance, definition);
             if (stats is not { IsComplete: true })
-                return new(job, EquipmentUseStatus.EvaluationFailure, null, contributing, $"Owned {definition.Name} has an incomplete quality-adjusted stat profile for {job.Abbreviation}.");
+            {
+                incompleteWitnessNames.Add(definition.Name);
+                continue;
+            }
             usable.Add((instance, definition, stats, gearsetItemIds.Contains(definition.ItemId)));
         }
         if (usable.Count == 0)
-            return new(job, EquipmentUseStatus.EvaluationFailure, null, contributing, $"No saved or owned usable {candidate.Slot} witness was found for {job.Abbreviation}.");
+        {
+            var excluded = incompleteWitnessNames.Count == 0
+                ? string.Empty
+                : $" Incomplete prospective witnesses excluded: {string.Join(", ", incompleteWitnessNames.Order())}.";
+            return new(job, EquipmentUseStatus.EvaluationFailure, null, contributing,
+                $"No saved or owned usable {candidate.Slot} witness was found for {job.Abbreviation}.{excluded}");
+        }
 
         var dominating = usable.Where(value => Dominates(value.Stats, candidateStats, relevant))
             .Select(value => new EquipmentDominanceWitness(value.Instance.Fingerprint, value.Definition.ItemId, value.Definition.Name, value.Stats, value.Gearset))
