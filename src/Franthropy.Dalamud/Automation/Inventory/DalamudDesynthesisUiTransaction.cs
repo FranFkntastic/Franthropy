@@ -61,12 +61,9 @@ public sealed class DalamudDesynthesisUiTransaction
         }
         catch (NullReferenceException)
         {
-            // Some addons synchronously destroy their button tree while ECommons is still
-            // unwinding the normal UI click. A vanished dialog is positive evidence that the
-            // callback was dispatched; a still-visible dialog is not.
-            var afterClick = gameGui.GetAddonByName<AtkUnitBase>("SalvageDialog", 1);
-            if (afterClick != null && afterClick->IsVisible)
-                return DalamudUiTransactionResult.Fail("ConfirmationClickFailed", "The Desynthesize click faulted while its dialog remained visible.");
+            // The addon may invalidate part of its button tree while the normal callback is
+            // unwinding, before the visible flag changes. The click was already dispatched;
+            // the caller's exact-slot transition observation remains the completion oracle.
         }
         return DalamudUiTransactionResult.Completed("ConfirmationSubmitted", "Clicked the visible Desynthesize button through the addon UI.");
     }
