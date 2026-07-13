@@ -4,7 +4,8 @@ namespace Franthropy.Dalamud.AgentBridge;
 
 /// <summary>
 /// Frame-bound registry for plugin-owned ImGui controls. Plugins register only controls that
-/// were actually rendered, and actions can be invoked only against the latest live surface.
+/// were actually rendered. Explicitly reviewed controls retain a short, one-use invocation lease
+/// so the next ImGui frame cannot invalidate an in-flight bridge request.
 /// </summary>
 public sealed class AgentBridgeUiReviewRegistry
 {
@@ -13,6 +14,7 @@ public sealed class AgentBridgeUiReviewRegistry
     private readonly TimeSpan validity;
     private Dictionary<string, Entry> pending = new(StringComparer.Ordinal);
     private Dictionary<string, Entry> current = new(StringComparer.Ordinal);
+    private readonly Dictionary<LeaseKey, ReviewedEntry> reviewed = [];
     private long frameId;
     private DateTimeOffset renderedAtUtc = DateTimeOffset.MinValue;
     private bool frameOpen;
@@ -77,7 +79,10 @@ public sealed class AgentBridgeUiReviewRegistry
     public AgentBridgeUiReviewFrame Snapshot()
     {
         lock (gate)
+        {
+            RetainReviewed(current);
             return CreateFrame();
+        }
     }
 
     /// <summary>
@@ -90,6 +95,9 @@ public sealed class AgentBridgeUiReviewRegistry
         lock (gate)
         {
             current.TryGetValue(id, out var entry);
+            if (entry is not null)
+                reviewed[new LeaseKey(frameId, id)] = new ReviewedEntry(entry, renderedAtUtc.Add(validity));
+            PruneExpiredReviews();
             return new AgentBridgeUiControlReview(
                 frameId,
                 renderedAtUtc,
@@ -104,20 +112,30 @@ public sealed class AgentBridgeUiReviewRegistry
         Action? action;
         lock (gate)
         {
-            if (frameOpen)
-                return AgentBridgeUiControlInvocation.Fail("The review surface is currently being rendered.", CreateFrame());
-            if (expectedFrameId != frameId)
-                return AgentBridgeUiControlInvocation.Fail("The requested control surface is stale. Refresh it and retry.", CreateFrame());
-            if (DateTimeOffset.UtcNow - renderedAtUtc > validity)
-                return AgentBridgeUiControlInvocation.Fail("The requested control surface has expired. Refresh it and retry.", CreateFrame());
-            if (!current.TryGetValue(id, out var entry))
-                return AgentBridgeUiControlInvocation.Fail("The requested control is not rendered.", CreateFrame());
+            PruneExpiredReviews();
+            Entry? entry;
+            if (reviewed.TryGetValue(new LeaseKey(expectedFrameId, id), out var retained))
+            {
+                entry = retained.Entry;
+            }
+            else
+            {
+                if (frameOpen)
+                    return AgentBridgeUiControlInvocation.Fail("The review surface is currently being rendered.", CreateFrame());
+                if (expectedFrameId != frameId)
+                    return AgentBridgeUiControlInvocation.Fail("The requested control surface is stale. Refresh it and retry.", CreateFrame());
+                if (DateTimeOffset.UtcNow - renderedAtUtc > validity)
+                    return AgentBridgeUiControlInvocation.Fail("The requested control surface has expired. Refresh it and retry.", CreateFrame());
+                if (!current.TryGetValue(id, out entry))
+                    return AgentBridgeUiControlInvocation.Fail("The requested control is not rendered.", CreateFrame());
+            }
             if (!entry.Control.Enabled)
                 return AgentBridgeUiControlInvocation.Fail("The requested control is disabled.", CreateFrame());
             action = entry.Invoke;
             // One invocation invalidates the reviewed surface immediately. The plugin must render a
             // new surface before any further action can be accepted, preventing duplicate/replayed clicks.
             current = new Dictionary<string, Entry>(StringComparer.Ordinal);
+            reviewed.Clear();
             frameId++;
             renderedAtUtc = DateTimeOffset.MinValue;
         }
@@ -138,12 +156,29 @@ public sealed class AgentBridgeUiReviewRegistry
         renderedAtUtc == DateTimeOffset.MinValue ? DateTimeOffset.MinValue : renderedAtUtc.Add(validity),
         current.Values.Select(entry => entry.Control).OrderBy(control => control.Id, StringComparer.Ordinal).ToArray());
 
+    private void RetainReviewed(IReadOnlyDictionary<string, Entry> entries)
+    {
+        var expiresAt = renderedAtUtc.Add(validity);
+        foreach (var pair in entries)
+            reviewed[new LeaseKey(frameId, pair.Key)] = new ReviewedEntry(pair.Value, expiresAt);
+        PruneExpiredReviews();
+    }
+
+    private void PruneExpiredReviews()
+    {
+        var now = DateTimeOffset.UtcNow;
+        foreach (var key in reviewed.Where(pair => pair.Value.ExpiresAtUtc <= now).Select(pair => pair.Key).ToArray())
+            reviewed.Remove(key);
+    }
+
     private static bool Equivalent(IReadOnlyDictionary<string, Entry> left, IReadOnlyDictionary<string, Entry> right) =>
         left.Count == right.Count && left.All(pair => right.TryGetValue(pair.Key, out var other) && pair.Value.Control == other.Control);
 
     private static bool IsFinite(Vector2 value) => float.IsFinite(value.X) && float.IsFinite(value.Y);
 
     private sealed record Entry(AgentBridgeUiControl Control, Action Invoke);
+    private readonly record struct LeaseKey(long FrameId, string ControlId);
+    private sealed record ReviewedEntry(Entry Entry, DateTimeOffset ExpiresAtUtc);
 }
 
 public enum AgentBridgeUiControlKind

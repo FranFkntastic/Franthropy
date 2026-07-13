@@ -60,4 +60,25 @@ public sealed class AgentBridgeUiReviewRegistryTests
         Assert.Equal("Working", review.Control.Value);
         Assert.Null(registry.Review("missing").Control);
     }
+
+    [Fact]
+    public void ReviewedControl_RemainsInvokableWhenTheNextImGuiFrameRenders()
+    {
+        var registry = new AgentBridgeUiReviewRegistry();
+        var invoked = 0;
+        registry.BeginFrame();
+        registry.Register("squire.run", "Run Squire", AgentBridgeUiControlKind.Button, Vector2.Zero, new(100, 30), true, false, "Ready", () => invoked++);
+        var reviewedFrame = registry.EndFrame();
+        registry.Review("squire.run");
+
+        registry.BeginFrame();
+        registry.Register("squire.run", "Run Squire", AgentBridgeUiControlKind.Button, Vector2.Zero, new(100, 30), false, false, "Refreshing", () => { });
+        registry.EndFrame();
+
+        var result = registry.Invoke("squire.run", reviewedFrame.FrameId);
+
+        Assert.True(result.Success);
+        Assert.Equal(1, invoked);
+        Assert.False(registry.Invoke("squire.run", reviewedFrame.FrameId).Success);
+    }
 }
