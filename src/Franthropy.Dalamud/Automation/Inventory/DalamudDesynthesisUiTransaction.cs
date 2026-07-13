@@ -6,6 +6,7 @@ using ECommons.Automation.UIInput;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
+using Franthropy.Dalamud.Automation;
 using Franthropy.Dalamud.Equipment;
 
 namespace Franthropy.Dalamud.Automation.Inventory;
@@ -22,11 +23,15 @@ public sealed class DalamudDesynthesisUiTransaction
         "Cancel",
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Cancel" });
     private readonly IGameGui gameGui;
+    private readonly DalamudExactSlotContextMenuOpener contextMenuOpener = new();
+    private readonly DalamudUiStabilityGate menuStability = new(6);
     private bool ownsUi;
     private bool menuSelectionSubmitted;
     private int stableMenuMisses;
+    private int framesWaitingForDialog;
 
     public bool MenuSelectionSubmitted => menuSelectionSubmitted;
+    public string Status { get; private set; } = "Idle.";
 
     public DalamudDesynthesisUiTransaction(IGameGui gameGui) => this.gameGui = gameGui;
 
@@ -36,25 +41,50 @@ public sealed class DalamudDesynthesisUiTransaction
         var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
         if ((dialog != null && dialog->IsVisible) || (menu != null && menu->IsVisible))
             return DalamudUiTransactionResult.Fail("ConflictingUi", "Desynthesis or item context UI is already visible.");
-        var opened = OpenExactSlotContextMenu(fingerprint);
+        var opened = contextMenuOpener.Begin(fingerprint);
         if (!opened.Success)
             return opened;
         ownsUi = true;
         menuSelectionSubmitted = false;
         stableMenuMisses = 0;
-        return DalamudUiTransactionResult.Completed("ContextMenuRequested", "Opened the exact slot's item context menu.");
+        framesWaitingForDialog = 0;
+        menuStability.Reset();
+        Status = opened.Message;
+        return DalamudUiTransactionResult.Completed("ContextMenuRequested", Status);
     }
 
-    public unsafe DalamudUiTransactionResult AdvanceToConfirmation(EquipmentInstanceFingerprint fingerprint)
+    public unsafe DalamudUiTransactionResult AdvanceToConfirmation(EquipmentInstanceFingerprint fingerprint, Func<bool> mutationStillAuthorized)
     {
+        ArgumentNullException.ThrowIfNull(mutationStillAuthorized);
         if (!ownsUi)
             return DalamudUiTransactionResult.Fail("UiOwnershipLost", "The desynthesis UI transaction is not owned.");
         var dialog = gameGui.GetAddonByName<AtkUnitBase>("SalvageDialog", 1);
         if (dialog == null || !dialog->IsVisible)
-            return menuSelectionSubmitted ? DalamudUiTransactionResult.Pending("Waiting for SalvageDialog.") : SelectDesynthesis(fingerprint);
+        {
+            if (!menuSelectionSubmitted)
+            {
+                var opened = contextMenuOpener.Advance(fingerprint);
+                Status = opened.Message;
+                if (!opened.Success)
+                    return opened;
+                return SelectDesynthesis(fingerprint, mutationStillAuthorized);
+            }
+            framesWaitingForDialog++;
+            var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
+            Status = menu != null && menu->IsVisible
+                ? $"The Desynthesis selection was submitted; the context menu remains visible while waiting for SalvageDialog ({framesWaitingForDialog} frame(s))."
+                : $"The Desynthesis selection was submitted and the context menu closed, but SalvageDialog has not appeared ({framesWaitingForDialog} frame(s)).";
+            return DalamudUiTransactionResult.Pending(Status);
+        }
+        Status = "SalvageDialog is visible; waiting for its semantic confirmation button.";
         var button = FindButton(dialog, ConfirmButton);
         if (button is null || !button->IsEnabled)
-            return DalamudUiTransactionResult.Pending("Waiting for the visible Desynthesize button to become unambiguous and enabled.");
+        {
+            Status = "SalvageDialog is visible, but its Desynthesize button is not yet unambiguous and enabled.";
+            return DalamudUiTransactionResult.Pending(Status);
+        }
+        if (!mutationStillAuthorized())
+            return DalamudUiTransactionResult.Fail("MutationAuthorizationLost", "The approved batch or automation ownership changed before desynthesis confirmation.");
         try
         {
             button->ClickAddonButton(dialog);
@@ -65,7 +95,8 @@ public sealed class DalamudDesynthesisUiTransaction
             // unwinding, before the visible flag changes. The click was already dispatched;
             // the caller's exact-slot transition observation remains the completion oracle.
         }
-        return DalamudUiTransactionResult.Completed("ConfirmationSubmitted", "Clicked the visible Desynthesize button through the addon UI.");
+        Status = "Clicked the visible Desynthesize button through the addon UI.";
+        return DalamudUiTransactionResult.Completed("ConfirmationSubmitted", Status);
     }
 
     public void Complete()
@@ -73,6 +104,10 @@ public sealed class DalamudDesynthesisUiTransaction
         ownsUi = false;
         menuSelectionSubmitted = false;
         stableMenuMisses = 0;
+        framesWaitingForDialog = 0;
+        menuStability.Reset();
+        contextMenuOpener.Reset();
+        Status = "Idle.";
     }
 
     public unsafe bool IsUiSettled()
@@ -87,7 +122,8 @@ public sealed class DalamudDesynthesisUiTransaction
         if (!ownsUi)
             return;
         CloseVisibleUi();
-        Complete();
+        if (IsUiSettled())
+            Complete();
     }
 
     public unsafe void CloseVisibleUi()
@@ -106,22 +142,19 @@ public sealed class DalamudDesynthesisUiTransaction
 
     public unsafe DalamudUiTransactionResult OpenExactSlotContextMenu(EquipmentInstanceFingerprint fingerprint)
     {
-        if (!Enum.TryParse<InventoryType>(fingerprint.Container, out var inventoryType))
-            return DalamudUiTransactionResult.Fail("UnsupportedContainer", $"Inventory container {fingerprint.Container} is not recognized.");
-        var context = AgentInventoryContext.Instance();
-        if (context == null)
-            return DalamudUiTransactionResult.Fail("InventoryContextUnavailable", "Inventory context UI is unavailable.");
-        var ownerId = inventoryType.ToString().StartsWith("Armory", StringComparison.Ordinal) ? AgentId.ArmouryBoard : AgentId.Inventory;
-        var owner = AgentModule.Instance()->GetAgentByInternalId(ownerId);
-        if (owner == null)
-            return DalamudUiTransactionResult.Fail("InventoryOwnerUnavailable", $"The normal {ownerId} UI is unavailable.");
-        if (!owner->IsAgentActive())
-            owner->Show();
-        var addonId = owner->GetAddonId();
-        if (addonId == 0)
-            return DalamudUiTransactionResult.Fail("InventoryOwnerPending", $"Opened {ownerId}; retry after it is ready.");
-        context->OpenForItemSlot(inventoryType, fingerprint.SlotIndex, 0, addonId);
-        return DalamudUiTransactionResult.Completed("ContextMenuRequested", "Requested the exact slot's item context menu.");
+        if (ownsUi)
+            return DalamudUiTransactionResult.Fail("DesynthesisUiAlreadyOwned", "A desynthesis UI transaction is already active.");
+        menuStability.Reset();
+        var result = contextMenuOpener.Begin(fingerprint);
+        if (result.Success)
+        {
+            ownsUi = true;
+            menuSelectionSubmitted = false;
+            stableMenuMisses = 0;
+            framesWaitingForDialog = 0;
+        }
+        Status = result.Message;
+        return result;
     }
 
     public unsafe string DescribeContextMenu()
@@ -138,39 +171,63 @@ public sealed class DalamudDesynthesisUiTransaction
 
     public unsafe DalamudUiTransactionResult ProbeContextMenu(EquipmentInstanceFingerprint fingerprint)
     {
+        var opened = contextMenuOpener.Advance(fingerprint);
+        Status = opened.Message;
+        if (!opened.Success)
+            return opened;
         if (!Enum.TryParse<InventoryType>(fingerprint.Container, out var inventoryType))
             return DalamudUiTransactionResult.Fail("UnsupportedContainer", $"Inventory container {fingerprint.Container} is not recognized.");
         var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
         var agent = AgentInventoryContext.Instance();
         if (menu == null || !menu->IsReady || !menu->IsVisible || agent == null)
+        {
+            menuStability.Observe(false);
             return DalamudUiTransactionResult.Pending("Waiting for the exact slot's context menu.");
+        }
         if (agent->TargetInventoryId != inventoryType || agent->TargetInventorySlotId != fingerprint.SlotIndex)
+        {
+            menuStability.Observe(false);
             return DalamudUiTransactionResult.Fail("UnexpectedContextMenu", "The visible context menu targets a different slot.");
-        var labels = ReadLabels(agent);
-        var match = DalamudContextMenuOptionParser.Find(labels, DesynthesisOption);
-        if (!match.Success)
-            return match.Code == "OptionAmbiguous"
-                ? DalamudUiTransactionResult.Fail("DesynthesisEntryAmbiguous", "Multiple context-menu entries matched Desynthesis.")
-                : DalamudUiTransactionResult.Pending("Waiting for stable Desynthesis context-menu labels.");
-        if (match.Index >= agent->ContextItemCount || agent->IsContextItemDisabled(match.Index))
-            return DalamudUiTransactionResult.Fail("DesynthesisEntryDisabled", "The Desynthesis entry is unavailable or disabled.");
-        return DalamudUiTransactionResult.Completed("DesynthesisProbePassed", "The exact item's normal context menu offers an enabled Desynthesis command.");
-    }
-
-    private unsafe DalamudUiTransactionResult SelectDesynthesis(EquipmentInstanceFingerprint fingerprint)
-    {
-        var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
-        if (menu == null || !menu->IsReady || !menu->IsVisible)
-            return DalamudUiTransactionResult.Pending("Waiting for the exact slot's context menu.");
-        if (!Enum.TryParse<InventoryType>(fingerprint.Container, out var inventoryType))
-            return DalamudUiTransactionResult.Fail("UnsupportedContainer", $"Inventory container {fingerprint.Container} is not recognized.");
-        var agent = AgentInventoryContext.Instance();
-        if (agent == null || agent->TargetInventoryId != inventoryType || agent->TargetInventorySlotId != fingerprint.SlotIndex)
-            return DalamudUiTransactionResult.Fail("UnexpectedContextMenu", "The visible context menu targets a different slot.");
+        }
         var labels = ReadLabels(agent);
         var match = DalamudContextMenuOptionParser.Find(labels, DesynthesisOption);
         if (!match.Success)
         {
+            menuStability.Observe(false);
+            return match.Code == "OptionAmbiguous"
+                ? DalamudUiTransactionResult.Fail("DesynthesisEntryAmbiguous", "Multiple context-menu entries matched Desynthesis.")
+                : DalamudUiTransactionResult.Pending("Waiting for stable Desynthesis context-menu labels.");
+        }
+        if (match.Index >= agent->ContextItemCount || agent->IsContextItemDisabled(match.Index))
+            return DalamudUiTransactionResult.Fail("DesynthesisEntryDisabled", "The Desynthesis entry is unavailable or disabled.");
+        if (!menuStability.Observe(true))
+            return DalamudUiTransactionResult.Pending(
+                $"The Desynthesis entry is enabled; verifying stability ({menuStability.ObservedConsecutiveFrames}/{menuStability.RequiredConsecutiveFrames} frames).");
+        return DalamudUiTransactionResult.Completed("DesynthesisProbePassed", "The exact item's normal context menu offers an enabled Desynthesis command.");
+    }
+
+    private unsafe DalamudUiTransactionResult SelectDesynthesis(EquipmentInstanceFingerprint fingerprint, Func<bool> mutationStillAuthorized)
+    {
+        var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
+        if (menu == null || !menu->IsReady || !menu->IsVisible)
+        {
+            menuStability.Observe(false);
+            Status = "Waiting for the exact slot's context menu to become visible and ready.";
+            return DalamudUiTransactionResult.Pending(Status);
+        }
+        if (!Enum.TryParse<InventoryType>(fingerprint.Container, out var inventoryType))
+            return DalamudUiTransactionResult.Fail("UnsupportedContainer", $"Inventory container {fingerprint.Container} is not recognized.");
+        var agent = AgentInventoryContext.Instance();
+        if (agent == null || agent->TargetInventoryId != inventoryType || agent->TargetInventorySlotId != fingerprint.SlotIndex)
+        {
+            menuStability.Observe(false);
+            return DalamudUiTransactionResult.Fail("UnexpectedContextMenu", "The visible context menu targets a different slot.");
+        }
+        var labels = ReadLabels(agent);
+        var match = DalamudContextMenuOptionParser.Find(labels, DesynthesisOption);
+        if (!match.Success)
+        {
+            menuStability.Observe(false);
             if (match.Code != "OptionAmbiguous" && ++stableMenuMisses < 8)
                 return DalamudUiTransactionResult.Pending(
                     $"Waiting for stable context-menu labels ({labels.Count}/{agent->ContextItemCount} observed).");
@@ -184,6 +241,13 @@ public sealed class DalamudDesynthesisUiTransaction
             return DalamudUiTransactionResult.Fail("DesynthesisEntryUnavailable", "The exact slot's context menu does not offer Desynthesis.");
         if (agent->IsContextItemDisabled(index))
             return DalamudUiTransactionResult.Fail("DesynthesisEntryDisabled", "The Desynthesis entry is disabled.");
+        if (!menuStability.Observe(true))
+        {
+            Status = $"The exact Desynthesis menu entry is ready; waiting for UI stability ({menuStability.ObservedConsecutiveFrames}/{menuStability.RequiredConsecutiveFrames} frames).";
+            return DalamudUiTransactionResult.Pending(Status);
+        }
+        if (!mutationStillAuthorized())
+            return DalamudUiTransactionResult.Fail("MutationAuthorizationLost", "The approved batch or automation ownership changed before desynthesis selection.");
         var values = stackalloc AtkValue[5];
         values[0] = new() { Type = AtkValueType.Int, Int = 0 };
         values[1] = new() { Type = AtkValueType.Int, Int = index };
@@ -193,7 +257,9 @@ public sealed class DalamudDesynthesisUiTransaction
         if (!menu->FireCallback(5, values, true))
             return DalamudUiTransactionResult.Fail("DesynthesisSelectionRejected", "ContextMenu rejected the Desynthesis selection.");
         menuSelectionSubmitted = true;
-        return DalamudUiTransactionResult.Pending("Selected Desynthesis and am waiting for SalvageDialog.");
+        framesWaitingForDialog = 0;
+        Status = $"Submitted the stable Desynthesis menu entry after {menuStability.ObservedConsecutiveFrames} ready frames; waiting for SalvageDialog.";
+        return DalamudUiTransactionResult.Pending(Status);
     }
 
     private static unsafe IReadOnlyList<string> ReadLabels(AgentInventoryContext* agent)

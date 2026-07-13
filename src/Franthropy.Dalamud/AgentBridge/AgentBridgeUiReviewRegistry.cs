@@ -80,6 +80,24 @@ public sealed class AgentBridgeUiReviewRegistry
             return CreateFrame();
     }
 
+    /// <summary>
+    /// Reviews one rendered control without cloning the complete control surface. The returned
+    /// frame ID and expiry retain the same invocation safety contract as <see cref="Snapshot"/>.
+    /// </summary>
+    public AgentBridgeUiControlReview Review(string id)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        lock (gate)
+        {
+            current.TryGetValue(id, out var entry);
+            return new AgentBridgeUiControlReview(
+                frameId,
+                renderedAtUtc,
+                renderedAtUtc == DateTimeOffset.MinValue ? DateTimeOffset.MinValue : renderedAtUtc.Add(validity),
+                entry?.Control);
+        }
+    }
+
     public AgentBridgeUiControlInvocation Invoke(string id, long expectedFrameId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
@@ -153,6 +171,12 @@ public sealed record AgentBridgeUiReviewFrame(
     DateTimeOffset RenderedAtUtc,
     DateTimeOffset ExpiresAtUtc,
     IReadOnlyList<AgentBridgeUiControl> Controls);
+
+public sealed record AgentBridgeUiControlReview(
+    long FrameId,
+    DateTimeOffset RenderedAtUtc,
+    DateTimeOffset ExpiresAtUtc,
+    AgentBridgeUiControl? Control);
 
 public sealed record AgentBridgeUiControlInvocation(bool Success, string Message, AgentBridgeUiReviewFrame Frame)
 {

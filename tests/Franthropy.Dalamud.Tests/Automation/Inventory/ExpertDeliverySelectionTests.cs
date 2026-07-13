@@ -20,4 +20,13 @@ public sealed class ExpertDeliverySelectionTests
         Assert.Equal("ExpertDeliveryItemAmbiguous", result.Code);
         Assert.Null(selected);
     }
+
+    [Fact]
+    public void ValidateSubmittedRow_FailsWhenTheSameIndexChangesItem()
+    {
+        var result = ExpertDeliverySelection.ValidateSubmittedRow(20, 1, [new(10, 100, 0), new(30, 200, 1)]);
+
+        Assert.False(result.Success);
+        Assert.Equal("ExpertDeliveryRowChanged", result.Code);
+    }
 }

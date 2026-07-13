@@ -12,21 +12,30 @@ public sealed class DalamudExpertDeliveryUiTransaction
 {
     private readonly IGameGui gameGui;
     private readonly Func<string, bool> isExpectedSecondaryConfirmation;
+    private readonly Func<EquipmentInstanceFingerprint, bool> exactIdentityStillValid;
     private bool ownsUi;
     private bool rowSubmitted;
     private bool rewardSubmitted;
     private bool secondarySubmitted;
+    private EquipmentInstanceFingerprint? approvedFingerprint;
+    private int approvedRowIndex = -1;
 
-    public DalamudExpertDeliveryUiTransaction(IGameGui gameGui, Func<string, bool> isExpectedSecondaryConfirmation)
+    public DalamudExpertDeliveryUiTransaction(
+        IGameGui gameGui,
+        Func<string, bool> isExpectedSecondaryConfirmation,
+        Func<EquipmentInstanceFingerprint, bool> exactIdentityStillValid)
     {
         this.gameGui = gameGui;
         this.isExpectedSecondaryConfirmation = isExpectedSecondaryConfirmation;
+        this.exactIdentityStillValid = exactIdentityStillValid ?? throw new ArgumentNullException(nameof(exactIdentityStillValid));
     }
 
     public unsafe DalamudUiTransactionResult Begin(EquipmentInstanceFingerprint fingerprint, uint currentSeals, uint maximumSeals)
     {
         if (ownsUi)
             return DalamudUiTransactionResult.Fail("ExpertDeliveryAlreadyOwned", "An Expert Delivery transaction is already active.");
+        if (IsVisible("GrandCompanySupplyReward") || IsVisible("SelectYesno"))
+            return DalamudUiTransactionResult.Fail("ConflictingUi", "A confirmation dialog was already visible before Expert Delivery selection.");
         var probe = Probe(fingerprint, currentSeals, maximumSeals, out var list, out var selected);
         if (!probe.Success || list == null || selected is null)
             return probe;
@@ -40,6 +49,8 @@ public sealed class DalamudExpertDeliveryUiTransaction
         rowSubmitted = true;
         rewardSubmitted = false;
         secondarySubmitted = false;
+        approvedFingerprint = fingerprint;
+        approvedRowIndex = selected.Index;
         return DalamudUiTransactionResult.Completed("ExpertDeliveryRowSubmitted", "Selected the approved item through the visible Expert Delivery list.");
     }
 
@@ -68,8 +79,9 @@ public sealed class DalamudExpertDeliveryUiTransaction
         return DalamudUiTransactionResult.Completed("ExpertDeliveryProbePassed", "The exact item is visible and can be delivered without exceeding the company-seal cap.");
     }
 
-    public unsafe DalamudUiTransactionResult Advance()
+    public unsafe DalamudUiTransactionResult Advance(Func<bool> mutationStillAuthorized)
     {
+        ArgumentNullException.ThrowIfNull(mutationStillAuthorized);
         if (!ownsUi || !rowSubmitted)
             return DalamudUiTransactionResult.Fail("ExpertDeliveryUiOwnershipLost", "The Expert Delivery transaction does not own the current UI flow.");
         var reward = gameGui.GetAddonByName<AddonGrandCompanySupplyReward>("GrandCompanySupplyReward", 1);
@@ -79,6 +91,11 @@ public sealed class DalamudExpertDeliveryUiTransaction
                 return DalamudUiTransactionResult.Pending("Waiting for the submitted Expert Delivery confirmation to complete.");
             if (reward->DeliverButton == null || !reward->DeliverButton->IsEnabled)
                 return DalamudUiTransactionResult.Pending("Waiting for the visible Deliver button.");
+            var ownership = ValidateSubmittedRowOwnership();
+            if (!ownership.Success)
+                return ownership;
+            if (!mutationStillAuthorized())
+                return DalamudUiTransactionResult.Fail("MutationAuthorizationLost", "The approved batch or automation ownership changed before Expert Delivery confirmation.");
             reward->DeliverButton->ClickAddonButton(&reward->AtkUnitBase);
             rewardSubmitted = true;
             return DalamudUiTransactionResult.Pending("Submitted the visible Expert Delivery confirmation.");
@@ -93,6 +110,11 @@ public sealed class DalamudExpertDeliveryUiTransaction
                 return DalamudUiTransactionResult.Fail("UnexpectedExpertDeliveryPrompt", $"Expert Delivery opened an unexpected confirmation: {observed}");
             if (yesNo->YesButton == null || !yesNo->YesButton->IsEnabled)
                 return DalamudUiTransactionResult.Pending("Waiting for the high-quality item confirmation.");
+            var ownership = ValidateSubmittedRowOwnership();
+            if (!ownership.Success)
+                return ownership;
+            if (!mutationStillAuthorized())
+                return DalamudUiTransactionResult.Fail("MutationAuthorizationLost", "The approved batch or automation ownership changed before high-quality delivery confirmation.");
             yesNo->YesButton->ClickAddonButton(&yesNo->AtkUnitBase);
             secondarySubmitted = true;
             return DalamudUiTransactionResult.Pending("Confirmed the visible high-quality item warning.");
@@ -106,6 +128,8 @@ public sealed class DalamudExpertDeliveryUiTransaction
         rowSubmitted = false;
         rewardSubmitted = false;
         secondarySubmitted = false;
+        approvedFingerprint = null;
+        approvedRowIndex = -1;
     }
 
     public unsafe void CloseOwnedUi()
@@ -118,7 +142,38 @@ public sealed class DalamudExpertDeliveryUiTransaction
         var yesNo = gameGui.GetAddonByName<AtkUnitBase>("SelectYesno", 1);
         if (yesNo != null && yesNo->IsVisible)
             yesNo->Close(true);
-        Complete();
+        if (IsUiSettled())
+            Complete();
+    }
+
+    public unsafe bool IsUiSettled() => !IsRawVisible("GrandCompanySupplyReward") && !IsRawVisible("SelectYesno");
+
+    private unsafe bool IsVisible(string name)
+    {
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(name, 1);
+        return addon != null && addon->IsReady && addon->IsVisible;
+    }
+
+    private unsafe bool IsRawVisible(string name)
+    {
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(name, 1);
+        return addon != null && addon->RootNode != null && addon->RootNode->IsVisible();
+    }
+
+    private unsafe DalamudUiTransactionResult ValidateSubmittedRowOwnership()
+    {
+        if (approvedFingerprint is null || approvedRowIndex < 0)
+            return DalamudUiTransactionResult.Fail("ExpertDeliveryUiOwnershipLost", "The approved Expert Delivery row identity is unavailable.");
+        if (!exactIdentityStillValid(approvedFingerprint))
+            return DalamudUiTransactionResult.Fail("ExactIdentityChanged", "The approved exact item changed before Expert Delivery confirmation.");
+        var listAddon = gameGui.GetAddonByName<AddonGrandCompanySupplyList>("GrandCompanySupplyList", 1);
+        if (listAddon == null || !listAddon->AtkUnitBase.IsReady || !listAddon->AtkUnitBase.IsVisible ||
+            listAddon->ExpertDeliveryList == null ||
+            listAddon->ExpertDeliveryList->SelectedItemIndex != approvedRowIndex ||
+            listAddon->AtkUnitBase.AtkValues == null || listAddon->AtkUnitBase.AtkValuesCount <= 6 ||
+            listAddon->AtkUnitBase.AtkValues[6].Type != AtkValueType.UInt || approvedRowIndex >= listAddon->AtkUnitBase.AtkValues[6].UInt)
+            return DalamudUiTransactionResult.Fail("ExpertDeliveryListOwnershipLost", "The owned Expert Delivery list changed before confirmation.");
+        return ExpertDeliverySelection.ValidateSubmittedRow(approvedFingerprint.ItemId, approvedRowIndex, ReadEntries(&listAddon->AtkUnitBase));
     }
 
     private static unsafe IReadOnlyList<ExpertDeliveryListEntry> ReadEntries(AtkUnitBase* addon)

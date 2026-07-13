@@ -30,6 +30,14 @@ public sealed record AgentBridgeUiCaptureTransactionReceipt(
     DateTimeOffset ReadyAtUtc,
     DateTimeOffset ExpiresAtUtc);
 
+/// <summary>A provider-advertised review surface which a generic bridge client can present without plugin-specific tab knowledge.</summary>
+public sealed record AgentBridgeReviewSurfaceDescriptor(
+    string Id,
+    string Label,
+    string Command,
+    string Target,
+    int Order);
+
 public sealed record AgentBridgeResponse
 {
     public required bool Success { get; init; }

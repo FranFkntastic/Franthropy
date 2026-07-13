@@ -4,6 +4,17 @@ public sealed record ExpertDeliveryListEntry(uint ItemId, uint Seals, int Index)
 
 public static class ExpertDeliverySelection
 {
+    public static DalamudUiTransactionResult ValidateSubmittedRow(
+        uint itemId,
+        int rowIndex,
+        IReadOnlyList<ExpertDeliveryListEntry> entries)
+    {
+        var row = entries.FirstOrDefault(entry => entry.Index == rowIndex);
+        return row?.ItemId == itemId
+            ? DalamudUiTransactionResult.Completed("ExpertDeliveryRowStillBound", "The submitted row still identifies the approved item.")
+            : DalamudUiTransactionResult.Fail("ExpertDeliveryRowChanged", "The submitted Expert Delivery row no longer identifies the approved item.");
+    }
+
     public static DalamudUiTransactionResult SelectExactItem(
         uint itemId,
         IReadOnlyList<ExpertDeliveryListEntry> entries,

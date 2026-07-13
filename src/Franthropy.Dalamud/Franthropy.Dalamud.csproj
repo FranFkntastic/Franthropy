@@ -42,6 +42,10 @@
       <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\Dalamud.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="Dalamud.Bindings.ImGui">
+      <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\Dalamud.Bindings.ImGui.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="FFXIVClientStructs">
       <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\FFXIVClientStructs.dll</HintPath>
       <Private>false</Private>
@@ -54,7 +58,11 @@
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
     <Compile Remove="Automation\Inventory\DalamudDesynthesisUiTransaction.cs" />
+    <Compile Remove="Automation\Inventory\DalamudExactSlotContextMenuOpener.cs" />
     <Compile Remove="Automation\Inventory\DalamudExpertDeliveryUiTransaction.cs" />
+    <Compile Remove="Automation\Inventory\DalamudMateriaRetrievalUiTransaction.cs" />
+    <Compile Remove="Automation\Inventory\DalamudItemContextActionUiTransaction.cs" />
+    <Compile Remove="UI\Settings\DalamudSettingsTreeRenderer.cs" />
   </ItemGroup>
 
 </Project>

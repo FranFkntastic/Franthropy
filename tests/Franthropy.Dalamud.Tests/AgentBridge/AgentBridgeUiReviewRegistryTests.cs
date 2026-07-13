@@ -42,4 +42,22 @@ public sealed class AgentBridgeUiReviewRegistryTests
         Assert.False(registry.Invoke("route.stop", frame.FrameId + 1).Success);
         Assert.Equal(0, invoked);
     }
+
+    [Fact]
+    public void Review_ReturnsOnlyRequestedControlWithInvocationFrame()
+    {
+        var registry = new AgentBridgeUiReviewRegistry();
+        registry.BeginFrame();
+        registry.Register("first", "First", AgentBridgeUiControlKind.Button, Vector2.Zero, new(100, 30), true, false, "Ready", () => { });
+        registry.Register("second", "Second", AgentBridgeUiControlKind.Button, Vector2.Zero, new(100, 30), true, false, "Working", () => { });
+        var frame = registry.EndFrame();
+
+        var review = registry.Review("second");
+
+        Assert.Equal(frame.FrameId, review.FrameId);
+        Assert.Equal(frame.ExpiresAtUtc, review.ExpiresAtUtc);
+        Assert.Equal("second", Assert.IsType<AgentBridgeUiControl>(review.Control).Id);
+        Assert.Equal("Working", review.Control.Value);
+        Assert.Null(registry.Review("missing").Control);
+    }
 }
