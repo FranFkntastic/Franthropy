@@ -54,6 +54,14 @@
       <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\InteropGenerator.Runtime.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="Lumina">
+      <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\Lumina.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Lumina.Excel">
+      <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\Lumina.Excel.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
@@ -62,6 +70,7 @@
     <Compile Remove="Automation\Inventory\DalamudExpertDeliveryUiTransaction.cs" />
     <Compile Remove="Automation\Inventory\DalamudMateriaRetrievalUiTransaction.cs" />
     <Compile Remove="Automation\Inventory\DalamudItemContextActionUiTransaction.cs" />
+    <Compile Remove="Automation\Retainers\DalamudSummoningBellInteractor.cs" />
     <Compile Remove="UI\Settings\DalamudSettingsTreeRenderer.cs" />
   </ItemGroup>
 
