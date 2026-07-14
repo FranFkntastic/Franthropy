@@ -129,7 +129,7 @@ public sealed class EquipmentUseAnalyzer
         var futureUse = job.Level < candidate.EquipLevel;
         if (futureUse && candidateInstance is null)
             return new(job, EquipmentUseStatus.FutureUse, null, []);
-        var comparisonLevel = futureUse ? candidate.EquipLevel : job.Level;
+        var comparisonLevel = WitnessComparisonLevel(candidate, job);
         var relevant = RelevantStats(job);
         if (relevant.Count == 0)
             return new(job, EquipmentUseStatus.EvaluationFailure, null, [], $"No supported stat profile exists for {job.Abbreviation}.");
@@ -150,11 +150,7 @@ public sealed class EquipmentUseAnalyzer
                     .Select(reference => (Set: set, Reference: reference)))
                 .Where(value => definitions.ContainsKey(value.Reference.ItemId))
                 .Select(value => (value.Set, value.Reference, Definition: definitions[value.Reference.ItemId]))
-                .Where(value => value.Definition.Slot == candidate.Slot &&
-                                value.Definition.EquipLevel <= comparisonLevel &&
-                                value.Definition.EligibleClassJobIds.Contains(job.ClassJobId) &&
-                                !value.Definition.HasUnmodeledEquipRestriction &&
-                                EquipmentWearerInference.MatchesIntendedWearer(value.Definition, job, allJobs))
+                .Where(value => IsEligibleWitness(candidate, value.Definition, job, allJobs))
                 .Where(value => candidate.Slot != EquipmentSlot.MainHand ||
                                 (value.Definition.MainHandOccupancy == candidate.MainHandOccupancy &&
                                  value.Definition.OffHandOccupancy == candidate.OffHandOccupancy))
@@ -217,10 +213,7 @@ public sealed class EquipmentUseAnalyzer
                         rejection = $"item {referenceGroup.Key.ItemId} has no definition";
                         break;
                     }
-                    if (referenceDefinition.Slot != candidate.Slot ||
-                        !referenceDefinition.EligibleClassJobIds.Contains(job.ClassJobId) ||
-                        referenceDefinition.HasUnmodeledEquipRestriction ||
-                        !EquipmentWearerInference.MatchesIntendedWearer(referenceDefinition, job, allJobs))
+                    if (!IsEligibleWitness(candidate, referenceDefinition, job, allJobs))
                     {
                         rejection = $"item {referenceGroup.Key.ItemId} is not a semantically compatible {candidate.Slot} anchor";
                         break;
@@ -288,10 +281,8 @@ public sealed class EquipmentUseAnalyzer
             var isGearsetReference = gearsetReferences.Any(reference =>
                 reference.ItemId == instance.Fingerprint.ItemId &&
                 (reference.IsHighQuality is null || reference.IsHighQuality == instance.Fingerprint.IsHighQuality));
-            if (!definitions.TryGetValue(instance.Fingerprint.ItemId, out var definition) || definition.Slot != candidate.Slot ||
-                definition.EquipLevel > comparisonLevel || !definition.EligibleClassJobIds.Contains(job.ClassJobId) ||
-                definition.HasUnmodeledEquipRestriction ||
-                !EquipmentWearerInference.MatchesIntendedWearer(definition, job, allJobs))
+            if (!definitions.TryGetValue(instance.Fingerprint.ItemId, out var definition) ||
+                !IsEligibleWitness(candidate, definition, job, allJobs))
             {
                 if (isGearsetReference)
                 return new(job, EquipmentUseStatus.EvaluationFailure, null, contributing,
@@ -382,6 +373,24 @@ public sealed class EquipmentUseAnalyzer
 
     private static bool IsSupportedMainHand(EquipmentItemDefinition definition) =>
         definition.MainHandOccupancy == 1 && definition.OffHandOccupancy is 0 or -1;
+
+    // Future-use cleanup compares retained gear at the candidate's equip level; until then,
+    // neither the candidate nor its witness is usable. Current gear may use the job's level.
+    public static uint WitnessComparisonLevel(EquipmentItemDefinition candidate, CharacterJobSnapshot job) =>
+        job.Level < candidate.EquipLevel ? candidate.EquipLevel : job.Level;
+
+    public static bool IsEligibleWitness(
+        EquipmentItemDefinition candidate,
+        EquipmentItemDefinition witness,
+        CharacterJobSnapshot job,
+        IReadOnlyList<CharacterJobSnapshot> knownJobs)
+    {
+        return witness.Slot == candidate.Slot &&
+               witness.EquipLevel <= WitnessComparisonLevel(candidate, job) &&
+               witness.EligibleClassJobIds.Contains(job.ClassJobId) &&
+               !witness.HasUnmodeledEquipRestriction &&
+               EquipmentWearerInference.MatchesIntendedWearer(witness, job, knownJobs);
+    }
 
     public static bool CoversWithoutLoss(EquipmentStatProfile baseline, EquipmentStatProfile candidate, IReadOnlySet<EquipmentStatSemantic> relevant)
     {

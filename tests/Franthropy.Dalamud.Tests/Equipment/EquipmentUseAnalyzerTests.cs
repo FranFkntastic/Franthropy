@@ -734,13 +734,26 @@ public sealed class EquipmentUseAnalyzerTests
             Slot = EquipmentSlot.Ears,
             HighQualityStatProfile = candidate.StatProfile,
         };
+        var job = Job(1, 30, true);
 
-        var withDuplicate = analyzer.Analyze(first, candidate, [Job(1, 30, true)], [], [first, second], Definitions(candidate));
-        var onlyCopy = analyzer.Analyze(first, candidate, [Job(1, 30, true)], [], [first], Definitions(candidate));
+        var withDuplicate = analyzer.Analyze(first, candidate, [job], [], [first, second], Definitions(candidate));
+        var onlyCopy = analyzer.Analyze(first, candidate, [job], [], [first], Definitions(candidate));
 
         Assert.Equal(EquipmentUseStatus.Obsolete, withDuplicate.Status);
         Assert.Equal(second.Fingerprint, Assert.Single(withDuplicate.Comparisons[0].WitnessRequirement!.ViableWitnesses).Fingerprint);
+        Assert.Equal(40u, EquipmentUseAnalyzer.WitnessComparisonLevel(candidate, job));
+        Assert.True(EquipmentUseAnalyzer.IsEligibleWitness(candidate, candidate, job, [job]));
         Assert.Equal(EquipmentUseStatus.FutureUse, onlyCopy.Status);
+    }
+
+    [Fact]
+    public void FutureUse_WitnessAboveCandidateEquipLevel_IsNotUsable()
+    {
+        var candidate = Definition(100, 40, 40, 1) with { Slot = EquipmentSlot.Ears };
+        var laterWitness = Definition(200, 50, 50, 1) with { Slot = EquipmentSlot.Ears };
+        var job = Job(1, 30, true);
+
+        Assert.False(EquipmentUseAnalyzer.IsEligibleWitness(candidate, laterWitness, job, [job]));
     }
 
     [Fact]
