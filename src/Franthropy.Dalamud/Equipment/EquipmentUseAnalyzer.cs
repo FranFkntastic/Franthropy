@@ -176,9 +176,9 @@ public sealed class EquipmentUseAnalyzer
                 {
                     var values = group.ToArray();
                     for (var left = 0; left < values.Length; left++)
-                    for (var right = left + 1; right < values.Length; right++)
-                        if (values[left].Definition.ItemId != values[right].Definition.ItemId || !values[left].Definition.IsUnique)
-                            return true;
+                        for (var right = left + 1; right < values.Length; right++)
+                            if (values[left].Definition.ItemId != values[right].Definition.ItemId || !values[left].Definition.IsUnique)
+                                return true;
                     return false;
                 });
             if (!hasCoverage && savedWitnesses.Any(value => value.Stats is not { IsComplete: true }))
@@ -285,8 +285,8 @@ public sealed class EquipmentUseAnalyzer
                 !IsEligibleWitness(candidate, definition, job, allJobs))
             {
                 if (isGearsetReference)
-                return new(job, EquipmentUseStatus.EvaluationFailure, null, contributing,
-                        $"A saved {job.Abbreviation} gearset anchor is not a semantically valid {candidate.Slot} item for that job.", Basis: basis, RejectedGearsets: rejectedGearsets);
+                    return new(job, EquipmentUseStatus.EvaluationFailure, null, contributing,
+                            $"A saved {job.Abbreviation} gearset anchor is not a semantically valid {candidate.Slot} item for that job.", Basis: basis, RejectedGearsets: rejectedGearsets);
                 continue;
             }
             if (candidate.Slot == EquipmentSlot.MainHand &&
