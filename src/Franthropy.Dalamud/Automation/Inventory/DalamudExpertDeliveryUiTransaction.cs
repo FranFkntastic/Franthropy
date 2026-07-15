@@ -18,7 +18,6 @@ public sealed class DalamudExpertDeliveryUiTransaction
     private bool rewardSubmitted;
     private bool secondarySubmitted;
     private EquipmentInstanceFingerprint? approvedFingerprint;
-    private int approvedRowIndex = -1;
 
     public DalamudExpertDeliveryUiTransaction(
         IGameGui gameGui,
@@ -50,7 +49,6 @@ public sealed class DalamudExpertDeliveryUiTransaction
         rewardSubmitted = false;
         secondarySubmitted = false;
         approvedFingerprint = fingerprint;
-        approvedRowIndex = selected.Index;
         return DalamudUiTransactionResult.Completed("ExpertDeliveryRowSubmitted", "Selected the approved item through the visible Expert Delivery list.");
     }
 
@@ -91,7 +89,7 @@ public sealed class DalamudExpertDeliveryUiTransaction
                 return DalamudUiTransactionResult.Pending("Waiting for the submitted Expert Delivery confirmation to complete.");
             if (reward->DeliverButton == null || !reward->DeliverButton->IsEnabled)
                 return DalamudUiTransactionResult.Pending("Waiting for the visible Deliver button.");
-            var ownership = ValidateSubmittedRowOwnership();
+            var ownership = ValidateSubmittedItemOwnership();
             if (!ownership.Success)
                 return ownership;
             if (!mutationStillAuthorized())
@@ -110,7 +108,7 @@ public sealed class DalamudExpertDeliveryUiTransaction
                 return DalamudUiTransactionResult.Fail("UnexpectedExpertDeliveryPrompt", $"Expert Delivery opened an unexpected confirmation: {observed}");
             if (yesNo->YesButton == null || !yesNo->YesButton->IsEnabled)
                 return DalamudUiTransactionResult.Pending("Waiting for the high-quality item confirmation.");
-            var ownership = ValidateSubmittedRowOwnership();
+            var ownership = ValidateSubmittedItemOwnership();
             if (!ownership.Success)
                 return ownership;
             if (!mutationStillAuthorized())
@@ -129,7 +127,6 @@ public sealed class DalamudExpertDeliveryUiTransaction
         rewardSubmitted = false;
         secondarySubmitted = false;
         approvedFingerprint = null;
-        approvedRowIndex = -1;
     }
 
     public unsafe void CloseOwnedUi()
@@ -160,20 +157,18 @@ public sealed class DalamudExpertDeliveryUiTransaction
         return addon != null && addon->RootNode != null && addon->RootNode->IsVisible();
     }
 
-    private unsafe DalamudUiTransactionResult ValidateSubmittedRowOwnership()
+    private DalamudUiTransactionResult ValidateSubmittedItemOwnership()
     {
-        if (approvedFingerprint is null || approvedRowIndex < 0)
-            return DalamudUiTransactionResult.Fail("ExpertDeliveryUiOwnershipLost", "The approved Expert Delivery row identity is unavailable.");
+        if (approvedFingerprint is null)
+            return DalamudUiTransactionResult.Fail("ExpertDeliveryUiOwnershipLost", "The approved Expert Delivery item identity is unavailable.");
         if (!exactIdentityStillValid(approvedFingerprint))
             return DalamudUiTransactionResult.Fail("ExactIdentityChanged", "The approved exact item changed before Expert Delivery confirmation.");
-        var listAddon = gameGui.GetAddonByName<AddonGrandCompanySupplyList>("GrandCompanySupplyList", 1);
-        if (listAddon == null || !listAddon->AtkUnitBase.IsReady || !listAddon->AtkUnitBase.IsVisible ||
-            listAddon->ExpertDeliveryList == null ||
-            listAddon->ExpertDeliveryList->SelectedItemIndex != approvedRowIndex ||
-            listAddon->AtkUnitBase.AtkValues == null || listAddon->AtkUnitBase.AtkValuesCount <= 6 ||
-            listAddon->AtkUnitBase.AtkValues[6].Type != AtkValueType.UInt || approvedRowIndex >= listAddon->AtkUnitBase.AtkValues[6].UInt)
-            return DalamudUiTransactionResult.Fail("ExpertDeliveryListOwnershipLost", "The owned Expert Delivery list changed before confirmation.");
-        return ExpertDeliverySelection.ValidateSubmittedRow(approvedFingerprint.ItemId, approvedRowIndex, ReadEntries(&listAddon->AtkUnitBase));
+        // GrandCompanySupplyList intentionally hides when its reward modal opens.
+        // Ownership comes from the modal opened by this transaction plus the still-valid
+        // exact inventory slot, not transient native list selection fields.
+        return DalamudUiTransactionResult.Completed(
+            "ExpertDeliveryUiOwnershipValid",
+            "The exact approved item remains valid while Squire's submitted Expert Delivery confirmation is visible.");
     }
 
     private static unsafe IReadOnlyList<ExpertDeliveryListEntry> ReadEntries(AtkUnitBase* addon)
