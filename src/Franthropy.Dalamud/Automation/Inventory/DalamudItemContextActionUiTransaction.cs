@@ -21,8 +21,8 @@ public sealed class DalamudItemContextActionUiTransaction
     private readonly Func<EquipmentInstanceFingerprint, bool> exactIdentityStillValid;
     private readonly string? requiredVisibleAddon;
     private readonly Func<EquipmentInstanceFingerprint, string, bool>? expectedConfirmation;
-    private readonly DalamudExactSlotContextMenuOpener contextMenuOpener = new();
-    private readonly DalamudUiStabilityGate menuStability = new(6);
+    private readonly DalamudExactSlotContextMenuOpener contextMenuOpener;
+    private readonly DalamudUiStabilityGate menuStability;
     private bool ownsUi;
     private bool menuSelectionSubmitted;
     private bool confirmationSubmitted;
@@ -33,13 +33,18 @@ public sealed class DalamudItemContextActionUiTransaction
         DalamudContextMenuOptionSpec option,
         Func<EquipmentInstanceFingerprint, bool> exactIdentityStillValid,
         string? requiredVisibleAddon = null,
-        Func<EquipmentInstanceFingerprint, string, bool>? expectedConfirmation = null)
+        Func<EquipmentInstanceFingerprint, string, bool>? expectedConfirmation = null,
+        int requiredStableFrames = 6)
     {
+        if (requiredStableFrames <= 0)
+            throw new ArgumentOutOfRangeException(nameof(requiredStableFrames));
         this.gameGui = gameGui;
         this.option = option ?? throw new ArgumentNullException(nameof(option));
         this.exactIdentityStillValid = exactIdentityStillValid ?? throw new ArgumentNullException(nameof(exactIdentityStillValid));
         this.requiredVisibleAddon = requiredVisibleAddon;
         this.expectedConfirmation = expectedConfirmation;
+        contextMenuOpener = new DalamudExactSlotContextMenuOpener(requiredStableFrames);
+        menuStability = new DalamudUiStabilityGate(requiredStableFrames);
     }
 
     public unsafe DalamudUiTransactionResult Begin(EquipmentInstanceFingerprint fingerprint)
@@ -96,14 +101,10 @@ public sealed class DalamudItemContextActionUiTransaction
 
         if (menuSelectionSubmitted)
             return DalamudUiTransactionResult.Pending($"Waiting for {option.SemanticName} to change the exact inventory slot.");
-        if (!exactIdentityStillValid(fingerprint))
-            return DalamudUiTransactionResult.Fail("ExactIdentityChanged", "The approved exact item changed before context-menu selection.");
-        if (!mutationStillAuthorized())
-            return DalamudUiTransactionResult.Fail("MutationAuthorizationLost", $"The approved batch or automation ownership changed before {option.SemanticName} selection.");
         var opened = contextMenuOpener.Advance(fingerprint);
         if (!opened.Success)
             return opened;
-        return SelectOption(fingerprint);
+        return SelectOption(fingerprint, mutationStillAuthorized);
     }
 
     public unsafe DalamudUiTransactionResult Probe(EquipmentInstanceFingerprint fingerprint)
@@ -115,7 +116,7 @@ public sealed class DalamudItemContextActionUiTransaction
         var opened = contextMenuOpener.Advance(fingerprint);
         if (!opened.Success)
             return opened;
-        return ResolveVisibleOption(fingerprint, submit: false);
+        return ResolveVisibleOption(fingerprint, submit: false, mutationStillAuthorized: null);
     }
 
     public void Complete()
@@ -144,10 +145,15 @@ public sealed class DalamudItemContextActionUiTransaction
             Complete();
     }
 
-    private unsafe DalamudUiTransactionResult SelectOption(EquipmentInstanceFingerprint fingerprint) =>
-        ResolveVisibleOption(fingerprint, submit: true);
+    private unsafe DalamudUiTransactionResult SelectOption(
+        EquipmentInstanceFingerprint fingerprint,
+        Func<bool> mutationStillAuthorized) =>
+        ResolveVisibleOption(fingerprint, submit: true, mutationStillAuthorized);
 
-    private unsafe DalamudUiTransactionResult ResolveVisibleOption(EquipmentInstanceFingerprint fingerprint, bool submit)
+    private unsafe DalamudUiTransactionResult ResolveVisibleOption(
+        EquipmentInstanceFingerprint fingerprint,
+        bool submit,
+        Func<bool>? mutationStillAuthorized)
     {
         if (!Enum.TryParse<InventoryType>(fingerprint.Container, out var inventoryType))
             return DalamudUiTransactionResult.Fail("UnsupportedContainer", $"Inventory container {fingerprint.Container} is not recognized.");
@@ -185,6 +191,10 @@ public sealed class DalamudItemContextActionUiTransaction
         if (!menuStability.Observe(true))
             return DalamudUiTransactionResult.Pending(
                 $"Waiting for the enabled {option.SemanticName} entry to remain stable ({menuStability.ObservedConsecutiveFrames}/{menuStability.RequiredConsecutiveFrames} frames).");
+        if (!exactIdentityStillValid(fingerprint))
+            return DalamudUiTransactionResult.Fail("ExactIdentityChanged", "The approved exact item changed before context-menu selection.");
+        if (mutationStillAuthorized is null || !mutationStillAuthorized())
+            return DalamudUiTransactionResult.Fail("MutationAuthorizationLost", $"The approved batch or automation ownership changed before {option.SemanticName} selection.");
         var values = stackalloc AtkValue[5];
         values[0] = new() { Type = AtkValueType.Int, Int = 0 };
         values[1] = new() { Type = AtkValueType.Int, Int = match.Index };

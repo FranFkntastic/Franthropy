@@ -12,7 +12,7 @@ namespace Franthropy.Dalamud.Automation.Inventory;
 /// </summary>
 public sealed class DalamudExactSlotContextMenuOpener
 {
-    private readonly DalamudUiStabilityGate ownerStability = new(6);
+    private readonly DalamudUiStabilityGate ownerStability;
     private string? targetContainer;
     private int targetSlot;
     private InventoryType inventoryType;
@@ -23,6 +23,13 @@ public sealed class DalamudExactSlotContextMenuOpener
     private bool contextMenuRequested;
 
     public string Status { get; private set; } = "Idle.";
+
+    public DalamudExactSlotContextMenuOpener(int requiredStableFrames = 6)
+    {
+        if (requiredStableFrames <= 0)
+            throw new ArgumentOutOfRangeException(nameof(requiredStableFrames));
+        ownerStability = new DalamudUiStabilityGate(requiredStableFrames);
+    }
 
     public unsafe DalamudUiTransactionResult Begin(EquipmentInstanceFingerprint fingerprint)
     {
