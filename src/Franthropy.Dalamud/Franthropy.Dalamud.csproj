@@ -71,6 +71,9 @@
     <Compile Remove="Automation\Inventory\DalamudMateriaRetrievalUiTransaction.cs" />
     <Compile Remove="Automation\Inventory\DalamudItemContextActionUiTransaction.cs" />
     <Compile Remove="Automation\Retainers\DalamudSummoningBellInteractor.cs" />
+    <Compile Remove="Automation\Inventory\DalamudInventoryStackScanner.cs" />
+    <Compile Remove="Automation\Retainers\DalamudRetainerCrystalTransfer.cs" />
+    <Compile Remove="Automation\Retainers\DalamudRetainerInventory.cs" />
     <Compile Remove="UI\Settings\DalamudSettingsTreeRenderer.cs" />
   </ItemGroup>
 
