@@ -48,10 +48,6 @@ public abstract class FilterField
     public abstract IReadOnlyList<FilterValueReference> Values { get; }
     internal virtual bool CanBeBareBoolean => false;
 
-    internal abstract BoundFieldTest? Bind(
-        FilterComparisonOperator comparison,
-        FilterValueSyntax value,
-        DiagnosticBag diagnostics);
 }
 
 public sealed class FilterField<T> : FilterField
@@ -89,7 +85,7 @@ public sealed class FilterField<T> : FilterField
         .ToArray();
     internal override bool CanBeBareBoolean => typeof(T) == typeof(bool);
 
-    internal override BoundFieldTest? Bind(
+    internal BoundFieldTest<T>? BindTyped(
         FilterComparisonOperator comparison,
         FilterValueSyntax value,
         DiagnosticBag diagnostics)
@@ -135,11 +131,11 @@ public sealed class FilterField<T> : FilterField
         result = comparison switch
         {
             FilterComparisonOperator.Match when textMatching && actual is string text =>
-                values.Cast<string>().Any(value => text.Contains(value, StringComparison.OrdinalIgnoreCase)),
+                TextContainsAny(text, values),
             FilterComparisonOperator.Match or FilterComparisonOperator.Equals =>
-                values.Any(value => equalityComparer.Equals(actual, value)),
+                EqualsAny(actual, values),
             FilterComparisonOperator.NotEquals =>
-                values.All(value => !equalityComparer.Equals(actual, value)),
+                !EqualsAny(actual, values),
             FilterComparisonOperator.Less => orderComparer!.Compare(actual, values[0]) < 0,
             FilterComparisonOperator.LessOrEqual => orderComparer!.Compare(actual, values[0]) <= 0,
             FilterComparisonOperator.Greater => orderComparer!.Compare(actual, values[0]) > 0,
@@ -147,6 +143,26 @@ public sealed class FilterField<T> : FilterField
             _ => false,
         };
         return ToTruth(result);
+    }
+
+    private static bool TextContainsAny(string actual, IReadOnlyList<T> values)
+    {
+        for (var i = 0; i < values.Count; i++)
+        {
+            if (actual.Contains((string)(object)values[i]!, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    private bool EqualsAny(T actual, IReadOnlyList<T> values)
+    {
+        for (var i = 0; i < values.Count; i++)
+        {
+            if (equalityComparer.Equals(actual, values[i]))
+                return true;
+        }
+        return false;
     }
 
     private bool TryResolveValue(
@@ -285,7 +301,7 @@ public sealed class FilterSetField<T> : FilterField
         .Select(candidate => new FilterValueReference(candidate.DisplayName, candidate.Aliases ?? []))
         .ToArray();
 
-    internal override BoundFieldTest? Bind(
+    internal BoundSetFieldTest<T>? BindTyped(
         FilterComparisonOperator comparison,
         FilterValueSyntax value,
         DiagnosticBag diagnostics)
@@ -345,8 +361,8 @@ public sealed class FilterSetField<T> : FilterField
     }
 }
 
-internal readonly record struct UntypedFieldEvidence(bool IsKnown, object? Value, string? UnknownReason);
-internal delegate FilterTruth BoundFieldTest(UntypedFieldEvidence evidence);
+internal delegate FilterTruth BoundFieldTest<T>(FieldEvidence<T> evidence);
+internal delegate FilterTruth BoundSetFieldTest<T>(FieldEvidence<IReadOnlyCollection<T>> evidence);
 internal abstract record BoundOperand<T>;
 internal sealed record BoundValuesOperand<T>(IReadOnlyList<T> Values) : BoundOperand<T>;
 internal sealed record BoundRangeOperand<T>(bool HasLower, T Lower, bool HasUpper, T Upper) : BoundOperand<T>;

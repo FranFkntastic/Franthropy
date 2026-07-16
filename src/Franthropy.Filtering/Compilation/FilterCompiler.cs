@@ -93,8 +93,13 @@ public static class FilterCompiler
                     : FilterTruth.False;
             }))
             .ToArray();
-        return record => evaluators.Aggregate(FilterTruth.False,
-            (truth, evaluator) => FilterTruthOperations.Or(truth, evaluator(record)));
+        return record =>
+        {
+            var truth = FilterTruth.False;
+            for (var i = 0; i < evaluators.Length; i++)
+                truth = FilterTruthOperations.Or(truth, evaluators[i](record));
+            return truth;
+        };
     }
 
     private static Func<TRecord, FilterTruth> BindField<TRecord>(
@@ -139,10 +144,8 @@ public static class FilterCompiler
         if (!FilterComparisonOperatorExtensions.TryFromToken(comparator, out var comparison))
             return _ => FilterTruth.Unknown;
 
-        var test = field.Bind(comparison, value, diagnostics);
-        return test is null
-            ? _ => FilterTruth.Unknown
-            : record => test(accessor(record));
+        var evaluator = accessor.Bind(comparison, value, diagnostics);
+        return evaluator ?? (_ => FilterTruth.Unknown);
     }
 
     private static Func<TRecord, FilterTruth> BindEvidenceFunction<TRecord>(
@@ -170,6 +173,6 @@ public static class FilterCompiler
         }
 
         var wantsKnown = function.Function.Value.Equals("known", StringComparison.OrdinalIgnoreCase);
-        return record => accessor(record).IsKnown == wantsKnown ? FilterTruth.True : FilterTruth.False;
+        return record => accessor.IsKnown(record) == wantsKnown ? FilterTruth.True : FilterTruth.False;
     }
 }

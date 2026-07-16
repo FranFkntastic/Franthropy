@@ -19,6 +19,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Franthropy.FFXIV", "src\Fra
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Franthropy.FFXIV.Tests", "tests\Franthropy.FFXIV.Tests\Franthropy.FFXIV.Tests.csproj", "{C2A0423F-B6DB-4579-9D4D-F79B875CAFCB}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "benchmarks", "benchmarks", "{66320409-64EC-F7C5-3DEF-65E7510DAAD1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Franthropy.Filtering.Benchmarks", "benchmarks\Franthropy.Filtering.Benchmarks\Franthropy.Filtering.Benchmarks.csproj", "{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -101,6 +105,18 @@ Global
 		{C2A0423F-B6DB-4579-9D4D-F79B875CAFCB}.Release|x64.Build.0 = Release|Any CPU
 		{C2A0423F-B6DB-4579-9D4D-F79B875CAFCB}.Release|x86.ActiveCfg = Release|Any CPU
 		{C2A0423F-B6DB-4579-9D4D-F79B875CAFCB}.Release|x86.Build.0 = Release|Any CPU
+		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD}.Debug|x64.Build.0 = Debug|Any CPU
+		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD}.Debug|x86.Build.0 = Debug|Any CPU
+		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD}.Release|x64.ActiveCfg = Release|Any CPU
+		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD}.Release|x64.Build.0 = Release|Any CPU
+		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD}.Release|x86.ActiveCfg = Release|Any CPU
+		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -112,5 +128,6 @@ Global
 		{11C9541F-0CCE-4862-9CF3-314722186AB7} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{CE6237BA-976D-418B-8A9E-2CB9D1237B5F} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{C2A0423F-B6DB-4579-9D4D-F79B875CAFCB} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD} = {66320409-64EC-F7C5-3DEF-65E7510DAAD1}
 	EndGlobalSection
 EndGlobal
