@@ -75,6 +75,8 @@
     <Compile Remove="Automation\Retainers\DalamudRetainerCrystalTransfer.cs" />
     <Compile Remove="Automation\Retainers\DalamudRetainerInventory.cs" />
     <Compile Remove="UI\Settings\DalamudSettingsTreeRenderer.cs" />
+    <Compile Remove="UI\Items\DalamudItemAutocompleteRenderer.cs" />
+    <Compile Remove="AgentBridge\AgentBridgeUiReviewRegistryImGuiExtensions.cs" />
   </ItemGroup>
 
 </Project>
