@@ -42,8 +42,11 @@ The program finishes when:
 | Phase 1: syntax kernel | Complete | 21 filtering tests and 124 existing Franthropy tests pass |
 | Phase 2: semantic binding | Complete | 58 filtering tests pass on `net10.0`; kernel builds on `net8.0` and `net10.0` |
 | Phase 3: canonical FFXIV catalog | Complete | 29 documented fields, name-first resolver contracts, generated reference writers, and 8 catalog tests pass |
-| Phase 4: MMF contracts and normalization | In progress | Inventory transport and persistence seams under audit |
-| Later phases | Not started | — |
+| Phase 4: MMF contracts and normalization | Complete locally | Shared browser DTOs, typed evidence normalization, and legacy condition behavior covered by server tests |
+| Phase 5: Inventory Viewer contexts | Complete locally | Separate Items, Stacks, and Listings contexts with name-first filtering and contextual metrics |
+| Phase 6: completion and help | In progress | Shared completion service, generated active-context help, inline popup, URL state, and last-valid results implemented; saved filters remain |
+| Phase 7: capture schema vNext | In progress | Schema 2 preserves physical stacks, HQ, location, container, slot, equipped, and explicit condition percent; completeness and item catalog remain |
+| Later phases | Not started | Changes mode and automation review remain gated |
 
 ## Non-negotiable boundaries
 
@@ -615,6 +618,14 @@ Establish machine-recorded baselines before optimizing. Initial targets for ordi
 
 These are engineering budgets, not user-facing guarantees. Record the machine and dataset with benchmark results. A missed budget requires profiling and an explicit decision; it must not be hidden by increasing debounce until the UI feels sluggish.
 
+Recorded local baseline (2026-07-16, .NET 10.0.9, Windows 10.0.19045, 12 logical processors):
+
+- ordinary expression compilation p95: 0.009 ms over 2,000 samples;
+- 50,000-record evaluation: 16.171 ms;
+- evaluator hot-path allocation: 0 bytes.
+
+The repeatable harness lives in `benchmarks/Franthropy.Filtering.Benchmarks` and exits unsuccessfully when these initial compile, throughput, or allocation budgets regress.
+
 ## Test program
 
 ### Franthropy kernel
@@ -755,53 +766,53 @@ Land Franthropy primitives and their independent verification before the MMF com
 
 ### Semantics
 
-- [ ] Type system and operators implemented.
-- [ ] Catalog and context registration implemented.
-- [ ] Known/unknown evidence implemented.
-- [ ] Three-valued evaluator implemented.
-- [ ] Compilation cache implemented.
-- [ ] Completion and reference models implemented.
+- [x] Type system and operators implemented.
+- [x] Catalog and context registration implemented.
+- [x] Known/unknown evidence implemented.
+- [x] Three-valued evaluator implemented.
+- [x] Compilation cache implemented.
+- [x] Completion, completion service, and reference models implemented.
 
 ### Canonical FFXIV catalog
 
-- [ ] `Franthropy.FFXIV` project created.
-- [ ] All canonical field descriptors registered.
-- [ ] Named value catalogs implemented.
-- [ ] Name-first resolver contracts implemented.
-- [ ] Generated Markdown/JSON reference implemented.
-- [ ] Catalog snapshot tests green.
+- [x] `Franthropy.FFXIV` project created.
+- [x] All canonical field descriptors registered.
+- [x] Named value catalogs implemented.
+- [x] Name-first resolver contracts implemented.
+- [x] Generated Markdown/JSON reference implemented.
+- [x] Catalog snapshot tests green.
 
 ### Inventory Viewer foundation
 
-- [ ] Browser DTO duplication removed.
-- [ ] Normalization separated from projection.
-- [ ] Existing condition evidence preserved.
-- [ ] Legacy unknown-condition behavior tested.
-- [ ] HTML mockup covers Items, Stacks, Listings, and Changes.
+- [x] Browser DTO duplication removed.
+- [x] Normalization separated from projection.
+- [x] Existing condition evidence preserved and normalized across legacy fraction/percentage scales.
+- [x] Legacy unknown-condition behavior tested.
+- [x] HTML mockup covers Items, Stacks, and Listings; Changes remains a later-phase surface.
 
 ### Inventory Viewer contexts
 
-- [ ] Stacks mode and item-instance context complete.
-- [ ] Items mode and ownership-summary context complete.
-- [ ] Listings mode and purchase-offer context complete.
-- [ ] Contextual metrics verified.
-- [ ] Invalid typing retains last valid results.
-- [ ] Completion and contextual reference complete.
+- [x] Stacks mode and item-instance context complete.
+- [x] Items mode and ownership-summary context complete.
+- [x] Listings mode and purchase-offer context complete.
+- [x] Contextual metrics verified.
+- [x] Invalid typing retains last valid results.
+- [x] Completion and contextual reference use the active bound context.
 
 ### Capture and history
 
-- [ ] Schema vNext designed and reviewed.
+- [x] Schema vNext additive evidence boundary designed and implemented for the first proven instance fields.
 - [ ] Completeness metadata implemented.
 - [ ] Deduplicated item catalog implemented.
-- [ ] New per-instance evidence implemented.
-- [ ] Old schema fixtures remain supported.
+- [x] Physical stack, HQ, semantic location, container, slot, equipped, and explicit condition evidence implemented.
+- [x] Old schema persistence and normalization remain supported.
 - [ ] Real capture/upload/view loop verified.
 - [ ] Changes vocabulary proposed and approved.
 - [ ] Changes mode implemented.
 
 ### Release readiness
 
-- [ ] Performance budgets measured.
+- [x] Performance budgets measured and enforced by a repeatable harness.
 - [ ] Accessibility and responsive layout reviewed.
 - [ ] Browser interaction loop visually tested.
 - [ ] Generated documentation published from catalog artifacts.
@@ -820,6 +831,9 @@ Land Franthropy primitives and their independent verification before the MMF com
 | 2026-07-16 | Distinguish item acquisition sources from actionable offer sources. | `acquisition.source` and `offer.source` coexist; duplicate craft/vendor booleans are avoided. |
 | 2026-07-16 | Treat IDs as internal. | Inputs, completion, examples, and ordinary rows remain name-first. |
 | 2026-07-16 | Preserve old snapshots through unknown evidence. | Schema expansion is additive and never fabricates new historical facts. |
+| 2026-07-16 | Keep typed evidence through the compiled hot path. | Evaluation no longer boxes value evidence or allocates per-record LINQ iterators. |
+| 2026-07-16 | Return active-context completion and reference metadata with the cancellable browser response for the pilot. | One snapshot-specific context build powers results and editor metadata; a separate endpoint remains optional if measured payload cost warrants it. |
+| 2026-07-16 | Limit the first schema-2 expansion to evidence already proven useful by Stacks mode. | Completeness, spiritbond, materia, glamour, and the deduplicated item catalog remain explicit follow-up slices rather than speculative payload growth. |
 
 ## Open implementation questions
 
@@ -827,9 +841,9 @@ Resolve these at the named phase and record the answer in the decision log:
 
 - Phase 1: preferred normalized operator spelling and percentage literal normalization.
 - Phase 3: exact stable keys and aliases for inventory locations, rarity, and acquisition sources.
-- Phase 4: whether all Inventory Report contracts move into `MarketMafioso.Contracts` at once or through compatibility adapters.
+- Phase 4 resolved: browser transport moved to `MarketMafioso.Contracts`; the established report contract remains compatibility-adapted until a dedicated shared-report migration earns its own slice.
 - Phase 5B: canonical representation for an ownership summary's set of contributing locations.
-- Phase 6: whether the Dashboard references the pure parser for immediate span rendering or relies entirely on server responses.
+- Phase 6 resolved for the pilot: the Dashboard renders server diagnostics, completion spans, and generated context metadata without implementing semantic parsing.
 - Phase 7: item-catalog invalidation key and acceptable payload-size budget.
 - Phase 7: explicit completeness model for player bags, armoury, retainers, and offline characters.
 - Phase 8: stable change identity before and after exact slot capture exists.
