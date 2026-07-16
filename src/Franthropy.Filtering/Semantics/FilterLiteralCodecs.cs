@@ -213,3 +213,22 @@ internal sealed class NamedLiteralCodec<T>(IFilterNamedValueResolver<T> resolver
         };
     }
 }
+
+internal sealed class ValidatedLiteralCodec<T>(
+    IFilterLiteralCodec<T> inner,
+    Func<T, bool> predicate,
+    Func<T, string> errorMessage) : IFilterLiteralCodec<T>
+{
+    public string TypeName => inner.TypeName;
+    public IReadOnlyList<FilterLiteralCandidate<T>> Values => inner.Values;
+
+    public FilterLiteralResolution<T> Resolve(string text)
+    {
+        var resolution = inner.Resolve(text);
+        if (resolution.Kind != FilterLiteralResolutionKind.Success)
+            return resolution;
+        return predicate(resolution.Value!)
+            ? resolution
+            : FilterLiteralResolution<T>.NotFound(errorMessage(resolution.Value!));
+    }
+}

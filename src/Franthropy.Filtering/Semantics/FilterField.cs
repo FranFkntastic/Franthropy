@@ -390,16 +390,22 @@ public static class FilterFields
         string key,
         string? displayName = null,
         string description = "",
-        IEnumerable<string>? aliases = null) =>
-        new(key, displayName ?? key, description, FilterValueKind.Integer, new Int64LiteralCodec("integer"), OrderedOperators,
+        IEnumerable<string>? aliases = null,
+        long? minimum = null,
+        long? maximum = null) =>
+        new(key, displayName ?? key, description, FilterValueKind.Integer,
+            Validate(new Int64LiteralCodec("integer"), minimum, maximum), OrderedOperators,
             aliases, orderComparer: Comparer<long>.Default);
 
     public static FilterField<decimal> Decimal(
         string key,
         string? displayName = null,
         string description = "",
-        IEnumerable<string>? aliases = null) =>
-        new(key, displayName ?? key, description, FilterValueKind.Decimal, new DecimalLiteralCodec("number"), OrderedOperators,
+        IEnumerable<string>? aliases = null,
+        decimal? minimum = null,
+        decimal? maximum = null) =>
+        new(key, displayName ?? key, description, FilterValueKind.Decimal,
+            Validate(new DecimalLiteralCodec("number"), minimum, maximum), OrderedOperators,
             aliases, orderComparer: Comparer<decimal>.Default);
 
     public static FilterField<TimeSpan> Duration(
@@ -440,4 +446,25 @@ public static class FilterFields
         IEnumerable<string>? aliases = null,
         IEqualityComparer<T>? comparer = null) =>
         new(key, displayName ?? key, description, new NamedLiteralCodec<T>(resolver, typeName), aliases, comparer);
+
+    private static IFilterLiteralCodec<T> Validate<T>(
+        IFilterLiteralCodec<T> codec,
+        T? minimum,
+        T? maximum)
+        where T : struct, IComparable<T>
+    {
+        if (minimum is null && maximum is null)
+            return codec;
+        return new ValidatedLiteralCodec<T>(codec,
+            value => (minimum is null || value.CompareTo(minimum.Value) >= 0) &&
+                     (maximum is null || value.CompareTo(maximum.Value) <= 0),
+            value => $"'{value}' is outside the allowed range{FormatBounds(minimum, maximum)}.");
+    }
+
+    private static string FormatBounds<T>(T? minimum, T? maximum) where T : struct =>
+        minimum is not null && maximum is not null
+            ? $" {minimum} through {maximum}"
+            : minimum is not null
+                ? $" beginning at {minimum}"
+                : $" ending at {maximum}";
 }

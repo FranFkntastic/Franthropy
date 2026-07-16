@@ -1,4 +1,6 @@
 using Franthropy.Filtering.Semantics;
+using System.Text;
+using System.Text.Json;
 
 namespace Franthropy.Filtering.Documentation;
 
@@ -16,10 +18,21 @@ public sealed record FilterFieldReference(
     IReadOnlyList<string> Aliases,
     IReadOnlyList<string> Operators,
     bool IsAvailable,
+    bool IsDefaultText,
     IReadOnlyList<FilterValueReference> Values);
 
 public static class FilterReferenceGenerator
 {
+    public static FilterReferenceModel Create(FilterCatalog catalog)
+    {
+        ArgumentNullException.ThrowIfNull(catalog);
+        return new FilterReferenceModel(
+            catalog.Version,
+            "catalog",
+            catalog.Version,
+            catalog.Fields.Select(field => CreateField(field, true, false)).ToArray());
+    }
+
     public static FilterReferenceModel Create<TRecord>(FilterContext<TRecord> context)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -27,14 +40,62 @@ public static class FilterReferenceGenerator
             context.Catalog.Version,
             context.ContextId,
             context.SchemaVersion,
-            context.Catalog.Fields.Select(field => new FilterFieldReference(
-                field.Key,
-                field.DisplayName,
-                field.Description,
-                field.ValueKind,
-                field.Aliases,
-                field.Operators.Select(value => value.Display()).OrderBy(value => value, StringComparer.Ordinal).ToArray(),
+            context.Catalog.Fields.Select(field => CreateField(
+                field,
                 context.AvailableKeys.Contains(field.Key),
-                field.Values)).ToArray());
+                context.DefaultTextBindings.Any(binding => binding.Field == field))).ToArray());
+    }
+
+    private static FilterFieldReference CreateField(FilterField field, bool isAvailable, bool isDefaultText) => new(
+        field.Key,
+        field.DisplayName,
+        field.Description,
+        field.ValueKind,
+        field.Aliases,
+        field.Operators.Select(value => value.Display()).OrderBy(value => value, StringComparer.Ordinal).ToArray(),
+        isAvailable,
+        isDefaultText,
+        field.Values);
+}
+
+public static class FilterReferenceWriter
+{
+    public static string ToJson(FilterReferenceModel reference, bool indented = true)
+    {
+        ArgumentNullException.ThrowIfNull(reference);
+        return JsonSerializer.Serialize(reference, new JsonSerializerOptions
+        {
+            WriteIndented = indented,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        });
+    }
+
+    public static string ToMarkdown(FilterReferenceModel reference, string title = "Filter reference")
+    {
+        ArgumentNullException.ThrowIfNull(reference);
+        var builder = new StringBuilder();
+        builder.Append("# ").AppendLine(title).AppendLine();
+        builder.Append("Catalog version: `").Append(reference.CatalogVersion).AppendLine("`").AppendLine();
+        builder.Append("Context: `").Append(reference.ContextId).Append("` (schema `")
+            .Append(reference.ContextSchemaVersion).AppendLine("`)").AppendLine();
+        foreach (var field in reference.Fields)
+        {
+            builder.Append("## `").Append(field.Key).AppendLine("`").AppendLine();
+            builder.AppendLine(field.Description).AppendLine();
+            builder.Append("- Type: `").Append(field.ValueKind).AppendLine("`");
+            builder.Append("- Available: ").AppendLine(field.IsAvailable ? "yes" : "no");
+            builder.Append("- Operators: ").AppendLine(string.Join(", ", field.Operators.Select(value => $"`{value}`")));
+            if (field.Aliases.Count > 0)
+                builder.Append("- Aliases: ").AppendLine(string.Join(", ", field.Aliases.Select(value => $"`{value}`")));
+            if (field.Values.Count > 0)
+            {
+                builder.Append("- Values: ").AppendLine(string.Join(", ", field.Values.Select(value =>
+                    value.Aliases.Count == 0
+                        ? $"`{value.DisplayName}`"
+                        : $"`{value.DisplayName}` ({string.Join(", ", value.Aliases.Select(alias => $"`{alias}`"))})")));
+            }
+            builder.AppendLine();
+        }
+        return builder.ToString();
     }
 }

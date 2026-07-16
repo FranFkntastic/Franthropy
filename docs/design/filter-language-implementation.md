@@ -40,7 +40,9 @@ The program finishes when:
 | --- | --- | --- |
 | Documentation baseline | Complete | Architecture, vocabulary, and roadmap committed as `1b5837b` |
 | Phase 1: syntax kernel | Complete | 21 filtering tests and 124 existing Franthropy tests pass |
-| Phase 2: semantic binding | In progress | — |
+| Phase 2: semantic binding | Complete | 58 filtering tests pass on `net10.0`; kernel builds on `net8.0` and `net10.0` |
+| Phase 3: canonical FFXIV catalog | Complete | 29 documented fields, name-first resolver contracts, generated reference writers, and 8 catalog tests pass |
+| Phase 4: MMF contracts and normalization | In progress | Inventory transport and persistence seams under audit |
 | Later phases | Not started | — |
 
 ## Non-negotiable boundaries

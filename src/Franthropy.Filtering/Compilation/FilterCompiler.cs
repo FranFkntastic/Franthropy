@@ -74,17 +74,24 @@ public static class FilterCompiler
             }
         }
 
-        if (context.DefaultTextFields.Count == 0)
+        if (context.DefaultTextBindings.Count == 0)
         {
             diagnostics.Add(FilterDiagnosticCodes.NoDefaultTextField,
                 "This filter context has no default text field for free-text search.", freeText.Span);
             return _ => FilterTruth.Unknown;
         }
 
-        var value = new FilterScalarValueSyntax(freeText.Text);
-        var comparator = new FilterToken(FilterTokenKind.Colon, ":", ":", freeText.Span);
-        var evaluators = context.DefaultTextFields
-            .Select(field => BindResolvedField(field, comparator, value, context, diagnostics, freeText.Span))
+        var searchText = freeText.Text.Value;
+        var evaluators = context.DefaultTextBindings
+            .Select(binding => (Func<TRecord, FilterTruth>)(record =>
+            {
+                var evidence = binding.Accessor(record);
+                if (!evidence.IsKnown)
+                    return FilterTruth.Unknown;
+                return evidence.Value.Contains(searchText, StringComparison.OrdinalIgnoreCase)
+                    ? FilterTruth.True
+                    : FilterTruth.False;
+            }))
             .ToArray();
         return record => evaluators.Aggregate(FilterTruth.False,
             (truth, evaluator) => FilterTruthOperations.Or(truth, evaluator(record)));
