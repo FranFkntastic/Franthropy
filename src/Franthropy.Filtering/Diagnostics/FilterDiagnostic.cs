@@ -33,6 +33,13 @@ public static class FilterDiagnosticCodes
     public const string ExpectedListSeparator = "FLT2004";
     public const string RangeNeedsEndpoint = "FLT2005";
     public const string UnexpectedToken = "FLT2006";
+    public const string UnknownField = "FLT3001";
+    public const string UnavailableField = "FLT3002";
+    public const string AmbiguousField = "FLT3003";
+    public const string InvalidValue = "FLT3004";
+    public const string AmbiguousValue = "FLT3005";
+    public const string InvalidOperator = "FLT3006";
+    public const string NoDefaultTextField = "FLT3007";
 }
 
 internal sealed class DiagnosticBag(int maximumCount)
