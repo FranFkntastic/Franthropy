@@ -14,7 +14,11 @@ public enum EquipmentFeasibilityViolationKind
 
 public sealed record EquipmentFeasibilityOffer(
     EquipmentLoadoutOffer Offer,
-    uint AvailableQuantity);
+    uint AvailableQuantity,
+    string? ObservationId = null)
+{
+    public EquipmentOfferAllocationKey AllocationKey => new(Offer.Key, ObservationId);
+}
 
 public sealed record EquipmentFeasibilityViolation(
     EquipmentFeasibilityViolationKind Kind,
@@ -47,12 +51,19 @@ public sealed class EquipmentLoadoutFeasibilityEvaluator : IEquipmentLoadoutFeas
         ArgumentNullException.ThrowIfNull(request);
         var violations = new List<EquipmentFeasibilityViolation>();
         var offers = request.Offers
-            .GroupBy(value => value.Offer.Key)
+            .GroupBy(value => value.AllocationKey)
             .ToDictionary(group => group.Key, group => group.First());
         foreach (var duplicate in request.Candidate.Selections.GroupBy(selection => selection.Position).Where(group => group.Count() > 1))
             violations.Add(new(EquipmentFeasibilityViolationKind.DuplicatePosition, $"Position {duplicate.Key} is allocated more than once.", duplicate.Key));
 
-        foreach (var required in request.RequiredPositions.Except(request.Candidate.Selections.Select(selection => selection.Position)))
+        var selectedMainHand = request.Candidate.Selections.FirstOrDefault(selection => selection.Position == EquipmentLoadoutPosition.MainHand);
+        EquipmentFeasibilityOffer? selectedMainHandOffer = null;
+        var mainHandOccupiesOffHand = selectedMainHand is not null &&
+            offers.TryGetValue(selectedMainHand.AllocationKey, out selectedMainHandOffer) &&
+            selectedMainHandOffer.Offer.Definition.OffHandOccupancy == -1;
+        foreach (var required in request.RequiredPositions
+            .Where(position => position != EquipmentLoadoutPosition.OffHand || !mainHandOccupiesOffHand)
+            .Except(request.Candidate.Selections.Select(selection => selection.Position)))
             violations.Add(new(EquipmentFeasibilityViolationKind.MissingRequiredPosition, $"Required position {required} is unfilled.", required));
 
         foreach (var selection in request.Candidate.Selections)
@@ -65,7 +76,7 @@ public sealed class EquipmentLoadoutFeasibilityEvaluator : IEquipmentLoadoutFeas
                     selection.Position,
                     selection.OfferKey));
             }
-            if (!offers.TryGetValue(selection.OfferKey, out var available))
+            if (!offers.TryGetValue(selection.AllocationKey, out var available))
             {
                 violations.Add(new(
                     EquipmentFeasibilityViolationKind.MissingOffer,
@@ -84,7 +95,7 @@ public sealed class EquipmentLoadoutFeasibilityEvaluator : IEquipmentLoadoutFeas
             }
         }
 
-        foreach (var allocation in request.Candidate.Selections.GroupBy(selection => selection.OfferKey))
+        foreach (var allocation in request.Candidate.Selections.GroupBy(selection => selection.AllocationKey))
         {
             if (!offers.TryGetValue(allocation.Key, out var available))
                 continue;
@@ -93,28 +104,26 @@ public sealed class EquipmentLoadoutFeasibilityEvaluator : IEquipmentLoadoutFeas
                 violations.Add(new(
                     EquipmentFeasibilityViolationKind.InsufficientQuantity,
                     $"Offer {allocation.Key} requires {consumed} items but only {available.AvailableQuantity} are available.",
-                    OfferKey: allocation.Key));
+                    OfferKey: allocation.Key.OfferKey));
         }
 
         foreach (var unique in request.Candidate.Selections
-            .Where(selection => offers.TryGetValue(selection.OfferKey, out var value) && value.Offer.Definition.IsUnique)
+            .Where(selection => offers.TryGetValue(selection.AllocationKey, out var value) && value.Offer.Definition.IsUnique)
             .GroupBy(selection => selection.OfferKey.ItemId)
             .Where(group => group.Sum(selection => selection.Quantity) > 1))
             violations.Add(new(
                 EquipmentFeasibilityViolationKind.UniqueItemConflict,
                 $"Unique item {unique.Key} is allocated more than once."));
 
-        var mainHand = request.Candidate.Selections.FirstOrDefault(selection => selection.Position == EquipmentLoadoutPosition.MainHand);
-        if (mainHand is not null &&
-            offers.TryGetValue(mainHand.OfferKey, out var mainHandOffer) &&
-            mainHandOffer.Offer.Definition.OffHandOccupancy == -1 &&
+        if (selectedMainHand is not null &&
+            mainHandOccupiesOffHand &&
             request.Candidate.Selections.Any(selection => selection.Position == EquipmentLoadoutPosition.OffHand))
         {
             violations.Add(new(
                 EquipmentFeasibilityViolationKind.HandOccupancyConflict,
-                $"{mainHandOffer.Offer.Definition.Name} occupies the off-hand position.",
+                $"{selectedMainHandOffer!.Offer.Definition.Name} occupies the off-hand position.",
                 EquipmentLoadoutPosition.OffHand,
-                mainHand.OfferKey));
+                selectedMainHand.OfferKey));
         }
 
         return new(violations.Count == 0, violations);

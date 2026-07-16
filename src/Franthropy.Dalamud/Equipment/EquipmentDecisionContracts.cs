@@ -105,7 +105,15 @@ public sealed record EquipmentUtilityEvaluation(
 public sealed record EquipmentLoadoutSelection(
     EquipmentLoadoutPosition Position,
     EquipmentOfferKey OfferKey,
-    uint Quantity = 1);
+    uint Quantity = 1,
+    string? ObservationId = null)
+{
+    public EquipmentOfferAllocationKey AllocationKey => new(OfferKey, ObservationId);
+}
+
+public sealed record EquipmentOfferAllocationKey(
+    EquipmentOfferKey OfferKey,
+    string? ObservationId);
 
 public sealed record EquipmentLoadoutCandidate(
     string SolutionId,
@@ -164,7 +172,11 @@ public sealed record EquipmentEquivalentSolutions(
 public sealed record EquipmentLoadoutPositionChange(
     EquipmentLoadoutPosition Position,
     EquipmentOfferKey? Before,
-    EquipmentOfferKey? After);
+    EquipmentOfferKey? After,
+    uint BeforeQuantity = 0,
+    uint AfterQuantity = 0,
+    string? BeforeObservationId = null,
+    string? AfterObservationId = null);
 
 public sealed record EquipmentLoadoutStructuralDiff(
     IReadOnlyList<EquipmentLoadoutPositionChange> Changes)
@@ -289,8 +301,14 @@ public sealed class EquipmentParetoFrontierBuilder : IEquipmentParetoAdvisor
             .Select(position => new EquipmentLoadoutPositionChange(
                 position,
                 beforeByPosition.GetValueOrDefault(position)?.OfferKey,
-                afterByPosition.GetValueOrDefault(position)?.OfferKey))
-            .Where(change => change.Before != change.After)
+                afterByPosition.GetValueOrDefault(position)?.OfferKey,
+                beforeByPosition.GetValueOrDefault(position)?.Quantity ?? 0,
+                afterByPosition.GetValueOrDefault(position)?.Quantity ?? 0,
+                beforeByPosition.GetValueOrDefault(position)?.ObservationId,
+                afterByPosition.GetValueOrDefault(position)?.ObservationId))
+            .Where(change => change.Before != change.After ||
+                change.BeforeQuantity != change.AfterQuantity ||
+                !string.Equals(change.BeforeObservationId, change.AfterObservationId, StringComparison.Ordinal))
             .ToArray();
         return new(changes);
     }
@@ -383,6 +401,7 @@ public static class EquipmentDecisionReplayJson
                 .ThenBy(selection => selection.OfferKey.Quality)
                 .ThenBy(selection => selection.OfferKey.SourceKind)
                 .ThenBy(selection => selection.OfferKey.SourceCatalogKey, StringComparer.Ordinal)
+                .ThenBy(selection => selection.ObservationId, StringComparer.Ordinal)
                 .ToArray(),
         },
         Utility = solution.Utility with
