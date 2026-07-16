@@ -22,7 +22,7 @@ public static class FilterCompletionService
         var caret = Math.Clamp(request.CaretPosition, 0, expression.Length);
         var replacement = FindReplacementSpan(expression, caret);
         var prefix = expression[replacement.Start..caret].Trim('"');
-        var items = CompleteValues(context, expression, replacement, prefix)
+        var items = CompleteValues(context, expression, replacement, prefix, maximumItems)
                     ?? CompleteFunctionField(context, expression, replacement, prefix)
                     ?? CompleteFields(context, replacement, prefix);
         var diagnostics = FilterCompiler.Compile(expression, context).Diagnostics;
@@ -39,7 +39,8 @@ public static class FilterCompletionService
         FilterContext<TRecord> context,
         string expression,
         TextSpan replacement,
-        string prefix)
+        string prefix,
+        int maximumItems)
     {
         var before = expression[..replacement.Start].TrimEnd();
         var comparatorStart = before.LastIndexOfAny(ComparatorCharacters);
@@ -80,6 +81,7 @@ public static class FilterCompletionService
                 replacement,
                 resolution.Field.Description,
                 resolution.Field.Key))
+            .Take(maximumItems)
             .ToArray();
     }
 
