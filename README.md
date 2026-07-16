@@ -4,12 +4,14 @@ Shared FFXIV toolkit libraries for Franthropy plugins and tools.
 
 ## Projects
 
+- `src/Franthropy.Filtering` - dependency-free filter syntax, diagnostics, typed binding, and evaluation primitives.
 - `src/Franthropy.Dalamud` - Dalamud-aware helper primitives such as world catalog lookups and Lifestream market-board travel command construction.
 
 ## Current Scope
 
 The toolkit scope is intentionally small:
 
+- shared filter-language syntax and diagnostics
 - world catalog lookup
 - Lifestream market-board travel command construction
 - immutable character and equipment observation contracts

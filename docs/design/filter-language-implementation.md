@@ -34,6 +34,15 @@ The program finishes when:
 - parser and evaluator performance are comfortably below interactive latency budgets;
 - no consumer-local token parsing or vocabulary dialect remains in the migrated surfaces.
 
+## Current progress
+
+| Phase | State | Verification |
+| --- | --- | --- |
+| Documentation baseline | Complete | Architecture, vocabulary, and roadmap committed as `1b5837b` |
+| Phase 1: syntax kernel | Complete | 21 filtering tests and 124 existing Franthropy tests pass |
+| Phase 2: semantic binding | In progress | — |
+| Later phases | Not started | — |
+
 ## Non-negotiable boundaries
 
 1. **The parser is not a Dalamud helper.** Generic syntax, semantics, evaluation, diagnostics, completion models, and documentation generation live outside `Franthropy.Dalamud`.
@@ -728,19 +737,19 @@ Land Franthropy primitives and their independent verification before the MMF com
 
 ### Documentation and baseline
 
-- [ ] Architecture, vocabulary, and roadmap committed to Franthropy.
-- [ ] Existing unrelated Franthropy autocomplete work isolated.
-- [ ] Baseline Franthropy and MMF test results recorded.
-- [ ] Feature branch/worktree established.
+- [x] Architecture, vocabulary, and roadmap committed to Franthropy.
+- [x] Existing unrelated Franthropy autocomplete work isolated.
+- [x] Baseline Franthropy test result recorded: 124 passing tests before the kernel.
+- [x] Feature branch/worktree established as `filter-language`.
 
 ### Kernel
 
-- [ ] `Franthropy.Filtering` project created.
-- [ ] Tokenizer and source spans implemented.
-- [ ] Recoverable parser implemented.
-- [ ] Formatter and normalized output implemented.
-- [ ] Complexity limits implemented.
-- [ ] Conformance and hostile-input corpus green.
+- [x] `Franthropy.Filtering` project created.
+- [x] Tokenizer and source spans implemented.
+- [x] Recoverable parser implemented.
+- [x] Formatter and normalized output implemented.
+- [x] Complexity limits implemented.
+- [x] Conformance and hostile-input corpus green: 21 tests.
 
 ### Semantics
 

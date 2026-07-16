@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Title>Franthropy.Filtering</Title>
+    <Description>Typed, dependency-free filter language primitives for Franthropy tools.</Description>
+    <Authors>FranFkntastic</Authors>
+    <Copyright>FranFkntastic</Copyright>
+    <Version>0.1.0.0</Version>
+    <LangVersion>latest</LangVersion>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>CS1591</NoWarn>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+</Project>
