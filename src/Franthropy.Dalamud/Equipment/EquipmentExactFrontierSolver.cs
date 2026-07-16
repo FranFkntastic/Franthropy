@@ -303,8 +303,8 @@ public sealed class EquipmentExactFrontierSolver
             .Order(StringComparer.Ordinal)
             .ToArray();
         var evaluation = request.UtilityModel.Evaluate(state.Utility);
-        if (!double.IsFinite(evaluation.UtilityScore) || evaluation.UtilityScore != Math.Truncate(evaluation.UtilityScore))
-            throw new InvalidOperationException("Exact solver utility models must emit finite deterministic integer utility units.");
+        if (!double.IsFinite(evaluation.UtilityScore))
+            throw new InvalidOperationException("Exact solver utility models must emit finite deterministic utility scores.");
         return new(
             candidate,
             evaluation,

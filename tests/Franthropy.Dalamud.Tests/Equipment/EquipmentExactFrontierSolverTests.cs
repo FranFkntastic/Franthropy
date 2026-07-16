@@ -113,6 +113,25 @@ public sealed class EquipmentExactFrontierSolverTests
     }
 
     [Fact]
+    public void Solve_PreservesDeterministicFractionalUtilityScores()
+    {
+        var baseline = Offer(EquipmentLoadoutPosition.Head, 100, 1, 0, source: EquipmentAcquisitionSourceKind.Owned);
+        var upgrade = Offer(EquipmentLoadoutPosition.Head, 101, 3, 100);
+        var request = new EquipmentExactFrontierRequest(
+            [baseline, upgrade],
+            new HashSet<EquipmentLoadoutPosition> { EquipmentLoadoutPosition.Head },
+            Baseline((EquipmentLoadoutPosition.Head, baseline)),
+            new HalvedUtilityModel());
+
+        var first = new EquipmentExactFrontierSolver().Solve(request);
+        var second = new EquipmentExactFrontierSolver().Solve(request with { Offers = request.Offers.Reverse().ToArray() });
+
+        Assert.Contains(All(first), solution => solution.Utility.UtilityScore == 0.5);
+        Assert.Contains(All(first), solution => solution.Utility.UtilityScore == 1.5);
+        Assert.Equal(Replay(first), Replay(second));
+    }
+
+    [Fact]
     public void Solve_FrontierIsInvariantUnderDominatedOfferInsertion()
     {
         var baseline = Offer(EquipmentLoadoutPosition.Head, 100, 10, 0, source: EquipmentAcquisitionSourceKind.Owned);
@@ -395,6 +414,37 @@ public sealed class EquipmentExactFrontierSolverTests
                     1,
                     component.Units,
                     component.Key)).ToArray(),
+                [],
+                EquipmentEvaluationConfidence.High,
+                []);
+        }
+    }
+
+    private sealed class HalvedUtilityModel : IEquipmentExactSolverUtilityModel
+    {
+        private static readonly EquipmentUtilityProfileKey Profile = new("synthetic-halved", "1");
+        private static readonly EquipmentUtilityContext Context = new("solver-test", 19, 50, "Synthetic fractional solver validation", []);
+
+        public EquipmentPartialUtilityDominance ComparePartial(
+            EquipmentSolverUtilityVector candidate,
+            EquipmentSolverUtilityVector other)
+        {
+            var candidateScore = candidate.Components.Sum(component => component.Units);
+            var otherScore = other.Components.Sum(component => component.Units);
+            return new(candidateScore >= otherScore, candidateScore > otherScore);
+        }
+
+        public EquipmentUtilityEvaluation Evaluate(EquipmentSolverUtilityVector completed)
+        {
+            var score = completed.Components.Sum(component => component.Units) / 2d;
+            return new(
+                Profile,
+                Context,
+                score,
+                new(score, score, []),
+                UpgradeAssessment.ClearImprovement,
+                [],
+                [],
                 [],
                 EquipmentEvaluationConfidence.High,
                 []);
