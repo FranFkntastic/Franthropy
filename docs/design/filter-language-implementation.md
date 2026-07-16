@@ -43,9 +43,9 @@ The program finishes when:
 | Phase 2: semantic binding | Complete | 58 filtering tests pass on `net10.0`; kernel builds on `net8.0` and `net10.0` |
 | Phase 3: canonical FFXIV catalog | Complete | 29 documented fields, name-first resolver contracts, generated reference writers, and 8 catalog tests pass |
 | Phase 4: MMF contracts and normalization | Complete locally | Shared browser DTOs, typed evidence normalization, and legacy condition behavior covered by server tests |
-| Phase 5: Inventory Viewer contexts | Complete locally | Separate Items, Stacks, and Listings contexts with name-first filtering and contextual metrics |
-| Phase 6: completion and help | In progress | Shared completion service, generated active-context help, inline popup, URL state, and last-valid results implemented; saved filters remain |
-| Phase 7: capture schema vNext | In progress | Schema 2 preserves physical stacks, HQ, location, container, slot, equipped, and explicit condition percent; completeness and item catalog remain |
+| Phase 5: Inventory Viewer contexts | Complete locally | Separate Items, Stacks, and Listings contexts with name-first filtering and contextual metrics; 167 server and 926 plugin tests pass |
+| Phase 6: completion and help | In progress | Shared completion service, generated active-context help, inline popup, URL state, last-valid results, and full browser interaction proof complete; saved filters remain |
+| Phase 7: capture schema vNext | In progress | Schema 2 preserves physical stacks, HQ, location, container, slot, equipped, item category, and applicable condition percent; completeness and a deduplicated item catalog remain |
 | Later phases | Not started | Changes mode and automation review remain gated |
 
 ## Non-negotiable boundaries
@@ -805,6 +805,7 @@ Land Franthropy primitives and their independent verification before the MMF com
 - [ ] Completeness metadata implemented.
 - [ ] Deduplicated item catalog implemented.
 - [x] Physical stack, HQ, semantic location, container, slot, equipped, and explicit condition evidence implemented.
+- [x] Capture enriches item category and suppresses condition evidence for item definitions that do not support repair condition.
 - [x] Old schema persistence and normalization remain supported.
 - [ ] Real capture/upload/view loop verified.
 - [ ] Changes vocabulary proposed and approved.
@@ -814,7 +815,7 @@ Land Franthropy primitives and their independent verification before the MMF com
 
 - [x] Performance budgets measured and enforced by a repeatable harness.
 - [ ] Accessibility and responsive layout reviewed.
-- [ ] Browser interaction loop visually tested.
+- [x] Browser interaction loop visually tested across help, selection, invalid typing, completion acceptance, per-mode state, and Listings restoration.
 - [ ] Generated documentation published from catalog artifacts.
 - [ ] Read-only production gates passed before automation review.
 
@@ -834,6 +835,7 @@ Land Franthropy primitives and their independent verification before the MMF com
 | 2026-07-16 | Keep typed evidence through the compiled hot path. | Evaluation no longer boxes value evidence or allocates per-record LINQ iterators. |
 | 2026-07-16 | Return active-context completion and reference metadata with the cancellable browser response for the pilot. | One snapshot-specific context build powers results and editor metadata; a separate endpoint remains optional if measured payload cost warrants it. |
 | 2026-07-16 | Limit the first schema-2 expansion to evidence already proven useful by Stacks mode. | Completeness, spiritbond, materia, glamour, and the deduplicated item catalog remain explicit follow-up slices rather than speculative payload growth. |
+| 2026-07-16 | Treat condition as applicable item-definition evidence, not a universal numeric slot value. | Non-repairable items expose unknown condition instead of masquerading as broken at zero percent. |
 
 ## Open implementation questions
 
