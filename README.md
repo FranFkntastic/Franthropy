@@ -57,3 +57,9 @@ ComplicatedMarketBoard can then reference:
 ```powershell
 dotnet test .\Franthropy.sln -c Debug
 ```
+
+## Design Documents
+
+- [Franthropy Filter Language](docs/design/filter-language.md) - proposed shared filtering engine, canonical FFXIV vocabulary, context binding model, diagnostics, and staged delivery plan.
+- [Canonical FFXIV Filter Vocabulary](docs/design/filter-vocabulary.md) - field semantics, named values, context availability, worked expressions, and vocabulary contribution rules.
+- [Filter Language and Inventory Viewer Implementation Roadmap](docs/design/filter-language-implementation.md) - living cross-repository sequence, Inventory Viewer upgrades, acceptance gates, testing, and decision log.
