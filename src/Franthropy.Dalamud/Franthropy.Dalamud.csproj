@@ -72,6 +72,7 @@
     <Compile Remove="Automation\Inventory\DalamudItemContextActionUiTransaction.cs" />
     <Compile Remove="Automation\Retainers\DalamudSummoningBellInteractor.cs" />
     <Compile Remove="UI\Settings\DalamudSettingsTreeRenderer.cs" />
+    <Compile Remove="UI\Plots\DalamudPlotRenderer.cs" />
   </ItemGroup>
 
 </Project>

@@ -33,6 +33,7 @@ public enum EquipmentDiscipline { Unknown, Combat, Crafter, Gatherer }
 public enum EquipmentWearerKind { Unknown, Cosmetic, Combat, Tank, StrengthCombat, StrengthMelee, Striking, Maiming, DexterityDps, PhysicalRanged, Scouting, Casting, Healing, Crafter, Gatherer }
 public enum EquipmentRarity { Unknown, Normal, Uncommon, Rare, Relic }
 public enum ExpertDeliveryEligibility { Unknown, Ineligible, Eligible }
+public enum EquipmentQuality { Normal, High }
 
 public sealed record EquipmentStatValue(uint BaseParamId, EquipmentStatSemantic Semantic, int Value, bool IsSpecial, string? SourceName = null);
 
@@ -156,6 +157,12 @@ public sealed record EquipmentItemDefinition(
 {
     public bool HasUnmodeledEquipRestriction =>
         EquipRestrictionId > 1 || GrandCompanyId != 0 || RequiredPvpRank != 0;
+
+    public EquipmentStatProfile? ResolveStatProfile(EquipmentQuality quality) => quality switch
+    {
+        EquipmentQuality.High => HighQualityStatProfile,
+        _ => StatProfile,
+    };
 }
 
 public sealed record EquipmentWearerInference(EquipmentWearerKind Kind, string Label, string Source)
@@ -312,6 +319,9 @@ public static class EquipmentInstanceStats
         instance.Fingerprint.IsHighQuality
             ? definition.HighQualityStatProfile
             : definition.StatProfile;
+
+    public static EquipmentQuality ResolveQuality(EquipmentInstanceSnapshot instance) =>
+        instance.Fingerprint.IsHighQuality ? EquipmentQuality.High : EquipmentQuality.Normal;
 }
 
 public sealed record GearsetItemReference(EquipmentSlot Slot, uint ItemId, bool? IsHighQuality = null);

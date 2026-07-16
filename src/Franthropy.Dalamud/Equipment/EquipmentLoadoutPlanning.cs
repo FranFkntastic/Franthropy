@@ -32,17 +32,109 @@ public enum EquipmentLoadoutStrategy
     HighestItemLevel,
 }
 
+/// <summary>
+/// Stable identity for an obtainable equipment choice. Observation-specific fields such as
+/// price, quantity, world, and freshness deliberately do not participate in this key.
+/// </summary>
+public sealed record EquipmentOfferKey(
+    uint ItemId,
+    EquipmentQuality Quality,
+    EquipmentAcquisitionSourceKind SourceKind,
+    string SourceCatalogKey);
+
+/// <summary>
+/// One market row observed through an explicit evidence boundary. This is a UI/aggregator
+/// observation contract, not a game-structure contract.
+/// </summary>
+public sealed record EquipmentMarketRowObservation(
+    string RowId,
+    uint ItemId,
+    EquipmentQuality Quality,
+    uint Quantity,
+    uint UnitPriceGil,
+    string? SellerLabel = null,
+    string? RetainerLabel = null);
+
+/// <summary>
+/// Mutable evidence attached to a stable offer key. Consumers must revalidate observations
+/// before acquisition rather than treating the stable key as proof that a listing still exists.
+/// </summary>
+public sealed record EquipmentOfferObservation(
+    EquipmentOfferKey Key,
+    Guid EvidenceGenerationId,
+    string ObservationId,
+    DateTimeOffset ReviewedAt,
+    EquipmentInstanceSnapshot? OwnedInstance = null,
+    EquipmentMarketRowObservation? ObservableMarketRow = null,
+    string? AggregatorCorrelationId = null,
+    string? World = null,
+    uint AvailableQuantity = 1,
+    uint? UnitPriceGil = null)
+{
+    public void Validate()
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ObservationId);
+        if (ReviewedAt == default)
+            throw new InvalidOperationException("Offer observations require an explicit review time.");
+        if (AvailableQuantity == 0)
+            throw new InvalidOperationException("Offer observations must expose a positive available quantity.");
+        if (OwnedInstance is not null && ObservableMarketRow is not null)
+            throw new InvalidOperationException("An offer observation cannot be both an owned instance and a market row.");
+        if (OwnedInstance is not null &&
+            (Key.SourceKind != EquipmentAcquisitionSourceKind.Owned ||
+             OwnedInstance.Fingerprint.ItemId != Key.ItemId ||
+             EquipmentInstanceStats.ResolveQuality(OwnedInstance) != Key.Quality))
+            throw new InvalidOperationException("Owned-instance evidence does not match the exact offer key.");
+        if (ObservableMarketRow is not null &&
+            (Key.SourceKind != EquipmentAcquisitionSourceKind.MarketBoard ||
+             ObservableMarketRow.ItemId != Key.ItemId ||
+             ObservableMarketRow.Quality != Key.Quality ||
+             ObservableMarketRow.Quantity != AvailableQuantity ||
+             ObservableMarketRow.UnitPriceGil != UnitPriceGil))
+            throw new InvalidOperationException("Observable market-row evidence does not match the exact offer key or quote.");
+    }
+}
+
 public sealed record EquipmentLoadoutOffer(
     EquipmentItemDefinition Definition,
     EquipmentAcquisitionSourceKind SourceKind,
     string SourceLabel,
     uint? UnitPriceGil = null,
     EquipmentInstanceSnapshot? Instance = null,
-    bool PriceIsEstimate = false)
+    bool PriceIsEstimate = false,
+    EquipmentQuality Quality = EquipmentQuality.Normal,
+    string? SourceCatalogKey = null,
+    EquipmentOfferObservation? Observation = null)
 {
+    public EquipmentQuality ResolvedQuality => Instance is null
+        ? Quality
+        : EquipmentInstanceStats.ResolveQuality(Instance);
+
+    public EquipmentOfferKey Key => new(
+        Definition.ItemId,
+        ResolvedQuality,
+        SourceKind,
+        SourceCatalogKey ?? ResolveDefaultCatalogKey());
+
     public string Identity => Instance is null
-        ? $"{SourceKind}:{Definition.ItemId}:{SourceLabel}"
-        : $"Owned:{Instance.Fingerprint.Container}:{Instance.Fingerprint.SlotIndex}:{Definition.ItemId}";
+        ? $"{SourceKind}:{Definition.ItemId}:{ResolvedQuality}:{SourceCatalogKey ?? SourceLabel}"
+        : $"Owned:{Instance.Fingerprint.Container}:{Instance.Fingerprint.SlotIndex}:{Definition.ItemId}:{ResolvedQuality}";
+
+    public EquipmentStatProfile? ResolveStatProfile() => Definition.ResolveStatProfile(ResolvedQuality);
+
+    public EquipmentOfferObservation? GetValidatedObservation()
+    {
+        if (Observation is null)
+            return null;
+        if (Observation.Key != Key)
+            throw new InvalidOperationException("Attached observation does not match this offer's stable key.");
+        Observation.Validate();
+        return Observation;
+    }
+
+    private string ResolveDefaultCatalogKey() => SourceKind == EquipmentAcquisitionSourceKind.Owned && Instance is not null
+        ? $"{Instance.Fingerprint.Character.LocalContentId}:{Instance.Fingerprint.Container}:{Instance.Fingerprint.SlotIndex}"
+        : SourceLabel;
 }
 
 public sealed record EquipmentLoadoutRequest(
