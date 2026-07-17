@@ -10,17 +10,22 @@ export function registerFilterAutocomplete(root, dotNetReference) {
     const abortController = new AbortController();
     let inputRevision = 0;
     let selectionBeforeInput = null;
+    let valueBeforeInput = input.value ?? "";
     input.addEventListener("input", event => {
         const value = input.value ?? "";
         const reportedCaret = Number.isInteger(input.selectionStart) ? input.selectionStart : value.length;
         let caret = reportedCaret;
         if (selectionBeforeInput && reportedCaret === selectionBeforeInput.start) {
-            if (event.inputType?.startsWith("insert") && typeof event.data === "string")
-                caret = selectionBeforeInput.start + event.data.length;
-            else if (event.inputType === "deleteContentBackward" && selectionBeforeInput.start === selectionBeforeInput.end)
+            if (event.inputType === "deleteContentBackward" && selectionBeforeInput.start === selectionBeforeInput.end) {
                 caret = Math.max(0, selectionBeforeInput.start - 1);
+            } else {
+                const replacedLength = selectionBeforeInput.end - selectionBeforeInput.start;
+                const insertedLength = Math.max(0, value.length - (valueBeforeInput.length - replacedLength));
+                caret = selectionBeforeInput.start + insertedLength;
+            }
         }
         selectionBeforeInput = null;
+        valueBeforeInput = value;
         caret = Math.max(0, Math.min(caret, value.length));
         dotNetReference.invokeMethodAsync("HandleAutocompleteInput", value, caret, ++inputRevision);
     }, { signal: abortController.signal });
@@ -30,6 +35,7 @@ export function registerFilterAutocomplete(root, dotNetReference) {
             start: Number.isInteger(input.selectionStart) ? input.selectionStart : input.value.length,
             end: Number.isInteger(input.selectionEnd) ? input.selectionEnd : input.value.length,
         };
+        valueBeforeInput = input.value ?? "";
         if (!root.querySelector('[role="listbox"]')) return;
         if (!["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) return;
 
