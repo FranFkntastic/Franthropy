@@ -1,0 +1,197 @@
+@inject IJSRuntime JsRuntime
+@implements IAsyncDisposable
+
+<div class="@RootClass" @ref="rootElement">
+    <input @ref="inputElement"
+           class="franthropy-filter-autocomplete-input"
+           type="text"
+           value="@Value"
+           placeholder="@Placeholder"
+           aria-label="@AriaLabel"
+           role="combobox"
+           aria-autocomplete="list"
+           aria-expanded="@AriaBoolean(IsOpen)"
+           aria-controls="@listboxId"
+           aria-activedescendant="@ActiveOptionId"
+           autocomplete="off"
+           spellcheck="false"
+           @onfocus="HandleFocus"
+           @onblur="HandleBlur" />
+
+    @if (IsOpen)
+    {
+        <div id="@listboxId"
+             class="franthropy-filter-autocomplete-list"
+             role="listbox"
+             aria-label="@SuggestionsLabel">
+            @for (var index = 0; index < VisibleItems.Count; index++)
+            {
+                var optionIndex = index;
+                var item = VisibleItems[index];
+                <button id="@OptionId(index)"
+                        type="button"
+                        role="option"
+                        aria-selected="@AriaBoolean(index == selectedIndex)"
+                        class="@(index == selectedIndex ? "is-selected" : null)"
+                        @onmousedown:preventDefault="true"
+                        @onclick="() => AcceptAsync(optionIndex)">
+                    <span class="franthropy-filter-autocomplete-label">@item.Label</span>
+                    @if (!string.IsNullOrWhiteSpace(item.Description))
+                    {
+                        <span class="franthropy-filter-autocomplete-description">@item.Description</span>
+                    }
+                    @if (!string.IsNullOrWhiteSpace(item.Detail))
+                    {
+                        <span class="franthropy-filter-autocomplete-detail">@item.Detail</span>
+                    }
+                </button>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private readonly string listboxId = $"franthropy-filter-suggestions-{Guid.NewGuid():N}";
+    private ElementReference rootElement;
+    private ElementReference inputElement;
+    private IJSObjectReference? module;
+    private DotNetObjectReference<WebFilterAutocomplete>? dotNetReference;
+    private bool registered;
+    private bool focused;
+    private bool dismissed;
+    private int selectedIndex;
+    private int? pendingCaret;
+    private long latestInputRevision;
+    private string itemSignature = string.Empty;
+
+    [Parameter] public string Value { get; set; } = string.Empty;
+    [Parameter] public IReadOnlyList<FilterCompletionItem> Items { get; set; } = [];
+    [Parameter] public EventCallback<WebFilterAutocompleteEdit> Edited { get; set; }
+    [Parameter] public bool ShowSuggestions { get; set; } = true;
+    [Parameter] public int MaximumItems { get; set; } = 8;
+    [Parameter] public string Placeholder { get; set; } = "Filter…";
+    [Parameter] public string AriaLabel { get; set; } = "Filter";
+    [Parameter] public string SuggestionsLabel { get; set; } = "Filter suggestions";
+    [Parameter] public string? CssClass { get; set; }
+
+    private IReadOnlyList<FilterCompletionItem> VisibleItems => Items.Take(Math.Max(1, MaximumItems)).ToArray();
+    private bool IsOpen => ShowSuggestions && focused && !dismissed && VisibleItems.Count > 0;
+    private string RootClass => string.Join(" ", new[] { "franthropy-filter-autocomplete", CssClass }.Where(value => !string.IsNullOrWhiteSpace(value)));
+    private string? ActiveOptionId => IsOpen ? OptionId(selectedIndex) : null;
+
+    protected override void OnParametersSet()
+    {
+        var signature = string.Join('\u001f', Items.Take(Math.Max(1, MaximumItems)).Select(item =>
+            $"{item.Kind}:{item.Label}:{item.InsertionText}:{item.ReplacementSpan.Start}:{item.ReplacementSpan.Length}"));
+        if (!signature.Equals(itemSignature, StringComparison.Ordinal))
+        {
+            itemSignature = signature;
+            selectedIndex = 0;
+        }
+
+        selectedIndex = Math.Clamp(selectedIndex, 0, Math.Max(0, VisibleItems.Count - 1));
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        module ??= await JsRuntime.InvokeAsync<IJSObjectReference>(
+            "import",
+            "./_content/Franthropy.Web/filter-autocomplete.js?module=6");
+        if (!registered)
+        {
+            dotNetReference = DotNetObjectReference.Create(this);
+            await module.InvokeVoidAsync("registerFilterAutocomplete", rootElement, dotNetReference);
+            registered = true;
+        }
+
+        if (pendingCaret is { } caret)
+        {
+            pendingCaret = null;
+            await module.InvokeVoidAsync("focusAndSetCaret", inputElement, caret);
+        }
+    }
+
+    [JSInvokable]
+    public async Task HandleAutocompleteInput(string? value, int caret, long revision)
+    {
+        if (revision <= latestInputRevision)
+            return;
+
+        latestInputRevision = revision;
+        value ??= string.Empty;
+        dismissed = false;
+        selectedIndex = 0;
+        if (Edited.HasDelegate)
+            await Edited.InvokeAsync(new(value, Math.Clamp(caret, 0, value.Length)));
+    }
+
+    private void HandleFocus()
+    {
+        focused = true;
+        dismissed = false;
+    }
+
+    private void HandleBlur() => focused = false;
+
+    [JSInvokable]
+    public async Task HandleAutocompleteKey(string key)
+    {
+        if (!IsOpen)
+            return;
+
+        switch (key)
+        {
+            case "ArrowDown":
+                selectedIndex = (selectedIndex + 1) % VisibleItems.Count;
+                break;
+            case "ArrowUp":
+                selectedIndex = (selectedIndex - 1 + VisibleItems.Count) % VisibleItems.Count;
+                break;
+            case "Enter":
+            case "Tab":
+                await AcceptAsync(selectedIndex);
+                return;
+            case "Escape":
+                dismissed = true;
+                break;
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task AcceptAsync(int index)
+    {
+        if (index < 0 || index >= VisibleItems.Count)
+            return;
+
+        var completion = VisibleItems[index];
+        if (!WebFilterAutocompleteEdit.TryApply(Value, completion, out var edit))
+            return;
+
+        selectedIndex = 0;
+        dismissed = completion.Kind == FilterCompletionKind.Value;
+        pendingCaret = edit.CaretPosition;
+        if (Edited.HasDelegate)
+            await Edited.InvokeAsync(edit);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (module is not null)
+        {
+            if (registered)
+            {
+                try { await module.InvokeVoidAsync("unregisterFilterAutocomplete", rootElement); }
+                catch (JSDisconnectedException) { }
+            }
+
+            try { await module.DisposeAsync(); }
+            catch (JSDisconnectedException) { }
+        }
+
+        dotNetReference?.Dispose();
+    }
+
+    private string OptionId(int index) => $"{listboxId}-option-{index}";
+    private static string AriaBoolean(bool value) => value ? "true" : "false";
+}

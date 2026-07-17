@@ -39,6 +39,55 @@ public sealed class FilterCompletionServiceTests
     }
 
     [Fact]
+    public void Complete_SuggestsSupportedOperatorsAfterAnExactField()
+    {
+        var result = FilterCompletionService.Complete(Context, new("test", "quantity", 8));
+
+        Assert.Equal([":", "=", "!=", "<", "<=", ">", ">="],
+            result.Items.Where(item => item.Kind == FilterCompletionKind.Operator).Select(item => item.Label));
+        Assert.All(result.Items, item => Assert.Equal(new(8, 0), item.ReplacementSpan));
+    }
+
+    [Fact]
+    public void Complete_ReplacesAPartialOperatorWithoutTouchingTheField()
+    {
+        var result = FilterCompletionService.Complete(Context, new("test", "quantity!", 9));
+
+        var completion = Assert.Single(result.Items);
+        Assert.Equal(FilterCompletionKind.Operator, completion.Kind);
+        Assert.Equal("!=", completion.InsertionText);
+        Assert.Equal(new(8, 1), completion.ReplacementSpan);
+    }
+
+    [Fact]
+    public void Complete_PreservesTypedValueCompletionAfterACompleteOperator()
+    {
+        var result = FilterCompletionService.Complete(Context, new("test", "quality:", 8));
+
+        Assert.Equal(["HQ", "NQ"], result.Items.Select(item => item.Label).Order());
+        Assert.All(result.Items, item => Assert.Equal(FilterCompletionKind.Value, item.Kind));
+    }
+
+    [Fact]
+    public void Complete_StartsANewTermAfterWhitespaceInsteadOfRepeatingThePreviousValue()
+    {
+        var result = FilterCompletionService.Complete(Context, new("test", "quality:hq ", 11));
+
+        Assert.Contains(result.Items, item => item.Kind == FilterCompletionKind.Field && item.Label == "quality");
+        Assert.DoesNotContain(result.Items, item => item.Kind == FilterCompletionKind.Value);
+    }
+
+    [Fact]
+    public void Complete_PreservesValueSuggestionsInsideAList()
+    {
+        var result = FilterCompletionService.Complete(Context, new("test", "quality:(HQ|n", 13));
+
+        var value = Assert.Single(result.Items, item => item.Kind == FilterCompletionKind.Value);
+        Assert.Equal("NQ", value.Label);
+        Assert.Equal(new(12, 1), value.ReplacementSpan);
+    }
+
+    [Fact]
     public void Complete_SuggestsFieldsInsideEvidenceFunctions()
     {
         var result = FilterCompletionService.Complete(Context, new("test", "unknown(qu", 10));
