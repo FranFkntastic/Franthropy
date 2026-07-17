@@ -153,13 +153,21 @@ public sealed record EquipmentEvidenceRisk(
         ConfidencePenalty < other.ConfidencePenalty;
 }
 
+public sealed record EquipmentAcquisitionCostEstimate(
+    ulong OptimisticCostGil,
+    ulong ExpectedCostGil,
+    ulong PlanningCostGil,
+    double PlanningConfidence,
+    IReadOnlyList<string> Reasons);
+
 public sealed record EquipmentDecisionSolution(
     EquipmentLoadoutCandidate Candidate,
     EquipmentUtilityEvaluation Utility,
     ulong AcquisitionCostGil,
     EquipmentAcquisitionBurden Burden,
     EquipmentEvidenceRisk EvidenceRisk,
-    IReadOnlyList<string> VariantLabels);
+    IReadOnlyList<string> VariantLabels,
+    EquipmentAcquisitionCostEstimate? AcquisitionCostEstimate = null);
 
 public sealed record EquipmentDominatedSolution(
     EquipmentDecisionSolution Solution,
@@ -428,5 +436,11 @@ public static class EquipmentDecisionReplayJson
             Diagnostics = solution.Utility.Diagnostics.Order(StringComparer.Ordinal).ToArray(),
         },
         VariantLabels = solution.VariantLabels.Order(StringComparer.Ordinal).ToArray(),
+        AcquisitionCostEstimate = solution.AcquisitionCostEstimate is null
+            ? null
+            : solution.AcquisitionCostEstimate with
+            {
+                Reasons = solution.AcquisitionCostEstimate.Reasons.Order(StringComparer.Ordinal).ToArray(),
+            },
     };
 }

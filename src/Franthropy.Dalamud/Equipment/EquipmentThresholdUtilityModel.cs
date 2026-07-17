@@ -28,7 +28,9 @@ public sealed record EquipmentThresholdUtilityModelDefinition(
     IReadOnlyList<string> UncertaintyReasons,
     bool IsSupported = true,
     IReadOnlyList<string>? Diagnostics = null,
-    EquipmentSolverUtilityVector? FixedComponents = null);
+    EquipmentSolverUtilityVector? FixedComponents = null,
+    double? RawScoreMaximum = null,
+    double NormalizedScoreMaximum = 100d);
 
 /// <summary>
 /// A deliberately small threshold-aware utility model. Capability steps and bounded monotonic
@@ -40,6 +42,7 @@ public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilit
     private readonly EquipmentSolverUtilityVector baseline;
     private readonly EquipmentSolverUtilityVector fixedComponents;
     private readonly IReadOnlyDictionary<string, EquipmentUtilityComponentDefinition> components;
+    private readonly double scoreScale;
 
     public EquipmentThresholdUtilityModel(EquipmentThresholdUtilityModelDefinition definition)
     {
@@ -49,6 +52,9 @@ public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilit
         baseline = definition.Baseline.Normalize();
         fixedComponents = (definition.FixedComponents ?? EquipmentSolverUtilityVector.Empty).Normalize();
         components = definition.Components.ToDictionary(component => component.ComponentKey, StringComparer.Ordinal);
+        scoreScale = definition.RawScoreMaximum is { } rawMaximum
+            ? definition.NormalizedScoreMaximum / rawMaximum
+            : 1d;
         ValidateVector(baseline);
         ValidateVector(fixedComponents);
     }
@@ -92,7 +98,7 @@ public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilit
         foreach (var component in definition.Components)
         {
             var raw = completed.Get(component.ComponentKey);
-            var contribution = Math.Min(raw / component.Divisor, component.MaximumContribution);
+            var contribution = Math.Min(raw / component.Divisor, component.MaximumContribution) * scoreScale;
             score += contribution;
             contributions.Add(new(
                 component.Semantic,
@@ -108,7 +114,7 @@ public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilit
             var satisfied = capability.Requirements.All(requirement =>
                 completed.Get(requirement.ComponentKey) >= requirement.Minimum);
             if (satisfied)
-                score += capability.ScoreContribution;
+                score += capability.ScoreContribution * scoreScale;
             thresholds.Add(new(
                 capability.ThresholdId,
                 capability.Label,
@@ -127,7 +133,7 @@ public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilit
                         ? checked((int)completed.Get(capability.Requirements[0].ComponentKey))
                         : 0,
                     0,
-                    capability.ScoreContribution,
+                    capability.ScoreContribution * scoreScale,
                     capability.Rationale));
             }
         }
@@ -154,7 +160,7 @@ public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilit
         if (!definition.IsSupported)
             diagnostics.Add("This evaluation context is research-only and cannot grant recommendation authority.");
 
-        var radius = definition.IsSupported ? definition.UncertaintyRadius : Math.Max(definition.UncertaintyRadius, 1d);
+        var radius = (definition.IsSupported ? definition.UncertaintyRadius : Math.Max(definition.UncertaintyRadius, 1d)) * scoreScale;
         return new(
             definition.Profile.Key,
             definition.Context,
@@ -211,6 +217,10 @@ public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilit
             throw new ArgumentException("At least one utility component is required.", nameof(definition));
         if (definition.UncertaintyRadius < 0 || !double.IsFinite(definition.UncertaintyRadius))
             throw new ArgumentOutOfRangeException(nameof(definition), "Uncertainty radius must be finite and non-negative.");
+        if (definition.RawScoreMaximum is { } rawMaximum && (rawMaximum <= 0 || !double.IsFinite(rawMaximum)))
+            throw new ArgumentOutOfRangeException(nameof(definition), "Raw score maximum must be finite and positive when normalization is enabled.");
+        if (definition.NormalizedScoreMaximum <= 0 || !double.IsFinite(definition.NormalizedScoreMaximum))
+            throw new ArgumentOutOfRangeException(nameof(definition), "Normalized score maximum must be finite and positive.");
 
         var duplicateComponent = definition.Components
             .GroupBy(component => component.ComponentKey, StringComparer.Ordinal)

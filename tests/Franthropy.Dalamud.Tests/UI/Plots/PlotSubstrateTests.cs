@@ -101,7 +101,10 @@ public sealed class PlotSubstrateTests
     [Fact]
     public void ParetoSpecialization_MapsQualityTransactionsAndConfidenceToPointAttributes()
     {
-        var frontier = Solution("frontier", 10_000, 80, EquipmentQuality.High, 3, EquipmentEvaluationConfidence.Low);
+        var frontier = Solution("frontier", 10_000, 80, EquipmentQuality.High, 3, EquipmentEvaluationConfidence.Low) with
+        {
+            AcquisitionCostEstimate = new(8_000, 10_000, 25_000, .90d, ["Overmeld failures"]),
+        };
         var dominated = Solution("dominated", 12_000, 70, EquipmentQuality.Normal, 1, EquipmentEvaluationConfidence.High);
         var result = new EquipmentParetoResult(
             [frontier],
@@ -116,6 +119,8 @@ public sealed class PlotSubstrateTests
 
         Assert.Equal("HQ", Assert.IsType<PlotCategoryAttribute>(datum.GetAttribute(ParetoFrontierPlotBuilder.QualityMixAttribute)).Value);
         Assert.Equal(3, Assert.IsType<PlotNumberAttribute>(datum.GetAttribute(ParetoFrontierPlotBuilder.PurchaseTransactionsAttribute)).Value);
+        Assert.Equal(25_000, Assert.IsType<PlotNumberAttribute>(datum.GetAttribute(ParetoFrontierPlotBuilder.PlanningCostAttribute)).Value);
+        Assert.Equal(.90d, Assert.IsType<PlotNumberAttribute>(datum.GetAttribute(ParetoFrontierPlotBuilder.PlanningConfidenceAttribute)).Value);
         Assert.Equal(new PlotColor(.92f, .57f, .20f), visual.Color);
         Assert.Equal(PlotPointShape.Triangle, visual.Shape);
         Assert.True(visual.RadiusPixels > 4);

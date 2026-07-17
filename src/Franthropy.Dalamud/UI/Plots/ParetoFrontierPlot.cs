@@ -14,6 +14,9 @@ public sealed class ParetoFrontierPlotBuilder
 {
     public static PlotAttributeKey QualityMixAttribute { get; } = new("equipment.qualityMix");
     public static PlotAttributeKey PurchaseTransactionsAttribute { get; } = new("acquisition.purchaseTransactions");
+    public static PlotAttributeKey OptimisticCostAttribute { get; } = new("acquisition.optimisticCostGil");
+    public static PlotAttributeKey PlanningCostAttribute { get; } = new("acquisition.planningCostGil");
+    public static PlotAttributeKey PlanningConfidenceAttribute { get; } = new("acquisition.planningConfidence");
     public static PlotAttributeKey ConfidenceAttribute { get; } = new("utility.confidence");
     public static PlotAttributeKey FrontierStatusAttribute { get; } = new("pareto.status");
 
@@ -90,16 +93,27 @@ public sealed class ParetoFrontierPlotBuilder
         return new(spec, byId);
     }
 
-    private static PlotDatum Datum(EquipmentDecisionSolution solution, string status) => new(
-        solution.Candidate.SolutionId,
-        solution.AcquisitionCostGil,
-        solution.Utility.UtilityScore,
-        [
+    private static PlotDatum Datum(EquipmentDecisionSolution solution, string status)
+    {
+        var attributes = new List<PlotAttribute>
+        {
             new(QualityMixAttribute, new PlotCategoryAttribute(QualityMix(solution.Candidate))),
             new(PurchaseTransactionsAttribute, new PlotNumberAttribute(solution.Burden.PurchaseTransactions)),
             new(ConfidenceAttribute, new PlotCategoryAttribute(solution.Utility.Confidence.ToString())),
             new(FrontierStatusAttribute, new PlotCategoryAttribute(status)),
-        ]);
+        };
+        if (solution.AcquisitionCostEstimate is { } estimate)
+        {
+            attributes.Add(new(OptimisticCostAttribute, new PlotNumberAttribute(estimate.OptimisticCostGil)));
+            attributes.Add(new(PlanningCostAttribute, new PlotNumberAttribute(estimate.PlanningCostGil)));
+            attributes.Add(new(PlanningConfidenceAttribute, new PlotNumberAttribute(estimate.PlanningConfidence)));
+        }
+        return new(
+            solution.Candidate.SolutionId,
+            solution.AcquisitionCostGil,
+            solution.Utility.UtilityScore,
+            attributes);
+    }
 
     private static string QualityMix(EquipmentLoadoutCandidate candidate)
     {

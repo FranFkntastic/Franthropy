@@ -81,6 +81,21 @@ public sealed class EquipmentThresholdUtilityModelTests
         Assert.Equal(new(true, true), model.ComparePartial(Vector(10, 0), Vector(9, 0)));
     }
 
+    [Fact]
+    public void ExplicitScoreEnvelopeNormalizesComponentsThresholdsAndUncertaintyTogether()
+    {
+        var definition = CreateDefinition(Vector(0, 0), supported: true) with
+        {
+            RawScoreMaximum = 1_200,
+            NormalizedScoreMaximum = 100,
+        };
+        var evaluation = new EquipmentThresholdUtilityModel(definition).Evaluate(Vector(100, 100));
+
+        Assert.Equal(100d, evaluation.UtilityScore, 8);
+        Assert.Equal(1_000d / 12d, evaluation.Contributions.Single(value => value.Weight == 0).Contribution, 8);
+        Assert.Equal(10d / 12d, evaluation.Uncertainty.UpperBound - evaluation.UtilityScore, 8);
+    }
+
     private static EquipmentThresholdUtilityModel CreateModel(
         EquipmentSolverUtilityVector baseline,
         bool supported) => new(CreateDefinition(baseline, supported));
