@@ -147,6 +147,62 @@ public sealed class PlotSubstrateTests
         Assert.True(json.IndexOf("a-number", StringComparison.Ordinal) < json.IndexOf("z-text", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void Overlay_UnionsDomainsAndNamespacesSemanticIdentity()
+    {
+        var first = new PlotSpec(
+            "first",
+            new(0, 100),
+            new(10, 30),
+            new("Cost", "gil"),
+            new("Utility"),
+            [new PlotPointLayer("points", [Datum("same", 25, 20, "HQ", 1, "High")], new(new(.5f, .5f, .5f)), Encodings())]);
+        var second = new PlotSpec(
+            "second",
+            new(0, 250),
+            new(5, 50),
+            new("Cost", "gil"),
+            new("Utility"),
+            [new PlotPointLayer("points", [Datum("same", 200, 45, "NQ", 2, "Low")], new(new(.5f, .5f, .5f)), Encodings())]);
+
+        var overlay = PlotOverlayComposer.Compose("overlay",
+        [
+            new("ordinary", first, new(PointShape: PlotPointShape.Circle)),
+            new("legendary", second, new(PointShape: PlotPointShape.Diamond)),
+        ]);
+
+        Assert.Equal(new PlotRange(0, 250), overlay.Spec.XDomain);
+        Assert.Equal(new PlotRange(5, 50), overlay.Spec.YDomain);
+        Assert.Equal(2, overlay.DatumIdentities.Count);
+        Assert.Equal(new("ordinary", "same"), overlay.DatumIdentities["ordinary/same"]);
+        Assert.Equal(new("legendary", "same"), overlay.DatumIdentities["legendary/same"]);
+        var ordinary = Assert.IsType<PlotPointLayer>(overlay.Spec.Layers.Single(layer => layer.Id == "ordinary/points"));
+        var legendary = Assert.IsType<PlotPointLayer>(overlay.Spec.Layers.Single(layer => layer.Id == "legendary/points"));
+        Assert.Equal(PlotPointShape.Circle, ordinary.Style.Shape);
+        Assert.Equal(PlotPointShape.Diamond, legendary.Style.Shape);
+        Assert.Null(ordinary.Encodings.Shape);
+        Assert.Equal("ordinary", Assert.IsType<PlotCategoryAttribute>(ordinary.Data[0].GetAttribute(PlotOverlayComposer.SeriesAttribute)).Value);
+        Assert.Equal(2, new PlotCompiler().Compile(overlay.Spec, new(Vector2.Zero, new(600, 400))).HitTargets.Count);
+    }
+
+    [Fact]
+    public void Overlay_RejectsPlotsWithoutSharedAxes()
+    {
+        PlotSpec Spec(string yLabel) => new(
+            yLabel,
+            new(0, 1),
+            new(0, 1),
+            new("Cost", "gil"),
+            new(yLabel),
+            []);
+
+        var exception = Assert.Throws<ArgumentException>(() => PlotOverlayComposer.Compose(
+            "overlay",
+            [new("ordinary", Spec("Utility")), new("depth", Spec("Listings"))]));
+
+        Assert.Contains("does not share the same X and Y axes", exception.Message);
+    }
+
     private static PlotEncodingSet Encodings() => new(
         new(Quality, [new("NQ", new(.2f, .6f, .9f)), new("HQ", new(.9f, .5f, .2f))], new(.5f, .5f, .5f)),
         new(Confidence, [new("High", PlotPointShape.Circle), new("Low", PlotPointShape.Triangle)]),
