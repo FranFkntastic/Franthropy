@@ -9,12 +9,11 @@
     <div class="franthropy-table-resize-scroll @ScrollClass" data-franthropy-table-resize-scroll>
         @ChildContent
     </div>
-    <div class="franthropy-table-resize-overlay" aria-hidden="true">
+    <div class="franthropy-table-resize-overlay">
         @foreach (var column in Columns)
         {
             <button type="button"
                     class="franthropy-table-resize-rail"
-                    tabindex="-1"
                     aria-label="Resize @column.Label column"
                     data-franthropy-table-resize-rail="@column.Id"
                     data-franthropy-table-default-width="@column.SafeDefaultWidthPx"
