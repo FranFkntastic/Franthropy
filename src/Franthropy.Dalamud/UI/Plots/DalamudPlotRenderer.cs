@@ -133,3 +133,108 @@ public sealed class DalamudPlotRenderer
         return red | green << 8 | blue << 16 | alpha << 24;
     }
 }
+
+/// <summary>
+/// Reusable direct-manipulation container for any Dalamud plot. The container owns viewport and
+/// height state while the plot renderer remains a thin painter of compiled geometry.
+/// </summary>
+public sealed class DalamudPlotContainer
+{
+    private sealed class ContainerState(float height)
+    {
+        public PlotViewportState Viewport { get; } = new();
+        public float Height { get; set; } = height;
+    }
+
+    private readonly DalamudPlotRenderer renderer = new();
+    private readonly Dictionary<string, ContainerState> states = new(StringComparer.Ordinal);
+
+    public DalamudPlotRenderResult Draw(
+        string id,
+        PlotSpec spec,
+        Vector2 requestedSize,
+        PlotInteractionState? interaction = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        ArgumentNullException.ThrowIfNull(spec);
+        var initialHeight = requestedSize.Y > 0 ? requestedSize.Y : 285f;
+        if (!states.TryGetValue(id, out var state))
+            states[id] = state = new(Math.Clamp(initialHeight, 180f, 900f));
+
+        ImGui.PushID(id);
+        if (ImGui.SmallButton("Fit"))
+            state.Viewport.Fit();
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Zoom -"))
+            ZoomFromCenter(state.Viewport, spec, 1.25d);
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Zoom +"))
+            ZoomFromCenter(state.Viewport, spec, .80d);
+        ImGui.SameLine();
+        ImGui.TextDisabled(state.Viewport.IsFit ? "Fit view" : "Zoomed view");
+
+        var visibleSpec = state.Viewport.Apply(spec);
+        var result = renderer.Draw("Viewport", visibleSpec, new(requestedSize.X, state.Height), interaction);
+        HandleViewportInput(state.Viewport, spec, result.Frame);
+        DrawResizeHandle(state);
+        ImGui.PopID();
+        return result;
+    }
+
+    private static void HandleViewportInput(PlotViewportState viewport, PlotSpec spec, PlotCompiledFrame frame)
+    {
+        if (!ImGui.IsItemHovered())
+            return;
+        var io = ImGui.GetIO();
+        if (io.MouseWheel != 0)
+        {
+            var mouse = ImGui.GetMousePos();
+            var factor = Math.Pow(.82d, io.MouseWheel);
+            viewport.Zoom(
+                spec,
+                frame.XScale.Invert(mouse.X),
+                frame.YScale.Invert(mouse.Y),
+                factor,
+                zoomX: !io.KeyCtrl,
+                zoomY: !io.KeyShift);
+        }
+        if (ImGui.IsMouseDragging(ImGuiMouseButton.Middle, 0f))
+        {
+            var delta = io.MouseDelta;
+            var visible = viewport.Apply(spec);
+            viewport.Pan(
+                spec,
+                -delta.X / frame.Layout.DataArea.Width * visible.XDomain.Length,
+                delta.Y / frame.Layout.DataArea.Height * visible.YDomain.Length);
+        }
+    }
+
+    private static void DrawResizeHandle(ContainerState state)
+    {
+        var width = Math.Max(180f, ImGui.GetContentRegionAvail().X);
+        ImGui.InvisibleButton("##Resize", new(width, 9f));
+        var hovered = ImGui.IsItemHovered();
+        if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left, 0f))
+            state.Height = Math.Clamp(state.Height + ImGui.GetIO().MouseDelta.Y, 180f, 900f);
+        var minimum = ImGui.GetItemRectMin();
+        var maximum = ImGui.GetItemRectMax();
+        var y = (minimum.Y + maximum.Y) * .5f;
+        var center = (minimum.X + maximum.X) * .5f;
+        var half = hovered ? 28f : 18f;
+        ImGui.GetWindowDrawList().AddLine(
+            new(center - half, y),
+            new(center + half, y),
+            ImGui.GetColorU32(ImGuiCol.Separator),
+            hovered ? 2f : 1f);
+    }
+
+    private static void ZoomFromCenter(PlotViewportState viewport, PlotSpec spec, double factor)
+    {
+        var visible = viewport.Apply(spec);
+        viewport.Zoom(
+            spec,
+            (visible.XDomain.Minimum + visible.XDomain.Maximum) * .5d,
+            (visible.YDomain.Minimum + visible.YDomain.Maximum) * .5d,
+            factor);
+    }
+}

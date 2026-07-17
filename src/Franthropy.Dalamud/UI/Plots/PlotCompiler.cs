@@ -50,7 +50,10 @@ public sealed class PlotCompiler
         ArgumentNullException.ThrowIfNull(spec);
         interaction ??= PlotInteractionState.Empty;
         var layout = PlotLayout.Create(bounds);
-        var xScale = new LinearPlotScale(spec.XDomain, layout.DataArea.Minimum.X, layout.DataArea.Maximum.X);
+        var xBreak = ResolveXAxisBreak(spec);
+        var xScale = xBreak is { } omitted
+            ? new BrokenLinearPlotScale(spec.XDomain, layout.DataArea.Minimum.X, layout.DataArea.Maximum.X, omitted, spec.XAxisBreak!.GapPixels)
+            : new LinearPlotScale(spec.XDomain, layout.DataArea.Minimum.X, layout.DataArea.Maximum.X);
         var yScale = new LinearPlotScale(spec.YDomain, layout.DataArea.Maximum.Y, layout.DataArea.Minimum.Y);
         var commands = new List<PlotDrawCommand>
         {
@@ -86,6 +89,8 @@ public sealed class PlotCompiler
                         PlotDatumValidation.Validate(datum);
                         if (!semanticPointIds.Add(datum.Id))
                             throw new ArgumentException($"Semantic point id '{datum.Id}' appears in more than one point layer.", nameof(spec));
+                        if (!xScale.IsValueVisible(datum.X))
+                            continue;
                         var position = new Vector2(xScale.Map(datum.X), yScale.Map(datum.Y));
                         if (!layout.DataArea.Contains(position))
                             continue;
@@ -97,6 +102,8 @@ public sealed class PlotCompiler
                     }
                     break;
                 case PlotAnnotationLayer annotation:
+                    if (!xScale.IsValueVisible(annotation.X))
+                        break;
                     var annotationPosition = new Vector2(xScale.Map(annotation.X), yScale.Map(annotation.Y));
                     if (layout.DataArea.Contains(annotationPosition))
                         commands.Add(new PlotTextCommand(annotationPosition + annotation.PixelOffset, annotation.Text, annotation.Color, annotation.ZIndex));
@@ -121,7 +128,11 @@ public sealed class PlotCompiler
     {
         var axisStyle = new PlotLineStyle(AxisColor, 1f);
         var gridStyle = new PlotLineStyle(GridColor, 1f);
-        foreach (var tick in PlotTicks.Create(xScale.Domain, spec.XAxis.DesiredTickCount))
+        var xTicks = xScale.VisibleDomainRanges
+            .SelectMany(range => PlotTicks.Create(range, Math.Max(2, spec.XAxis.DesiredTickCount / xScale.VisibleDomainRanges.Count)))
+            .Distinct()
+            .OrderBy(value => value);
+        foreach (var tick in xTicks)
         {
             var x = xScale.Map(tick);
             if (spec.ShowGrid)
@@ -137,7 +148,20 @@ public sealed class PlotCompiler
             commands.Add(new PlotLineCommand(new(layout.DataArea.Minimum.X - 4, y), new(layout.DataArea.Minimum.X, y), axisStyle, -50));
             commands.Add(new PlotTextCommand(new(layout.Bounds.Minimum.X + 2, y - 7), FormatTick(spec.YAxis, tick), AxisColor, 100));
         }
-        commands.Add(new PlotLineCommand(layout.DataArea.Minimum with { Y = layout.DataArea.Maximum.Y }, layout.DataArea.Maximum, axisStyle, -40));
+        foreach (var pixels in xScale.VisiblePixelRanges)
+            commands.Add(new PlotLineCommand(
+                new((float)pixels.Minimum, layout.DataArea.Maximum.Y),
+                new((float)pixels.Maximum, layout.DataArea.Maximum.Y),
+                axisStyle,
+                -40));
+        if (xScale is BrokenLinearPlotScale broken)
+        {
+            var y = layout.DataArea.Maximum.Y;
+            var first = (float)broken.BreakPixelMinimum + 3f;
+            var second = (float)broken.BreakPixelMaximum - 3f;
+            commands.Add(new PlotLineCommand(new(first - 3f, y + 4f), new(first + 3f, y - 4f), axisStyle, 105));
+            commands.Add(new PlotLineCommand(new(second - 3f, y + 4f), new(second + 3f, y - 4f), axisStyle, 105));
+        }
         commands.Add(new PlotLineCommand(layout.DataArea.Minimum, layout.DataArea.Minimum with { Y = layout.DataArea.Maximum.Y }, axisStyle, -40));
         commands.Add(new PlotTextCommand(
             new(layout.DataArea.Minimum.X + layout.DataArea.Width * .42f, layout.Bounds.Maximum.Y - 17),
@@ -178,9 +202,16 @@ public sealed class PlotCompiler
         }
         if (rect.Width <= 0 || rect.Height <= 0)
             return;
-        commands.Add(new PlotRectCommand(rect, band.Style.Color, band.ZIndex));
-        if (!string.IsNullOrWhiteSpace(band.Label))
-            commands.Add(new PlotTextCommand(rect.Minimum + new Vector2(4, 3), band.Label, band.Style.Color.WithAlpha(1f), band.ZIndex + 1));
+        var visibleRects = xScale.VisiblePixelRanges
+            .Select(pixels => new PlotRect(
+                new(Math.Max(rect.Minimum.X, (float)pixels.Minimum), rect.Minimum.Y),
+                new(Math.Min(rect.Maximum.X, (float)pixels.Maximum), rect.Maximum.Y)))
+            .Where(value => value.Width > 0 && value.Height > 0)
+            .ToArray();
+        foreach (var visible in visibleRects)
+            commands.Add(new PlotRectCommand(visible, band.Style.Color, band.ZIndex));
+        if (!string.IsNullOrWhiteSpace(band.Label) && visibleRects.FirstOrDefault() is { Width: > 0 } labelled)
+            commands.Add(new PlotTextCommand(labelled.Minimum + new Vector2(4, 3), band.Label, band.Style.Color.WithAlpha(1f), band.ZIndex + 1));
     }
 
     private static void CompileRule(
@@ -194,6 +225,8 @@ public sealed class PlotCompiler
         Vector2 end;
         if (rule.Orientation == PlotRuleOrientation.Vertical)
         {
+            if (!xScale.IsValueVisible(rule.Value))
+                return;
             var x = xScale.Map(rule.Value);
             start = new(x, area.Minimum.Y);
             end = new(x, area.Maximum.Y);
@@ -238,8 +271,53 @@ public sealed class PlotCompiler
 
         void AddClipped(Vector2 start, Vector2 end)
         {
-            if (PlotClipping.TryClipLine(area, start, end, out var clippedStart, out var clippedEnd))
-                commands.Add(new PlotLineCommand(clippedStart, clippedEnd, style, zIndex));
+            foreach (var pixels in xScale.VisiblePixelRanges)
+            {
+                var visibleArea = new PlotRect(
+                    new(Math.Max(area.Minimum.X, (float)pixels.Minimum), area.Minimum.Y),
+                    new(Math.Min(area.Maximum.X, (float)pixels.Maximum), area.Maximum.Y));
+                if (visibleArea.Width > 0 && PlotClipping.TryClipLine(visibleArea, start, end, out var clippedStart, out var clippedEnd))
+                    commands.Add(new PlotLineCommand(clippedStart, clippedEnd, style, zIndex));
+            }
         }
     }
+
+    private static PlotRange? ResolveXAxisBreak(PlotSpec spec)
+    {
+        if (spec.XAxisBreak is not { } policy)
+            return null;
+        if (policy.MinimumEmptyFraction is <= 0 or >= 1 ||
+            policy.LeadingContextFraction is <= 0 or >= 1 ||
+            policy.DataPaddingFraction is < 0 or >= 1 ||
+            policy.GapPixels < 4f)
+            throw new ArgumentOutOfRangeException(nameof(spec), "Axis-break policy values are outside their supported ranges.");
+
+        var domain = spec.XDomain.Normalize();
+        var observed = spec.Layers.SelectMany(XValues)
+            .Where(value => double.IsFinite(value) && value >= domain.Minimum && value <= domain.Maximum)
+            .ToArray();
+        if (observed.Length == 0)
+            return null;
+        var first = observed.Min();
+        var emptyFraction = (first - domain.Minimum) / domain.Length;
+        if (emptyFraction < policy.MinimumEmptyFraction)
+            return null;
+
+        var retainedLeading = domain.Length * policy.LeadingContextFraction;
+        var plottedSpan = Math.Max(domain.Maximum - first, domain.Length * .05d);
+        var dataPadding = Math.Max(plottedSpan * policy.DataPaddingFraction, domain.Length * .005d);
+        var omitted = new PlotRange(domain.Minimum + retainedLeading, first - dataPadding);
+        return omitted.Length > domain.Length * .05d ? omitted : null;
+    }
+
+    private static IEnumerable<double> XValues(IPlotLayer layer) => layer switch
+    {
+        PlotPointLayer points => points.Data.Select(value => value.X),
+        PlotPolylineLayer polyline => polyline.Data.Select(value => value.X),
+        PlotStepLayer step => step.Data.Select(value => value.X),
+        PlotRuleLayer { Orientation: PlotRuleOrientation.Vertical } rule => [rule.Value],
+        PlotBandLayer { Orientation: PlotRuleOrientation.Vertical } band => [band.Minimum, band.Maximum],
+        PlotAnnotationLayer annotation => [annotation.X],
+        _ => [],
+    };
 }

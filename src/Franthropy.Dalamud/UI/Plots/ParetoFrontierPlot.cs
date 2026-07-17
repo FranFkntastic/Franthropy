@@ -89,7 +89,8 @@ public sealed class ParetoFrontierPlotBuilder
             new("Acquisition cost", "gil", Format: FormatGil),
             new("Job utility"),
             layers,
-            "Cost / utility frontier");
+            "Cost / utility frontier",
+            XAxisBreak: new());
         return new(spec, byId);
     }
 

@@ -39,6 +39,17 @@ public sealed record PlotAxis(
     int DesiredTickCount = 6,
     Func<double, string>? Format = null);
 
+/// <summary>
+/// Requests a truthful discontinuity when the leading portion of an axis contains no plotted
+/// evidence. The compiler resolves the actual break from the current layers, so overlays and
+/// filtered plots cannot retain a stale, misleading discontinuity.
+/// </summary>
+public sealed record PlotAxisBreakPolicy(
+    double MinimumEmptyFraction = .40d,
+    double LeadingContextFraction = .04d,
+    double DataPaddingFraction = .04d,
+    float GapPixels = 14f);
+
 public sealed record PlotAttributeKey(string Value)
 {
     public override string ToString() => Value;
@@ -200,7 +211,8 @@ public sealed record PlotSpec(
     PlotAxis YAxis,
     IReadOnlyList<IPlotLayer> Layers,
     string? Title = null,
-    bool ShowGrid = true);
+    bool ShowGrid = true,
+    PlotAxisBreakPolicy? XAxisBreak = null);
 
 public sealed record PlotInteractionState(
     IReadOnlySet<string> SelectedDatumIds,

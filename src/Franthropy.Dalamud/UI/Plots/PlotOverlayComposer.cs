@@ -72,7 +72,8 @@ public static class PlotOverlayComposer
             first.Spec.YAxis,
             layers,
             title ?? first.Spec.Title,
-            series.Any(value => value.Spec.ShowGrid));
+            series.Any(value => value.Spec.ShowGrid),
+            series.Select(value => value.Spec.XAxisBreak).FirstOrDefault(value => value is not null));
         return new(spec, identities);
     }
 
