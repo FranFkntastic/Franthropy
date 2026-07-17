@@ -30,6 +30,19 @@ public sealed class PlotSubstrateTests
     }
 
     [Fact]
+    public void BrokenScale_CompressesOmittedDomainAndRoundTripsVisibleSegments()
+    {
+        var scale = new BrokenLinearPlotScale(new(0, 4_000_000), 0, 800, new(200_000, 2_600_000), 16);
+
+        Assert.True(scale.Map(0) < scale.Map(200_000));
+        Assert.True(scale.Map(200_000) < scale.Map(2_600_000));
+        Assert.Equal(3_000_000, scale.Invert(scale.Map(3_000_000)), 3);
+        Assert.False(scale.IsValueVisible(1_000_000));
+        Assert.Equal(2, scale.VisibleDomainRanges.Count);
+        Assert.Equal(2, scale.VisiblePixelRanges.Count);
+    }
+
+    [Fact]
     public void Ticks_CreateStableHumanScale()
     {
         Assert.Equal([0d, 20d, 40d, 60d, 80d, 100d], PlotTicks.Create(new(0, 100), 6));
@@ -99,6 +112,54 @@ public sealed class PlotSubstrateTests
     }
 
     [Fact]
+    public void Compiler_DynamicallyBreaksLargeLeadingEmptyRange()
+    {
+        var data = new[]
+        {
+            Datum("first", 2_700_000, 40, "HQ", 1, "High"),
+            Datum("last", 4_000_000, 80, "HQ", 1, "High"),
+        };
+        var spec = new PlotSpec(
+            "broken",
+            new(0, 4_100_000),
+            new(0, 100),
+            new("Cost", "gil"),
+            new("Utility"),
+            [new PlotPointLayer("points", data, new(new(.5f, .5f, .5f)), Encodings())],
+            XAxisBreak: new());
+
+        var frame = new PlotCompiler().Compile(spec, new(Vector2.Zero, new(900, 400)));
+        var scale = Assert.IsType<BrokenLinearPlotScale>(frame.XScale);
+        var plottedSpan = scale.Map(4_000_000) - scale.Map(2_700_000);
+
+        Assert.True(plottedSpan > frame.Layout.DataArea.Width * .65f);
+        Assert.DoesNotContain(frame.Commands.OfType<PlotTextCommand>(), command => command.Text == "1000000");
+        Assert.Equal(2, frame.HitTargets.Count);
+    }
+
+    [Fact]
+    public void Viewport_ZoomsPansClampsAndReturnsToFit()
+    {
+        var spec = new PlotSpec("viewport", new(0, 100), new(0, 200), new("X"), new("Y"), []);
+        var viewport = new PlotViewportState();
+
+        viewport.Zoom(spec, 50, 100, .5d);
+        var zoomed = viewport.Apply(spec);
+        Assert.Equal(new PlotRange(25, 75), zoomed.XDomain);
+        Assert.Equal(new PlotRange(50, 150), zoomed.YDomain);
+        Assert.False(viewport.IsFit);
+
+        viewport.Pan(spec, 100, -100);
+        var clamped = viewport.Apply(spec);
+        Assert.Equal(new PlotRange(50, 100), clamped.XDomain);
+        Assert.Equal(new PlotRange(0, 100), clamped.YDomain);
+
+        viewport.Fit();
+        Assert.True(viewport.IsFit);
+        Assert.Equal(spec, viewport.Apply(spec));
+    }
+
+    [Fact]
     public void ParetoSpecialization_MapsQualityTransactionsAndConfidenceToPointAttributes()
     {
         var frontier = Solution("frontier", 10_000, 80, EquipmentQuality.High, 3, EquipmentEvaluationConfidence.Low) with
@@ -125,6 +186,7 @@ public sealed class PlotSubstrateTests
         Assert.Equal(PlotPointShape.Triangle, visual.Shape);
         Assert.True(visual.RadiusPixels > 4);
         Assert.Contains(model.Spec.Layers, layer => layer.Id == "dominated-solutions");
+        Assert.NotNull(model.Spec.XAxisBreak);
     }
 
     [Fact]

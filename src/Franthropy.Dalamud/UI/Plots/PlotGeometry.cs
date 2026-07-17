@@ -2,7 +2,7 @@ using System.Numerics;
 
 namespace Franthropy.Dalamud.UI.Plots;
 
-public sealed class LinearPlotScale
+public class LinearPlotScale
 {
     public LinearPlotScale(PlotRange domain, double pixelMinimum, double pixelMaximum)
     {
@@ -15,16 +15,102 @@ public sealed class LinearPlotScale
     public double PixelMinimum { get; }
     public double PixelMaximum { get; }
 
-    public float Map(double value)
+    public virtual IReadOnlyList<PlotRange> VisibleDomainRanges => [Domain];
+    public virtual IReadOnlyList<PlotRange> VisiblePixelRanges =>
+        [new(Math.Min(PixelMinimum, PixelMaximum), Math.Max(PixelMinimum, PixelMaximum))];
+
+    public virtual bool IsValueVisible(double value) => value >= Domain.Minimum && value <= Domain.Maximum;
+
+    public virtual float Map(double value)
     {
         var ratio = (value - Domain.Minimum) / Domain.Length;
         return checked((float)(PixelMinimum + ratio * (PixelMaximum - PixelMinimum)));
     }
 
-    public double Invert(float pixel)
+    public virtual double Invert(float pixel)
     {
         var ratio = (pixel - PixelMinimum) / (PixelMaximum - PixelMinimum);
         return Domain.Minimum + ratio * Domain.Length;
+    }
+}
+
+public sealed class BrokenLinearPlotScale : LinearPlotScale
+{
+    private readonly double direction;
+    private readonly double firstPixels;
+    private readonly double secondPixels;
+    private readonly double firstPixelEnd;
+    private readonly double secondPixelStart;
+
+    public BrokenLinearPlotScale(
+        PlotRange domain,
+        double pixelMinimum,
+        double pixelMaximum,
+        PlotRange omittedDomain,
+        float gapPixels)
+        : base(domain, pixelMinimum, pixelMaximum)
+    {
+        OmittedDomain = omittedDomain.Normalize();
+        if (OmittedDomain.Minimum <= Domain.Minimum || OmittedDomain.Maximum >= Domain.Maximum)
+            throw new ArgumentOutOfRangeException(nameof(omittedDomain), "A scale break must be strictly inside the domain.");
+        if (gapPixels < 4f || !float.IsFinite(gapPixels))
+            throw new ArgumentOutOfRangeException(nameof(gapPixels), "A scale break must reserve at least four finite pixels.");
+
+        var pixelLength = Math.Abs(pixelMaximum - pixelMinimum);
+        if (gapPixels >= pixelLength)
+            throw new ArgumentOutOfRangeException(nameof(gapPixels), "A scale break cannot consume the whole pixel range.");
+        direction = Math.Sign(pixelMaximum - pixelMinimum);
+        GapPixels = gapPixels;
+        var firstDomainLength = OmittedDomain.Minimum - Domain.Minimum;
+        var secondDomainLength = Domain.Maximum - OmittedDomain.Maximum;
+        var visibleDomainLength = firstDomainLength + secondDomainLength;
+        var availablePixels = pixelLength - gapPixels;
+        firstPixels = availablePixels * firstDomainLength / visibleDomainLength;
+        secondPixels = availablePixels - firstPixels;
+        firstPixelEnd = pixelMinimum + direction * firstPixels;
+        secondPixelStart = firstPixelEnd + direction * gapPixels;
+    }
+
+    public PlotRange OmittedDomain { get; }
+    public float GapPixels { get; }
+    public double BreakPixelMinimum => Math.Min(firstPixelEnd, secondPixelStart);
+    public double BreakPixelMaximum => Math.Max(firstPixelEnd, secondPixelStart);
+    public override IReadOnlyList<PlotRange> VisibleDomainRanges =>
+        [new(Domain.Minimum, OmittedDomain.Minimum), new(OmittedDomain.Maximum, Domain.Maximum)];
+    public override IReadOnlyList<PlotRange> VisiblePixelRanges =>
+        [
+            new(Math.Min(PixelMinimum, firstPixelEnd), Math.Max(PixelMinimum, firstPixelEnd)),
+            new(Math.Min(secondPixelStart, PixelMaximum), Math.Max(secondPixelStart, PixelMaximum)),
+        ];
+
+    public override bool IsValueVisible(double value) =>
+        base.IsValueVisible(value) && (value <= OmittedDomain.Minimum || value >= OmittedDomain.Maximum);
+
+    public override float Map(double value)
+    {
+        if (value <= OmittedDomain.Minimum)
+        {
+            var ratio = (value - Domain.Minimum) / (OmittedDomain.Minimum - Domain.Minimum);
+            return checked((float)(PixelMinimum + direction * ratio * firstPixels));
+        }
+        if (value >= OmittedDomain.Maximum)
+        {
+            var ratio = (value - OmittedDomain.Maximum) / (Domain.Maximum - OmittedDomain.Maximum);
+            return checked((float)(secondPixelStart + direction * ratio * secondPixels));
+        }
+
+        var omittedRatio = (value - OmittedDomain.Minimum) / OmittedDomain.Length;
+        return checked((float)(firstPixelEnd + direction * omittedRatio * GapPixels));
+    }
+
+    public override double Invert(float pixel)
+    {
+        var directedDistance = (pixel - PixelMinimum) * direction;
+        if (directedDistance <= firstPixels)
+            return Domain.Minimum + directedDistance / firstPixels * (OmittedDomain.Minimum - Domain.Minimum);
+        if (directedDistance >= firstPixels + GapPixels)
+            return OmittedDomain.Maximum + (directedDistance - firstPixels - GapPixels) / secondPixels * (Domain.Maximum - OmittedDomain.Maximum);
+        return directedDistance - firstPixels < GapPixels / 2d ? OmittedDomain.Minimum : OmittedDomain.Maximum;
     }
 }
 
