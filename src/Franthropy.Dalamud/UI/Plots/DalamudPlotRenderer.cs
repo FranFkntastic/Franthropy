@@ -162,6 +162,7 @@ public sealed class DalamudPlotContainer
     {
         public PlotViewportState Viewport { get; } = new();
         public float Height { get; set; } = height;
+        public PlotCompiledFrame? LastFrame { get; set; }
     }
 
     private readonly DalamudPlotRenderer renderer = new();
@@ -193,23 +194,24 @@ public sealed class DalamudPlotContainer
         if (!fitEnabled)
             ImGui.BeginDisabled();
         if (ImGui.SmallButton("Zoom -"))
-            ZoomFromCenter(state.Viewport, spec, 1.25d);
+            ZoomFromCenter(state, spec, 1.25d);
         if (!fitEnabled)
             ImGui.EndDisabled();
-        controls.Add(Control("zoom-out", "Zoom plot out", fitEnabled, false, state, spec, () => ZoomFromCenter(state.Viewport, spec, 1.25d)));
+        controls.Add(Control("zoom-out", "Zoom plot out", fitEnabled, false, state, spec, () => ZoomFromCenter(state, spec, 1.25d)));
         ImGui.SameLine();
         if (ImGui.SmallButton("Zoom +"))
-            ZoomFromCenter(state.Viewport, spec, .80d);
-        controls.Add(Control("zoom-in", "Zoom plot in", true, false, state, spec, () => ZoomFromCenter(state.Viewport, spec, .80d)));
+            ZoomFromCenter(state, spec, .80d);
+        controls.Add(Control("zoom-in", "Zoom plot in", true, false, state, spec, () => ZoomFromCenter(state, spec, .80d)));
         ImGui.SameLine();
         ImGui.TextDisabled(state.Viewport.IsFit
             ? "Fit view · Ctrl+wheel zoom · right-drag pan"
             : "Zoomed view · Ctrl+wheel zoom · right-drag pan");
 
-        var visibleSpec = state.Viewport.Apply(spec);
+        var visibleSpec = state.Viewport.ApplyForRendering(spec);
         var result = renderer.Draw("Viewport", visibleSpec, new(requestedSize.X, state.Height), interaction);
         if (HandleViewportInput(state.Viewport, spec, result.Frame))
             result = result with { HoveredDatumId = null };
+        state.LastFrame = result.Frame;
         DrawResizeHandle(state);
         ImGui.PopID();
         return new(result, controls);
@@ -264,14 +266,22 @@ public sealed class DalamudPlotContainer
             hovered ? 2f : 1f);
     }
 
-    private static void ZoomFromCenter(PlotViewportState viewport, PlotSpec spec, double factor)
+    private static void ZoomFromCenter(ContainerState state, PlotSpec spec, double factor)
     {
-        var visible = viewport.Apply(spec);
-        viewport.Zoom(
+        var visible = state.Viewport.Apply(spec);
+        PlotRange? xExtent = null;
+        var centerX = (visible.XDomain.Minimum + visible.XDomain.Maximum) * .5d;
+        if (!state.Viewport.HasHorizontalViewport && state.LastFrame?.XScale is BrokenLinearPlotScale broken)
+        {
+            xExtent = broken.VisibleDomainRanges[^1];
+            centerX = (xExtent.Value.Minimum + xExtent.Value.Maximum) * .5d;
+        }
+        state.Viewport.Zoom(
             spec,
-            (visible.XDomain.Minimum + visible.XDomain.Maximum) * .5d,
+            centerX,
             (visible.YDomain.Minimum + visible.YDomain.Maximum) * .5d,
-            factor);
+            factor,
+            xExtent: xExtent);
     }
 
     private static string ViewSummary(PlotSpec spec) =>
