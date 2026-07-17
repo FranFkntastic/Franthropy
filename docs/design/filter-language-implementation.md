@@ -44,7 +44,7 @@ The program finishes when:
 | Phase 3: canonical FFXIV catalog | Complete | 29 documented fields, name-first resolver contracts, generated reference writers, and 8 catalog tests pass |
 | Phase 4: MMF contracts and normalization | Complete locally | Shared browser DTOs, typed evidence normalization, and legacy condition behavior covered by server tests |
 | Phase 5: Inventory Viewer contexts | Complete locally | Separate Items, Stacks, and Listings contexts with name-first filtering and contextual metrics; 167 server and 926 plugin tests pass |
-| Phase 6: completion and help | In progress | Shared completion service, generated active-context help, inline popup, URL state, last-valid results, and full browser interaction proof complete; saved filters remain |
+| Phase 6: completion and help | Complete locally | Shared caret-aware completion, predicates, generated active-context help, operator algebra, source-spelling preservation, semantic normalization, and inline browser popup are covered by focused suites |
 | Phase 7: capture schema vNext | In progress | Schema 2 preserves physical stacks, HQ, location, container, slot, equipped, item category, and applicable condition percent; completeness and a deduplicated item catalog remain |
 | Later phases | Not started | Changes mode and automation review remain gated |
 
@@ -259,7 +259,7 @@ Critical tests:
 - unavailable and unknown fields produce different outcomes;
 - `instance.quantity` and `offer.quantity` cannot collapse in a composite context;
 - a globally unique unavailable leaf produces an availability diagnostic;
-- set membership with `:` differs from exact set equality with `=`;
+- fuzzy and exact equality modes form paired positive and negative operators, while set fields consistently test member overlap;
 - named-value resolution can report ambiguity without selecting an arbitrary ID;
 - cache invalidation includes catalog version, context ID, context schema version, expression, and locale.
 

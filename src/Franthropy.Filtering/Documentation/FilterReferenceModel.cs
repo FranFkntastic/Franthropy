@@ -8,7 +8,10 @@ public sealed record FilterReferenceModel(
     string CatalogVersion,
     string ContextId,
     string ContextSchemaVersion,
-    IReadOnlyList<FilterFieldReference> Fields);
+    IReadOnlyList<FilterFieldReference> Fields)
+{
+    public IReadOnlyList<FilterPredicateAlias> Predicates { get; init; } = [];
+}
 
 public sealed record FilterFieldReference(
     string Key,
@@ -37,7 +40,8 @@ public static class FilterReferenceGenerator
                 field,
                 true,
                 false,
-                catalog.GetPreferredName(field))).ToArray());
+                catalog.GetPreferredName(field))).ToArray())
+        { Predicates = catalog.PredicateAliases };
     }
 
     public static FilterReferenceModel Create<TRecord>(FilterContext<TRecord> context)
@@ -51,7 +55,8 @@ public static class FilterReferenceGenerator
                 field,
                 context.AvailableKeys.Contains(field.Key),
                 context.DefaultTextBindings.Any(binding => binding.Field == field),
-                context.Catalog.GetPreferredName(field, context.AvailableKeys))).ToArray());
+                context.Catalog.GetPreferredName(field, context.AvailableKeys))).ToArray())
+        { Predicates = context.Catalog.PredicateAliases.Where(predicate => context.AvailableKeys.Contains(predicate.TargetFieldKey)).ToArray() };
     }
 
     private static FilterFieldReference CreateField(
@@ -91,6 +96,13 @@ public static class FilterReferenceWriter
         builder.Append("Catalog version: `").Append(reference.CatalogVersion).AppendLine("`").AppendLine();
         builder.Append("Context: `").Append(reference.ContextId).Append("` (schema `")
             .Append(reference.ContextSchemaVersion).AppendLine("`)").AppendLine();
+        if (reference.Predicates.Count > 0)
+        {
+            builder.AppendLine("## Predicates").AppendLine();
+            foreach (var predicate in reference.Predicates)
+                builder.Append("- `").Append(predicate.Qualifier).Append(':').Append(predicate.Specifier).Append("`: ").AppendLine(predicate.Description);
+            builder.AppendLine();
+        }
         foreach (var field in reference.Fields)
         {
             builder.Append("## `").Append(field.Key).AppendLine("`").AppendLine();

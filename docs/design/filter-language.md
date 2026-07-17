@@ -1,6 +1,6 @@
 # Franthropy Filter Language
 
-Status: proposed architecture
+Status: implemented architecture
 
 Audience: Franthropy and consuming-plugin maintainers
 
@@ -104,11 +104,11 @@ Field help, operator help, value examples, availability, aliases, and completion
 ```text
 darksteel ilvl>=50 acquisition.source:craft
 "augmented ironworks" job:(WHM | SCH) quality:HQ
-slot:ring (job:WHM | job:SCH) -unique
+slot:ring (job:WHM | job:SCH) -is:equipped
 offer.source:vendor price<5000
-world:Siren quantity>=20 quality:HQ
-owned location:(inventory | retainer) condition<100
-acquisition.source:vendor -unique
+world:Siren quantity>=20 is:hq
+-darksteel location:(inventory | retainer) condition<100
+acquisition.source:vendor is:nq
 ```
 
 The first expression means that the default text fields contain `darksteel`, item level is at least 50, and crafting is a known acquisition source. Whitespace is implicit `AND`.
@@ -120,14 +120,19 @@ The first expression means that the default text fields contain `darksteel`, ite
 | `a b` | `a AND b` |
 | `a AND b`, `a && b` | both expressions must match |
 | `a OR b`, `a \| b` | either expression may match |
-| `NOT a`, `!a`, `-a` | negate an expression |
+| `NOT a`, `!a`, `-a` | negate an expression; `-darksteel` excludes the default-name match |
 | `( ... )` | explicit grouping |
-| `field:value` | type-appropriate match; text defaults to case-insensitive containment |
-| `field=value`, `field!=value` | exact equality or inequality |
+| `field:value` | concise, type-appropriate direct match; text uses fuzzy containment while typed and named values resolve exactly |
+| `field=value`, `field!=value` | fuzzy match or its negation; finite vocabularies accept a partial only when it resolves uniquely |
+| `field==value`, `field!==value` | normalized whole-value exact equality or its negation |
 | `<`, `<=`, `>`, `>=` | ordered comparison for numeric, temporal, and other ordered types |
 | `field:low..high` | inclusive range; either endpoint may be omitted |
 | `field:(a \| b \| c)` | match any listed value |
 | `known(field)`, `unknown(field)` | explicitly test whether a record has evidence for a field |
+
+The negation modifier never changes the equality mode: `!=` is the negative partner of fuzzy `=`, while `!==` is the negative partner of exact `==`. Exact text comparison normalizes Unicode, case, and whitespace before comparing the whole value. Fuzzy text comparison performs normalized substring matching; it does not use regexes, edit distance, or stemming.
+
+Human-readable predicate namespaces express common states: `is:equipped`, `is:hq`, and `is:nq`. Canonical quality forms remain `quality:hq` and `quality:nq`; the `is:` spellings share those predicates' semantic identities. `has:` is reserved for future evidence predicates such as `has:price`.
 
 Keywords are case-insensitive. Symbolic and word operators are aliases for the same AST nodes and therefore have identical precedence.
 
@@ -150,7 +155,7 @@ From strongest to weakest:
 - Integers allow separators in input (`1,000` or `1_000`) and normalize them internally.
 - Decimal values use invariant `.` syntax in persisted expressions; the editor may accept locale-aware input and normalize it.
 - Durations use compact units such as `30m`, `6h`, and `2d` where a field declares duration semantics.
-- Boolean fields accept `true`, `false`, `yes`, and `no`, while a bare boolean field means `field=true`.
+- Boolean fields accept `true`, `false`, `yes`, and `no`. Bare words always remain default-text search, so states use intentional forms such as `is:equipped` rather than a bare `equipped` token.
 - A field's value resolver owns named values and aliases. For example, `job:WHM` and `job:"White Mage"` resolve to the same stable job identity.
 
 V1 does not expose regular expressions, arbitrary functions, arithmetic, property reflection, or executable callbacks in query text.
@@ -170,12 +175,18 @@ primary        = "(" , or-expression , ")"
                | free-text ;
 field-expression = field-name , ( ":" , field-value
                                   | [ ":" ] , comparison-operator , field-value ) ;
-comparison-operator = "=" | "!=" | "<" | "<=" | ">" | ">=" ;
+comparison-operator = "=" | "!=" | "==" | "!==" | "<" | "<=" | ">" | ">=" ;
 field-value    = scalar | range | value-list ;
 range          = [ scalar ] , ".." , [ scalar ] ;
 value-list     = "(" , scalar , { "|" , scalar } , ")" ;
 function-call  = ( "known" | "unknown" ) , "(" , field-name , ")" ;
 ```
+
+The shape `qualifier:domain:specifier` is reserved for future parameterized namespaces, following forms such as `stat:range:>=50`. V1 parses that shape and emits a focused reserved-syntax diagnostic; it does not assign ceremonial meanings such as `is:quality:hq`. This reservation prevents a consumer from claiming an incompatible ad hoc interpretation before a real nested domain exists.
+
+Legacy operator-only forms such as `quantity>20` and dotted canonical paths remain valid advanced syntax. Primary completion and reference UI teach concise direct forms such as `quantity:20`, `location:armoury`, and `is:hq` instead.
+
+The syntax tree retains the exact source text for saved human-authored filters. Formatting can produce a stable readable spelling, while compilation also emits a separate canonical semantic expression for cache identity, comparison, diagnostics, and telemetry; semantic normalization never rewrites the user's saved text.
 
 Implicit `AND` must be inserted by the parser from token boundaries, not by splitting the input string on spaces. This preserves quoted values, parentheses, source spans, and useful incomplete-input diagnostics.
 
@@ -234,7 +245,7 @@ Canonical keys are fully qualified. Concise aliases are global conveniences, not
 | `instance.quality` | `quality` | enum | NQ or HQ quality state of an observed instance or represented offer |
 | `instance.quantity` | `quantity` when unambiguous | quantity | amount represented by a physical item stack |
 | `instance.location` | `location` when unambiguous | named entity | inventory, retainer, armoury, saddlebag, and similar location |
-| `instance.equipped` | `equipped` | boolean | instance is currently equipped |
+| `instance.equipped` | `is:equipped` | boolean predicate | instance is currently equipped |
 | `instance.condition` | `condition` | percentage | item condition |
 | `instance.spiritbond` | `spiritbond` | percentage | spiritbond progress |
 | `ownership.owned` | `owned` | boolean | at least one matching instance exists in the observed ownership scope |

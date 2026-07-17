@@ -11,6 +11,8 @@ public enum FilterTokenKind
     Colon,
     Equals,
     BangEquals,
+    ExactEquals,
+    ExactNotEquals,
     Less,
     LessOrEqual,
     Greater,
@@ -36,6 +38,18 @@ public sealed record FilterToken(
         FilterTokenKind.Colon or
         FilterTokenKind.Equals or
         FilterTokenKind.BangEquals or
+        FilterTokenKind.ExactEquals or
+        FilterTokenKind.ExactNotEquals or
+        FilterTokenKind.Less or
+        FilterTokenKind.LessOrEqual or
+        FilterTokenKind.Greater or
+        FilterTokenKind.GreaterOrEqual;
+
+    public bool IsComparisonOperator => Kind is
+        FilterTokenKind.Equals or
+        FilterTokenKind.BangEquals or
+        FilterTokenKind.ExactEquals or
+        FilterTokenKind.ExactNotEquals or
         FilterTokenKind.Less or
         FilterTokenKind.LessOrEqual or
         FilterTokenKind.Greater or

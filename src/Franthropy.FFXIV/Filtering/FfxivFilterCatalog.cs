@@ -4,12 +4,12 @@ namespace Franthropy.FFXIV.Filtering;
 
 public sealed class FfxivFilterCatalog
 {
-    public const string CurrentVersion = "1.0";
+    public const string CurrentVersion = "1.1";
 
     private FfxivFilterCatalog(IFfxivFilterResolvers resolvers)
     {
         ArgumentNullException.ThrowIfNull(resolvers);
-        ItemName = FilterFields.Named("item.name", resolvers.Items, "item", "Item", "Localized FFXIV item identity.", ["item", "name"]);
+        ItemName = FilterFields.Named("item.name", resolvers.Items, "item", "Item", "Localized FFXIV item identity.", ["item", "name"], matchUsesFuzzyResolution: true);
         ItemLevel = FilterFields.Integer("item.itemLevel", "Item level", "FFXIV item level used for gear progression.", ["ilvl"], minimum: 0);
         EquipLevel = FilterFields.Integer("item.equipLevel", "Equip level", "Character level required to equip the item.", ["level", "lvl"], minimum: 0);
         ItemJobs = FilterFields.Set("item.job", resolvers.Jobs, "job", "Eligible jobs", "Jobs or classes eligible to use the item.", ["job", "class"]);
@@ -19,10 +19,10 @@ public sealed class FfxivFilterCatalog
         ItemUnique = FilterFields.Boolean("item.unique", "Unique", "Whether the FFXIV item definition is unique.", ["unique"]);
         ItemTradable = FilterFields.Boolean("item.tradable", "Tradable", "Whether the item definition permits trade or market listing.", ["tradable"]);
         ItemDesynthesizable = FilterFields.Boolean("item.desynthesizable", "Desynthesizable", "Whether the item definition permits desynthesis.", ["desynth"]);
-        InstanceQuality = FilterFields.Enumeration<FfxivItemQuality>("instance.quality", "Quality", "Observed NQ or HQ item quality.");
+        InstanceQuality = FilterFields.Enumeration<FfxivItemQuality>("instance.quality", "Quality", "Observed NQ or HQ item quality.", ["quality"]);
         InstanceQuantity = FilterFields.Integer("instance.quantity", "Stack quantity", "Quantity in one observed physical stack.", minimum: 0);
-        InstanceLocation = FilterFields.Enumeration<FfxivStorageLocation>("instance.location", "Location", "Semantic storage location of an observed item instance.");
-        InstanceEquipped = FilterFields.Boolean("instance.equipped", "Equipped", "Whether the observed item instance is currently equipped.", ["equipped"]);
+        InstanceLocation = FilterFields.Enumeration<FfxivStorageLocation>("instance.location", "Location", "Semantic storage location of an observed item instance.", ["location"]);
+        InstanceEquipped = FilterFields.Boolean("instance.equipped", "Equipped", "Whether the observed item instance is currently equipped.");
         InstanceCondition = FilterFields.Decimal("instance.condition", "Condition", "Observed item condition as a percentage from 0 through 100.", ["condition"], 0, 100);
         InstanceSpiritbond = FilterFields.Decimal("instance.spiritbond", "Spiritbond", "Observed spiritbond as a percentage from 0 through 100.", ["spiritbond"], 0, 100);
         OwnershipOwned = FilterFields.Boolean("ownership.owned", "Owned", "Whether at least one instance exists in a complete active ownership scope.", ["owned"]);
@@ -45,7 +45,12 @@ public sealed class FfxivFilterCatalog
             InstanceSpiritbond, OwnershipOwned, OwnershipQuantity, OwnershipCharacters, OwnershipRetainers, OfferSource,
             OfferPrice, OfferTotalPrice, OfferQuantity, OfferWorld, OfferDataCenter, OfferRegion, OfferAge, AcquisitionSources,
         ];
-        Catalog = new FilterCatalog(Fields, CurrentVersion);
+        Catalog = new FilterCatalog(Fields, CurrentVersion,
+        [
+            new("is", "equipped", InstanceEquipped.Key, "true", "Item is currently equipped."),
+            new("is", "hq", InstanceQuality.Key, nameof(FfxivItemQuality.HQ), "Item is high quality."),
+            new("is", "nq", InstanceQuality.Key, nameof(FfxivItemQuality.NQ), "Item is normal quality."),
+        ]);
     }
 
     private static readonly IReadOnlyDictionary<string, FfxivRegion> RegionAliases =

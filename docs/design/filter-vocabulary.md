@@ -1,6 +1,6 @@
 # Canonical FFXIV Filter Vocabulary
 
-Status: proposed vocabulary contract
+Status: implemented vocabulary contract
 
 Audience: filter users, UI authors, context implementers, and vocabulary contributors
 
@@ -85,15 +85,15 @@ unknown(age)
 
 | Field type | `:` behavior | `=` behavior | Ordered comparisons |
 | --- | --- | --- | --- |
-| text | case-insensitive containment | normalized exact equality | unavailable |
-| named entity | name or alias resolution, then identity equality | identity equality | unavailable unless the type declares ordering |
-| enum | named-value equality | named-value equality | unavailable unless explicitly ordered |
-| set | contains or overlaps the supplied values | exact set equality | unavailable |
-| boolean | equality; a bare field means `field=true` | equality | unavailable |
+| text | normalized containment | normalized containment (`!=` negates it); `==` is normalized whole-value equality | unavailable |
+| named entity | exact name or alias resolution, then identity equality | uniquely resolved partial name or alias; `==` requires a complete name or alias | unavailable unless the type declares ordering |
+| enum | named-value equality | uniquely resolved partial value; `==` requires a complete value or alias | unavailable unless explicitly ordered |
+| set | contains or overlaps the supplied values | contains a uniquely resolved value; exact operators also compare member identity rather than whole-set shape | unavailable |
+| boolean | typed equality | typed equality | unavailable |
 | number, quantity, currency, percentage | equality | equality | `<`, `<=`, `>`, `>=`, and ranges |
 | duration or age | equality | equality | `<`, `<=`, `>`, `>=`, and ranges |
 
-For set fields, `job:(WHM | SCH)` means the record contains either eligible job. Exact set equality is intentionally stricter: `job=(WHM | SCH)` matches only a record whose eligible-job set is exactly WHM and SCH. UI help should make this distinction visible because most users want membership and should use `:`.
+For set fields, `job:(WHM | SCH)` means the record contains either eligible job. Equality operators test membership against the resolved values rather than comparing the entire stored set; `!=` and `!==` require that none of the requested members overlap.
 
 Ranges are inclusive:
 
@@ -111,7 +111,7 @@ Item fields describe stable facts from the FFXIV item definition. They do not de
 
 - **Type:** named item
 - **Short forms:** `item`; `name` when unambiguous
-- **Typical operators:** `:`, `=`, `!=`
+- **Typical operators:** `:`, `=`, `!=`, `==`, `!==`
 
 The visible value is the localized item name, while resolution retains a stable internal item key. Item IDs are never required in ordinary input.
 
@@ -120,7 +120,7 @@ item:"Aetheryte Ring"
 item="Grade 8 Dark Matter"
 ```
 
-`:` allows the normal name-search experience. `=` requests an exact resolved item. If localized names collide, completion must disambiguate with user-recognizable metadata rather than asking for a numeric ID.
+`:` and `=` allow the normal name-search experience, with `=` also accepting a uniquely resolved partial. `==` requests a normalized whole-name match. If localized names or partials collide, completion and diagnostics disambiguate with user-recognizable metadata rather than asking for a numeric ID.
 
 ### `item.itemLevel`
 
@@ -152,7 +152,7 @@ level:90..100
 
 - **Type:** set of named FFXIV jobs and classes
 - **Aliases:** `job`, `class`
-- **Typical operators:** set membership with `:`, exact set equality with `=`
+- **Typical operators:** set membership with `:`, fuzzy member resolution with `=`, and complete member resolution with `==`
 
 Values resolve from stable class/job identities and accept canonical abbreviations and localized names. The catalog is populated from game data rather than a hand-maintained list, so newly added jobs do not require parser changes.
 
@@ -168,7 +168,7 @@ Eligibility is contextual. Equipment contexts bind jobs that can equip the item;
 
 - **Type:** set of equipment slots
 - **Alias:** `slot`
-- **Typical operators:** set membership with `:`, exact set equality with `=`
+- **Typical operators:** set membership with `:`, fuzzy member resolution with `=`, and complete member resolution with `==`
 
 Initial canonical values follow Franthropy equipment semantics: `mainHand`, `offHand`, `head`, `body`, `hands`, `legs`, `feet`, `ears`, `neck`, `wrists`, `ring`, and `soulCrystal`. Friendly plurals and familiar names may be value aliases, but their stable keys remain unchanged.
 
@@ -211,8 +211,8 @@ category:"Metal"
 - **Alias:** `unique`
 
 ```text
-unique
--unique
+unique:true
+unique:false
 ```
 
 The first expression requires the FFXIV unique-item flag. The second requires it to be known and false; records with unknown uniqueness do not match either expression.
@@ -225,8 +225,8 @@ The first expression requires the FFXIV unique-item flag. The second requires it
 This describes whether the item definition permits trade or market listing where applicable. It does not prove that a listing currently exists.
 
 ```text
-tradable
-tradable=false
+tradable:true
+tradable:false
 ```
 
 ### `item.desynthesizable`
@@ -237,8 +237,8 @@ tradable=false
 This reflects item-definition eligibility for desynthesis. Character skill, unlock state, and the safety of automating desynthesis are separate concerns.
 
 ```text
-desynth
--desynth
+desynth:true
+desynth:false
 ```
 
 ### Deliberate omissions
@@ -259,6 +259,8 @@ Instance fields describe an observed physical item or stack. Their values may ch
 ```text
 quality:HQ
 quality:NQ
+is:hq
+is:nq
 ```
 
 Omitting the field means either quality is accepted. `quality:any` is therefore unnecessary and is not a canonical value. Collectability is a separate concept and must not be folded into NQ/HQ.
@@ -292,13 +294,13 @@ If a surface distinguishes several retainers, `ownership.retainer` identifies th
 ### `instance.equipped`
 
 - **Type:** boolean
-- **Alias:** `equipped`
+- **Friendly predicate:** `is:equipped`
 
 This indicates that the observed instance occupies a currently equipped slot. Gearset membership is not equivalent to being equipped and requires its own field if later exposed.
 
 ```text
-equipped
--equipped
+is:equipped
+-is:equipped
 ```
 
 ### `instance.condition`
@@ -337,13 +339,13 @@ Ownership fields describe an explicitly documented scope, such as the active cha
 This is true when at least one matching instance exists inside the active ownership scope.
 
 ```text
-owned
--owned
+owned:true
+owned:false
 ```
 
-`-owned` requires a complete enough snapshot to establish absence. If the ownership snapshot is incomplete, the value should be unknown rather than false.
+`owned:false` requires a complete enough snapshot to establish absence. If the ownership snapshot is incomplete, the value should be unknown rather than false.
 
-A context can evaluate `-owned` only when its record universe includes candidates with no matching instances, such as an item catalog, recipe requirement list, or Outfitter candidate set. A viewer built only from observed stacks has no absent-item records and should leave `ownership.owned` unavailable rather than offering a predicate that can never find anything.
+A context can evaluate `owned:false` only when its record universe includes candidates with no matching instances, such as an item catalog, recipe requirement list, or Outfitter candidate set. A viewer built only from observed stacks has no absent-item records and should leave `ownership.owned` unavailable rather than offering a predicate that can never find anything.
 
 ### `ownership.quantity`
 
@@ -540,7 +542,7 @@ This requires a purchase-offer context with offer source, price, and observation
 ### Find an owned upgrade or an affordable offer
 
 ```text
-job:WHM slot:ring ilvl>=660 (owned OR offer.price<=10000)
+job:WHM slot:ring ilvl>=660 (owned:true OR offer.price<=10000)
 ```
 
 An equipment-candidate context can combine stable item facts with ownership and offer evidence. The qualified price remains readable and prevents future ambiguity if another kind of price is added to the candidate record.
@@ -576,7 +578,7 @@ The same expression may select targets for a rule, but the language only answers
 For example:
 
 ```text
-location:retainer -equipped condition<100
+location:retainer -is:equipped condition<100
 ```
 
 This can identify instances, but it does not authorize repair, transfer, sale, or disposal. Keeping selection separate from action lets several products share the language without inheriting one another's automation model.

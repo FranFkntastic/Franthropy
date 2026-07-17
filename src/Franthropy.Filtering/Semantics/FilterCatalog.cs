@@ -16,16 +16,27 @@ public sealed record FilterFieldResolution(
         new(FilterFieldResolutionKind.Success, field, [field]);
 }
 
+public sealed record FilterPredicateAlias(
+    string Qualifier,
+    string Specifier,
+    string TargetFieldKey,
+    string TargetValue,
+    string Description = "");
+
 public sealed class FilterCatalog
 {
     private readonly IReadOnlyDictionary<string, FilterField> exact;
     private readonly IReadOnlyDictionary<string, FilterField> aliases;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<FilterField>> leaves;
 
-    public FilterCatalog(IEnumerable<FilterField> fields, string version = "1")
+    public FilterCatalog(
+        IEnumerable<FilterField> fields,
+        string version = "1",
+        IEnumerable<FilterPredicateAlias>? predicateAliases = null)
     {
         Fields = fields?.ToArray() ?? throw new ArgumentNullException(nameof(fields));
         Version = string.IsNullOrWhiteSpace(version) ? "1" : version.Trim();
+        PredicateAliases = predicateAliases?.ToArray() ?? [];
 
         var exactBuilder = new Dictionary<string, FilterField>(StringComparer.OrdinalIgnoreCase);
         var aliasBuilder = new Dictionary<string, FilterField>(StringComparer.OrdinalIgnoreCase);
@@ -52,10 +63,27 @@ public sealed class FilterCatalog
         leaves = Fields
             .GroupBy(field => field.Key.Split('.').Last(), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => (IReadOnlyList<FilterField>)group.ToArray(), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var predicate in PredicateAliases)
+        {
+            if (exact.ContainsKey(predicate.Qualifier) || aliases.ContainsKey(predicate.Qualifier) || leaves.ContainsKey(predicate.Qualifier))
+                throw new ArgumentException($"Predicate qualifier '{predicate.Qualifier}' collides with a field name.", nameof(predicateAliases));
+            if (!exact.ContainsKey(predicate.TargetFieldKey))
+                throw new ArgumentException($"Predicate '{predicate.Qualifier}:{predicate.Specifier}' targets unknown field '{predicate.TargetFieldKey}'.", nameof(predicateAliases));
+            if (PredicateAliases.Count(candidate =>
+                    candidate.Qualifier.Equals(predicate.Qualifier, StringComparison.OrdinalIgnoreCase) &&
+                    candidate.Specifier.Equals(predicate.Specifier, StringComparison.OrdinalIgnoreCase)) > 1)
+                throw new ArgumentException($"Predicate '{predicate.Qualifier}:{predicate.Specifier}' is registered more than once.", nameof(predicateAliases));
+        }
     }
 
     public string Version { get; }
     public IReadOnlyList<FilterField> Fields { get; }
+    public IReadOnlyList<FilterPredicateAlias> PredicateAliases { get; }
+
+    public FilterPredicateAlias? ResolvePredicate(string qualifier, string specifier) => PredicateAliases.SingleOrDefault(candidate =>
+        candidate.Qualifier.Equals(qualifier.Trim(), StringComparison.OrdinalIgnoreCase) &&
+        candidate.Specifier.Equals(specifier.Trim(), StringComparison.OrdinalIgnoreCase));
 
     public FilterFieldResolution Resolve(string text, IReadOnlySet<string>? availableKeys = null)
     {

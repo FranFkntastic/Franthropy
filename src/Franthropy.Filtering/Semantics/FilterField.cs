@@ -1,6 +1,7 @@
 using Franthropy.Filtering.Diagnostics;
 using Franthropy.Filtering.Evaluation;
 using Franthropy.Filtering.Syntax;
+using System.Globalization;
 
 namespace Franthropy.Filtering.Semantics;
 
@@ -46,8 +47,8 @@ public abstract class FilterField
     public IReadOnlyList<string> Aliases { get; }
     public abstract IReadOnlySet<FilterComparisonOperator> Operators { get; }
     public abstract IReadOnlyList<FilterValueReference> Values { get; }
-    internal virtual bool CanBeBareBoolean => false;
-
+    internal abstract bool MatchUsesFuzzyResolution { get; }
+    internal abstract string? NormalizeLiteral(string text, bool fuzzy);
 }
 
 public sealed class FilterField<T> : FilterField
@@ -56,6 +57,7 @@ public sealed class FilterField<T> : FilterField
     private readonly IEqualityComparer<T> equalityComparer;
     private readonly IComparer<T>? orderComparer;
     private readonly bool textMatching;
+    private readonly bool matchUsesFuzzyResolution;
     private readonly IReadOnlySet<FilterComparisonOperator> operators;
 
     internal FilterField(
@@ -68,13 +70,15 @@ public sealed class FilterField<T> : FilterField
         IEnumerable<string>? aliases,
         IEqualityComparer<T>? equalityComparer = null,
         IComparer<T>? orderComparer = null,
-        bool textMatching = false)
+        bool textMatching = false,
+        bool matchUsesFuzzyResolution = false)
         : base(key, displayName, description, valueKind, aliases)
     {
         this.codec = codec;
         this.equalityComparer = equalityComparer ?? EqualityComparer<T>.Default;
         this.orderComparer = orderComparer;
         this.textMatching = textMatching;
+        this.matchUsesFuzzyResolution = matchUsesFuzzyResolution || textMatching;
         this.operators = new HashSet<FilterComparisonOperator>(operators);
     }
 
@@ -83,8 +87,21 @@ public sealed class FilterField<T> : FilterField
     public override IReadOnlyList<FilterValueReference> Values => codec.Values
         .Select(candidate => new FilterValueReference(candidate.DisplayName, candidate.Aliases ?? []))
         .ToArray();
-    internal override bool CanBeBareBoolean => typeof(T) == typeof(bool);
-
+    internal override bool MatchUsesFuzzyResolution => matchUsesFuzzyResolution;
+    internal override string? NormalizeLiteral(string text, bool fuzzy)
+    {
+        var resolution = fuzzy ? codec.ResolveFuzzy(text) : codec.Resolve(text);
+        if (resolution.Kind != FilterLiteralResolutionKind.Success)
+            return null;
+        var candidate = codec.Values.FirstOrDefault(value => equalityComparer.Equals(value.Value, resolution.Value!));
+        if (candidate is not null)
+            return candidate.DisplayName;
+        if (resolution.Value is string stringValue)
+            return FilterText.Normalize(stringValue);
+        return resolution.Value is IFormattable formattable
+            ? formattable.ToString(null, CultureInfo.InvariantCulture)
+            : resolution.Value?.ToString();
+    }
     internal BoundFieldTest<T>? BindTyped(
         FilterComparisonOperator comparison,
         FilterValueSyntax value,
@@ -122,7 +139,7 @@ public sealed class FilterField<T> : FilterField
                 return FilterTruth.Unknown;
             result = (!range.HasLower || orderComparer.Compare(actual, range.Lower) >= 0) &&
                      (!range.HasUpper || orderComparer.Compare(actual, range.Upper) <= 0);
-            return comparison == FilterComparisonOperator.NotEquals
+            return comparison is FilterComparisonOperator.NotEquals or FilterComparisonOperator.ExactNotEquals
                 ? ToTruth(!result)
                 : ToTruth(result);
         }
@@ -130,11 +147,17 @@ public sealed class FilterField<T> : FilterField
         var values = ((BoundValuesOperand<T>)operand).Values;
         result = comparison switch
         {
-            FilterComparisonOperator.Match when textMatching && actual is string text =>
+            FilterComparisonOperator.Match or FilterComparisonOperator.Equals when textMatching && actual is string text =>
                 TextContainsAny(text, values),
-            FilterComparisonOperator.Match or FilterComparisonOperator.Equals =>
+            FilterComparisonOperator.NotEquals when textMatching && actual is string notText =>
+                !TextContainsAny(notText, values),
+            FilterComparisonOperator.ExactEquals when textMatching && actual is string exactText =>
+                TextEqualsAny(exactText, values),
+            FilterComparisonOperator.ExactNotEquals when textMatching && actual is string exactNotText =>
+                !TextEqualsAny(exactNotText, values),
+            FilterComparisonOperator.Match or FilterComparisonOperator.Equals or FilterComparisonOperator.ExactEquals =>
                 EqualsAny(actual, values),
-            FilterComparisonOperator.NotEquals =>
+            FilterComparisonOperator.NotEquals or FilterComparisonOperator.ExactNotEquals =>
                 !EqualsAny(actual, values),
             FilterComparisonOperator.Less => orderComparer!.Compare(actual, values[0]) < 0,
             FilterComparisonOperator.LessOrEqual => orderComparer!.Compare(actual, values[0]) <= 0,
@@ -149,7 +172,17 @@ public sealed class FilterField<T> : FilterField
     {
         for (var i = 0; i < values.Count; i++)
         {
-            if (actual.Contains((string)(object)values[i]!, StringComparison.OrdinalIgnoreCase))
+            if (FilterText.Contains(actual, (string)(object)values[i]!))
+                return true;
+        }
+        return false;
+    }
+
+    private static bool TextEqualsAny(string actual, IReadOnlyList<T> values)
+    {
+        for (var i = 0; i < values.Count; i++)
+        {
+            if (FilterText.Equals(actual, (string)(object)values[i]!))
                 return true;
         }
         return false;
@@ -177,7 +210,8 @@ public sealed class FilterField<T> : FilterField
 
         if (syntax is FilterRangeValueSyntax range)
         {
-            if (comparison is not (FilterComparisonOperator.Match or FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals))
+            if (comparison is not (FilterComparisonOperator.Match or FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals
+                or FilterComparisonOperator.ExactEquals or FilterComparisonOperator.ExactNotEquals))
             {
                 diagnostics.Add(FilterDiagnosticCodes.InvalidOperator,
                     $"Operator '{comparison.Display()}' compares one value and cannot be used with a range.", syntax.Span);
@@ -222,7 +256,10 @@ public sealed class FilterField<T> : FilterField
         var values = new List<T>(scalarValues.Length);
         foreach (var scalar in scalarValues)
         {
-            var resolution = codec.Resolve(scalar.Token.Value);
+            var resolution = comparison is FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals ||
+                             comparison == FilterComparisonOperator.Match && matchUsesFuzzyResolution
+                ? codec.ResolveFuzzy(scalar.Token.Value)
+                : codec.Resolve(scalar.Token.Value);
             if (resolution.Kind != FilterLiteralResolutionKind.Success)
             {
                 var code = resolution.Kind == FilterLiteralResolutionKind.Ambiguous
@@ -280,6 +317,8 @@ public sealed class FilterSetField<T> : FilterField
         FilterComparisonOperator.Match,
         FilterComparisonOperator.Equals,
         FilterComparisonOperator.NotEquals,
+        FilterComparisonOperator.ExactEquals,
+        FilterComparisonOperator.ExactNotEquals,
     };
 
     internal FilterSetField(
@@ -300,6 +339,15 @@ public sealed class FilterSetField<T> : FilterField
     public override IReadOnlyList<FilterValueReference> Values => codec.Values
         .Select(candidate => new FilterValueReference(candidate.DisplayName, candidate.Aliases ?? []))
         .ToArray();
+    internal override bool MatchUsesFuzzyResolution => false;
+    internal override string? NormalizeLiteral(string text, bool fuzzy)
+    {
+        var resolution = fuzzy ? codec.ResolveFuzzy(text) : codec.Resolve(text);
+        if (resolution.Kind != FilterLiteralResolutionKind.Success)
+            return null;
+        return codec.Values.FirstOrDefault(value => comparer.Equals(value.Value, resolution.Value!))?.DisplayName
+               ?? resolution.Value?.ToString();
+    }
 
     internal BoundSetFieldTest<T>? BindTyped(
         FilterComparisonOperator comparison,
@@ -327,7 +375,9 @@ public sealed class FilterSetField<T> : FilterField
         var expected = new List<T>(scalarValues.Length);
         foreach (var scalar in scalarValues)
         {
-            var resolution = codec.Resolve(scalar.Token.Value);
+            var resolution = comparison is FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals
+                ? codec.ResolveFuzzy(scalar.Token.Value)
+                : codec.Resolve(scalar.Token.Value);
             if (resolution.Kind != FilterLiteralResolutionKind.Success)
             {
                 diagnostics.Add(
@@ -347,13 +397,10 @@ public sealed class FilterSetField<T> : FilterField
                 return FilterTruth.Unknown;
 
             var overlaps = expected.Any(wanted => actual.Any(candidate => comparer.Equals(candidate, wanted)));
-            var exact = actual.Count == expected.Count &&
-                        actual.All(candidate => expected.Any(wanted => comparer.Equals(candidate, wanted)));
             var result = comparison switch
             {
-                FilterComparisonOperator.Match => overlaps,
-                FilterComparisonOperator.Equals => exact,
-                FilterComparisonOperator.NotEquals => !exact,
+                FilterComparisonOperator.Match or FilterComparisonOperator.Equals or FilterComparisonOperator.ExactEquals => overlaps,
+                FilterComparisonOperator.NotEquals or FilterComparisonOperator.ExactNotEquals => !overlaps,
                 _ => false,
             };
             return result ? FilterTruth.True : FilterTruth.False;
@@ -376,6 +423,8 @@ public static class FilterFields
         FilterComparisonOperator.Match,
         FilterComparisonOperator.Equals,
         FilterComparisonOperator.NotEquals,
+        FilterComparisonOperator.ExactEquals,
+        FilterComparisonOperator.ExactNotEquals,
     ];
 
     private static readonly FilterComparisonOperator[] OrderedOperators =
@@ -449,9 +498,10 @@ public static class FilterFields
         string? displayName = null,
         string description = "",
         IEnumerable<string>? aliases = null,
-        IEqualityComparer<T>? comparer = null) =>
+        IEqualityComparer<T>? comparer = null,
+        bool matchUsesFuzzyResolution = false) =>
         new(key, displayName ?? key, description, FilterValueKind.Named, new NamedLiteralCodec<T>(resolver, typeName),
-            EqualityOperators, aliases, comparer);
+            EqualityOperators, aliases, comparer, matchUsesFuzzyResolution: matchUsesFuzzyResolution);
 
     public static FilterSetField<T> Set<T>(
         string key,

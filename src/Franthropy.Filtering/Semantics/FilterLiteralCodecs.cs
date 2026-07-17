@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 
 namespace Franthropy.Filtering.Semantics;
 
@@ -33,7 +34,20 @@ public interface IFilterLiteralCodec<T>
 {
     string TypeName { get; }
     FilterLiteralResolution<T> Resolve(string text);
+    FilterLiteralResolution<T> ResolveFuzzy(string text) => Resolve(text);
     IReadOnlyList<FilterLiteralCandidate<T>> Values { get; }
+}
+
+internal static class FilterText
+{
+    public static string Normalize(string text)
+    {
+        var normalized = text.Normalize(NormalizationForm.FormKC).Trim().ToUpperInvariant();
+        return string.Join(' ', normalized.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    public static bool Contains(string value, string search) => Normalize(value).Contains(Normalize(search), StringComparison.Ordinal);
+    public static bool Equals(string left, string right) => Normalize(left).Equals(Normalize(right), StringComparison.Ordinal);
 }
 
 public interface IFilterNamedValueResolver<T>
@@ -195,6 +209,20 @@ internal sealed class EnumLiteralCodec<TEnum> : IFilterLiteralCodec<TEnum> where
             _ => FilterLiteralResolution<TEnum>.NotFound($"'{text}' is not a known {TypeName}."),
         };
     }
+
+
+    public FilterLiteralResolution<TEnum> ResolveFuzzy(string text) => ResolveCandidates(
+        catalog.Values.Where(candidate => CandidateNames(candidate).Any(name => FilterText.Contains(name, text))).ToArray(), text);
+
+    private FilterLiteralResolution<TEnum> ResolveCandidates(IReadOnlyList<FilterLiteralCandidate<TEnum>> matches, string text) => matches.Count switch
+    {
+        1 => FilterLiteralResolution<TEnum>.Success(matches[0].Value),
+        > 1 => FilterLiteralResolution<TEnum>.Ambiguous($"'{text}' matches more than one {TypeName}.", matches),
+        _ => FilterLiteralResolution<TEnum>.NotFound($"'{text}' is not a known {TypeName}."),
+    };
+
+    private static IEnumerable<string> CandidateNames(FilterLiteralCandidate<TEnum> candidate) =>
+        new[] { candidate.DisplayName }.Concat(candidate.Aliases ?? []);
 }
 
 internal sealed class NamedLiteralCodec<T>(IFilterNamedValueResolver<T> resolver, string typeName) : IFilterLiteralCodec<T>
@@ -212,6 +240,25 @@ internal sealed class NamedLiteralCodec<T>(IFilterNamedValueResolver<T> resolver
             _ => FilterLiteralResolution<T>.NotFound($"No {typeName} named '{text}' was found."),
         };
     }
+
+
+    public FilterLiteralResolution<T> ResolveFuzzy(string text)
+    {
+        var exact = resolver.Resolve(text);
+        if (exact.Count > 0)
+            return ToResolution(exact, text);
+        var matches = resolver.Values.Where(candidate =>
+            new[] { candidate.DisplayName }.Concat(candidate.Aliases ?? [])
+                .Any(name => FilterText.Contains(name, text))).ToArray();
+        return ToResolution(matches, text);
+    }
+
+    private FilterLiteralResolution<T> ToResolution(IReadOnlyList<FilterLiteralCandidate<T>> matches, string text) => matches.Count switch
+    {
+        1 => FilterLiteralResolution<T>.Success(matches[0].Value),
+        > 1 => FilterLiteralResolution<T>.Ambiguous($"'{text}' matches more than one {typeName}.", matches),
+        _ => FilterLiteralResolution<T>.NotFound($"No {typeName} named '{text}' was found."),
+    };
 }
 
 internal sealed class ValidatedLiteralCodec<T>(
@@ -225,6 +272,17 @@ internal sealed class ValidatedLiteralCodec<T>(
     public FilterLiteralResolution<T> Resolve(string text)
     {
         var resolution = inner.Resolve(text);
+        if (resolution.Kind != FilterLiteralResolutionKind.Success)
+            return resolution;
+        return predicate(resolution.Value!)
+            ? resolution
+            : FilterLiteralResolution<T>.NotFound(errorMessage(resolution.Value!));
+    }
+
+
+    public FilterLiteralResolution<T> ResolveFuzzy(string text)
+    {
+        var resolution = inner.ResolveFuzzy(text);
         if (resolution.Kind != FilterLiteralResolutionKind.Success)
             return resolution;
         return predicate(resolution.Value!)

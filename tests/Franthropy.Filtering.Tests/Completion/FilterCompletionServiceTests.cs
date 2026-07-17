@@ -53,7 +53,7 @@ public sealed class FilterCompletionServiceTests
     {
         var result = FilterCompletionService.Complete(Context, new("test", "quantity", 8));
 
-        Assert.Equal([":", "=", "!=", "<", "<=", ">", ">="],
+        Assert.Equal([":", "=", "!=", "==", "!==", "<", "<=", ">", ">="],
             result.Items.Where(item => item.Kind == FilterCompletionKind.Operator).Select(item => item.Label));
         Assert.All(result.Items, item => Assert.Equal(new(8, 0), item.ReplacementSpan));
     }
@@ -63,10 +63,8 @@ public sealed class FilterCompletionServiceTests
     {
         var result = FilterCompletionService.Complete(Context, new("test", "quantity!", 9));
 
-        var completion = Assert.Single(result.Items);
-        Assert.Equal(FilterCompletionKind.Operator, completion.Kind);
-        Assert.Equal("!=", completion.InsertionText);
-        Assert.Equal(new(8, 1), completion.ReplacementSpan);
+        Assert.Equal(["!=", "!=="], result.Items.Select(item => item.InsertionText));
+        Assert.All(result.Items, completion => Assert.Equal(new(8, 1), completion.ReplacementSpan));
     }
 
     [Fact]
@@ -151,6 +149,46 @@ public sealed class FilterCompletionServiceTests
         var result = FilterCompletionService.Complete(Context, new("test", "unknown(qu", 10));
 
         Assert.Contains(result.Items, item => item.Kind == FilterCompletionKind.Field && item.Label == "quality");
+    }
+
+
+    [Fact]
+    public void Complete_PredicateValuesUsesTheCaretPrefix()
+    {
+        var catalog = new FilterCatalog([QualityField, QuantityField], predicateAliases:
+        [
+            new("is", "hq", QualityField.Key, "HQ", "High quality."),
+            new("is", "nq", QualityField.Key, "NQ", "Normal quality."),
+        ]);
+        var context = new FilterContextBuilder<Row>(catalog)
+            .Bind(QualityField, row => Evidence.Known(row.Quality))
+            .Build();
+
+        var all = FilterCompletionService.Complete(context, new("test", "is:", 3));
+        var narrowed = FilterCompletionService.Complete(context, new("test", "is:h", 4));
+
+        Assert.Equal(["hq", "nq"], all.Items.Select(item => item.InsertionText));
+        var hq = Assert.Single(narrowed.Items);
+        Assert.Equal("hq", hq.InsertionText);
+        Assert.Equal(new Franthropy.Filtering.Syntax.TextSpan(3, 1), hq.ReplacementSpan);
+    }
+
+
+    [Fact]
+    public void Complete_HidesPredicatesWhoseTargetFieldIsUnavailable()
+    {
+        var catalog = new FilterCatalog([QualityField, QuantityField], predicateAliases:
+        [
+            new("is", "hq", QualityField.Key, "HQ"),
+        ]);
+        var context = new FilterContextBuilder<Row>(catalog)
+            .Bind(QuantityField, row => Evidence.Known(row.Quantity))
+            .Build();
+
+        var result = FilterCompletionService.Complete(context, new("test", "is:", 3));
+
+        Assert.DoesNotContain(result.Items, item => item.InsertionText == "hq");
+        Assert.Empty(Franthropy.Filtering.Documentation.FilterReferenceGenerator.Create(context).Predicates);
     }
 
     private sealed record Row(Quality Quality, long Quantity);

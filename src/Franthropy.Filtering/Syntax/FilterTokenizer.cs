@@ -56,11 +56,17 @@ internal sealed class FilterTokenizer(string source, FilterLimits limits, Diagno
                 return Token(FilterTokenKind.Colon, start, hadWhitespace);
             case '=':
                 position++;
-                return Token(FilterTokenKind.Equals, start, hadWhitespace);
+                return Match('=')
+                    ? Token(FilterTokenKind.ExactEquals, start, hadWhitespace)
+                    : Token(FilterTokenKind.Equals, start, hadWhitespace);
             case '!':
                 position++;
                 if (Match('='))
-                    return Token(FilterTokenKind.BangEquals, start, hadWhitespace);
+                {
+                    return Match('=')
+                        ? Token(FilterTokenKind.ExactNotEquals, start, hadWhitespace)
+                        : Token(FilterTokenKind.BangEquals, start, hadWhitespace);
+                }
                 return Token(FilterTokenKind.Bang, start, hadWhitespace);
             case '<':
                 position++;

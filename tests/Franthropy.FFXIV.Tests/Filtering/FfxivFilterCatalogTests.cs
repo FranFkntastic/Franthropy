@@ -85,13 +85,15 @@ public sealed class FfxivFilterCatalogTests
     public void OwnershipOwned_IsNotImplicitlyBoundForObservedStacks()
     {
         var context = new FilterContextBuilder<Instance>(Vocabulary.Catalog)
+            .Bind(Vocabulary.ItemName, row => Evidence.Known(row.Item))
             .Bind(Vocabulary.InstanceQuantity, row => Evidence.Known(row.Quantity))
+            .UseDefaultText(Vocabulary.ItemName, _ => Evidence.Known("Owned Blade"))
             .Build("ffxiv.item-instances", "1");
 
         var compilation = FilterCompiler.Compile<Instance>("-owned", context);
 
-        Assert.False(compilation.IsValid);
-        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains("not available", StringComparison.OrdinalIgnoreCase));
+        Assert.True(compilation.IsValid);
+        Assert.False(compilation.Matches(new Instance(Cuirass, 1, [], FfxivItemQuality.NQ, 1, FfxivStorageLocation.Inventory)));
     }
 
     [Fact]
@@ -128,8 +130,31 @@ public sealed class FfxivFilterCatalogTests
 
         Assert.Contains("## `item.itemLevel`", markdown);
         Assert.Contains("`ilvl`", markdown);
-        Assert.Contains("\"catalogVersion\": \"1.0\"", json);
+        Assert.Contains("\"catalogVersion\": \"1.1\"", json);
         Assert.Contains("\"key\": \"acquisition.source\"", json);
+    }
+
+
+    [Theory]
+    [InlineData("quality:hq", FfxivItemQuality.HQ, true)]
+    [InlineData("is:hq", FfxivItemQuality.HQ, true)]
+    [InlineData("is:nq", FfxivItemQuality.NQ, true)]
+    [InlineData("-is:equipped", FfxivItemQuality.HQ, true)]
+    public void FriendlyPredicates_ShareCanonicalSemanticIdentity(string expression, FfxivItemQuality quality, bool expected)
+    {
+        var context = new FilterContextBuilder<Instance>(Vocabulary.Catalog)
+            .Bind(Vocabulary.ItemName, row => Evidence.Known(row.Item))
+            .Bind(Vocabulary.InstanceQuality, row => Evidence.Known(row.Quality))
+            .Bind(Vocabulary.InstanceEquipped, _ => Evidence.Known(false))
+            .UseDefaultText(Vocabulary.ItemName, _ => Evidence.Known("Augmented Credendum Cuirass"))
+            .Build();
+        var row = new Instance(Cuirass, 1, [], quality, 1, FfxivStorageLocation.Inventory);
+        var compilation = FilterCompiler.Compile(expression, context);
+
+        Assert.True(compilation.IsValid, string.Join(Environment.NewLine, compilation.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(expected, compilation.Matches(row));
+        if (expression == "is:hq")
+            Assert.Equal(FilterCompiler.Compile<Instance>("quality:hq", context).SemanticExpression, compilation.SemanticExpression);
     }
 
     private static FilterNamedValueCatalog<T> Catalog<T>(params FilterLiteralCandidate<T>[] values) => new(values);

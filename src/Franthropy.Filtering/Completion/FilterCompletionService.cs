@@ -13,6 +13,8 @@ public static class FilterCompletionService
         FilterComparisonOperator.Match,
         FilterComparisonOperator.Equals,
         FilterComparisonOperator.NotEquals,
+        FilterComparisonOperator.ExactEquals,
+        FilterComparisonOperator.ExactNotEquals,
         FilterComparisonOperator.Less,
         FilterComparisonOperator.LessOrEqual,
         FilterComparisonOperator.Greater,
@@ -181,7 +183,28 @@ public static class FilterCompletionService
         if (fieldStart == fieldEnd)
             return null;
 
-        var resolution = context.Catalog.Resolve(before[fieldStart..fieldEnd], context.AvailableKeys);
+        var fieldText = before[fieldStart..fieldEnd];
+        var predicates = context.Catalog.PredicateAliases
+            .Where(candidate => candidate.Qualifier.Equals(fieldText, StringComparison.OrdinalIgnoreCase))
+            .Where(candidate => context.AvailableKeys.Contains(candidate.TargetFieldKey))
+            .Where(candidate => Matches(candidate.Specifier, prefix))
+            .OrderBy(candidate => Rank(candidate.Specifier, prefix))
+            .ThenBy(candidate => candidate.Specifier, StringComparer.OrdinalIgnoreCase)
+            .Select(candidate => new FilterCompletionItem(
+                candidate.Specifier,
+                candidate.Specifier,
+                FilterCompletionKind.Value,
+                replacement,
+                candidate.Description,
+                $"{candidate.Qualifier}: predicate"))
+            .Take(maximumItems)
+            .ToArray();
+        if (predicates.Length > 0 || context.Catalog.PredicateAliases.Any(candidate =>
+                candidate.Qualifier.Equals(fieldText, StringComparison.OrdinalIgnoreCase) &&
+                context.AvailableKeys.Contains(candidate.TargetFieldKey)))
+            return predicates;
+
+        var resolution = context.Catalog.Resolve(fieldText, context.AvailableKeys);
         if (resolution.Kind != FilterFieldResolutionKind.Success || resolution.Field is null ||
             !context.AvailableKeys.Contains(resolution.Field.Key))
             return null;
@@ -243,6 +266,19 @@ public static class FilterCompletionService
                 candidate.Field.Description,
                 $"{candidate.Field.ValueKind} · {string.Join(" ", candidate.Field.Operators.Select(value => value.Display()))}"));
 
+        var predicates = context.Catalog.PredicateAliases
+            .Where(candidate => context.AvailableKeys.Contains(candidate.TargetFieldKey))
+            .Select(candidate => candidate.Qualifier)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(qualifier => Matches(qualifier, prefix))
+            .Select(qualifier => new FilterCompletionItem(
+                qualifier,
+                qualifier,
+                FilterCompletionKind.Field,
+                replacement,
+                "Human-readable state predicate.",
+                "predicate namespace"));
+
         var syntax = new[]
         {
             new FilterCompletionItem("unknown(…)", "unknown(", FilterCompletionKind.Function, replacement, "Match records where a field has no usable evidence."),
@@ -250,7 +286,7 @@ public static class FilterCompletionService
             new FilterCompletionItem("NOT", "NOT ", FilterCompletionKind.Keyword, replacement, "Negate the next expression."),
         }.Where(item => Matches(item.Label, prefix));
 
-        return fields.Concat(syntax).ToArray();
+        return predicates.Concat(fields).Concat(syntax).ToArray();
     }
 
     private static TextSpan FindReplacementSpan(string expression, int caret)
@@ -322,8 +358,10 @@ public static class FilterCompletionService
     private static string DescribeOperator(FilterComparisonOperator value) => value switch
     {
         FilterComparisonOperator.Match => "Match a value using the field's normal search semantics.",
-        FilterComparisonOperator.Equals => "Match an exact value.",
-        FilterComparisonOperator.NotEquals => "Exclude an exact value.",
+        FilterComparisonOperator.Equals => "Fuzzy-match text or a uniquely resolved named value.",
+        FilterComparisonOperator.NotEquals => "Exclude a fuzzy text or uniquely resolved named-value match.",
+        FilterComparisonOperator.ExactEquals => "Match the complete normalized value.",
+        FilterComparisonOperator.ExactNotEquals => "Exclude the complete normalized value.",
         FilterComparisonOperator.Less => "Match values below the supplied value.",
         FilterComparisonOperator.LessOrEqual => "Match values at or below the supplied value.",
         FilterComparisonOperator.Greater => "Match values above the supplied value.",

@@ -21,6 +21,7 @@ public sealed class FilterCompilation<TRecord>
     public FilterSyntaxTree Syntax { get; }
     public IReadOnlyList<FilterDiagnostic> Diagnostics { get; }
     public string NormalizedExpression { get; }
+    public string SemanticExpression { get; internal init; } = string.Empty;
     public bool IsValid => !Diagnostics.Any(diagnostic => diagnostic.Severity == FilterDiagnosticSeverity.Error);
     public FilterTruth Evaluate(TRecord record) => evaluator(record);
     public bool Matches(TRecord record) => IsValid && Evaluate(record) == FilterTruth.True;

@@ -31,6 +31,15 @@ public sealed record FilterFieldExpressionSyntax(
     public override TextSpan Span => Field.Span.Union(Value.Span);
 }
 
+public sealed record FilterReservedNestedQualifierSyntax(
+    IReadOnlyList<FilterToken> Segments,
+    IReadOnlyList<FilterToken> Separators,
+    FilterToken? Comparator,
+    FilterValueSyntax Value) : FilterExpressionSyntax
+{
+    public override TextSpan Span => Segments[0].Span.Union(Value.Span);
+}
+
 public sealed record FilterFunctionCallSyntax(
     FilterToken Function,
     FilterToken OpenParenthesis,

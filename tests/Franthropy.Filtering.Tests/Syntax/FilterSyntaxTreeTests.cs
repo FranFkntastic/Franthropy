@@ -153,16 +153,27 @@ public sealed class FilterSyntaxTreeTests
     }
 
     [Fact]
-    public void Formatter_NormalizesOperatorsAndPreservesPrecedence()
+    public void Formatter_PreservesHumanSpellingAndPrecedence()
     {
         var tree = FilterSyntaxTree.Parse("-unique (job:WHM||job:SCH) ilvl>=660");
 
         var formatted = FilterFormatter.Format(tree);
         var reparsed = FilterSyntaxTree.Parse(formatted);
 
-        Assert.Equal("NOT unique AND (job:WHM OR job:SCH) AND ilvl>=660", formatted);
+        Assert.Equal("-unique (job:WHM || job:SCH) ilvl>=660", formatted);
         Assert.False(reparsed.HasErrors);
         Assert.Equal(formatted, FilterFormatter.Format(reparsed));
+    }
+
+    [Theory]
+    [InlineData("name=iron", FilterTokenKind.Equals)]
+    [InlineData("name!=iron", FilterTokenKind.BangEquals)]
+    [InlineData("name==iron", FilterTokenKind.ExactEquals)]
+    [InlineData("name!==iron", FilterTokenKind.ExactNotEquals)]
+    public void Tokenizer_UsesLongestComparisonOperator(string expression, FilterTokenKind expected)
+    {
+        var field = Assert.IsType<FilterFieldExpressionSyntax>(FilterSyntaxTree.Parse(expression).Root.Expression);
+        Assert.Equal(expected, field.Comparator.Kind);
     }
 
     [Theory]

@@ -28,6 +28,17 @@ public static class FilterFormatter
                 builder.Append(field.Comparator.Text);
                 WriteValue(builder, field.Value);
                 return;
+            case FilterReservedNestedQualifierSyntax nested:
+                for (var i = 0; i < nested.Segments.Count; i++)
+                {
+                    if (i > 0)
+                        builder.Append(':');
+                    builder.Append(nested.Segments[i].Value);
+                }
+                builder.Append(':');
+                builder.Append(nested.Comparator?.Text);
+                WriteValue(builder, nested.Value);
+                return;
             case FilterFunctionCallSyntax function:
                 builder.Append(function.Function.Value.ToLowerInvariant());
                 builder.Append('(');
@@ -40,7 +51,12 @@ public static class FilterFormatter
                 var needsParentheses = precedence < parentPrecedence;
                 if (needsParentheses)
                     builder.Append('(');
-                builder.Append("NOT ");
+                if (unary.Operator.Kind == FilterTokenKind.Minus)
+                    builder.Append('-');
+                else if (unary.Operator.Kind == FilterTokenKind.Bang)
+                    builder.Append('!');
+                else
+                    builder.Append(unary.Operator.Text).Append(' ');
                 WriteExpression(builder, unary.Operand, precedence);
                 if (needsParentheses)
                     builder.Append(')');
@@ -53,7 +69,11 @@ public static class FilterFormatter
                 if (needsParentheses)
                     builder.Append('(');
                 WriteExpression(builder, binary.Left, precedence);
-                builder.Append(binary.Operator == FilterBinaryOperator.And ? " AND " : " OR ");
+                if (binary.IsImplicit)
+                    builder.Append(' ');
+                else
+                    builder.Append(' ').Append(binary.OperatorToken?.Text ??
+                        (binary.Operator == FilterBinaryOperator.And ? "AND" : "OR")).Append(' ');
                 WriteExpression(builder, binary.Right, precedence + 1);
                 if (needsParentheses)
                     builder.Append(')');

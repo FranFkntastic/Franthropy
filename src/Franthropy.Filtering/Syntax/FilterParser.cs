@@ -93,6 +93,14 @@ internal sealed class FilterParser(
         if (Current.Kind is FilterTokenKind.Word or FilterTokenKind.QuotedString)
         {
             var token = NextToken();
+            if (token.Kind == FilterTokenKind.Word &&
+                Current.Kind == FilterTokenKind.Colon &&
+                Peek(1).Kind == FilterTokenKind.Word &&
+                Peek(2).Kind == FilterTokenKind.Colon)
+            {
+                return ParseReservedNestedQualifier(token);
+            }
+
             FilterToken? separator = null;
             if (token.Kind == FilterTokenKind.Word &&
                 Current.Kind == FilterTokenKind.Colon &&
@@ -118,6 +126,24 @@ internal sealed class FilterParser(
             $"Expected an expression instead of '{unexpected.Text}'.",
             unexpected.Span);
         return new FilterMissingExpressionSyntax(unexpected.Span);
+    }
+
+    private FilterReservedNestedQualifierSyntax ParseReservedNestedQualifier(FilterToken first)
+    {
+        var segments = new List<FilterToken> { first };
+        var separators = new List<FilterToken>();
+        while (Current.Kind == FilterTokenKind.Colon &&
+               Peek(1).Kind == FilterTokenKind.Word &&
+               Peek(2).Kind == FilterTokenKind.Colon)
+        {
+            separators.Add(NextToken());
+            segments.Add(NextToken());
+        }
+
+        separators.Add(NextToken());
+        var comparator = Current.IsComparisonOperator ? NextToken() : null;
+        var value = ParseValue();
+        return new FilterReservedNestedQualifierSyntax(segments, separators, comparator, value);
     }
 
     private FilterExpressionSyntax ParseParenthesizedExpression()
@@ -319,6 +345,8 @@ internal sealed class FilterParser(
     private static bool IsComparisonOperator(FilterTokenKind kind) => kind is
         FilterTokenKind.Equals or
         FilterTokenKind.BangEquals or
+        FilterTokenKind.ExactEquals or
+        FilterTokenKind.ExactNotEquals or
         FilterTokenKind.Less or
         FilterTokenKind.LessOrEqual or
         FilterTokenKind.Greater or

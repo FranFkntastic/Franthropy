@@ -40,6 +40,7 @@ public static class FilterDiagnosticCodes
     public const string AmbiguousValue = "FLT3005";
     public const string InvalidOperator = "FLT3006";
     public const string NoDefaultTextField = "FLT3007";
+    public const string ReservedNestedQualifier = "FLT3008";
 }
 
 internal sealed class DiagnosticBag(int maximumCount)

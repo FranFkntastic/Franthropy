@@ -87,11 +87,12 @@ public sealed class FilterCompilerTests
     }
 
     [Fact]
-    public void BareBooleanAndNegation_UseFieldSemantics()
+    public void BareWordsAndNegation_AlwaysUseDefaultTextSemantics()
     {
-        Assert.True(FilterCompiler.Compile<Item>("unique", Context).Matches(Sample));
-        Assert.False(FilterCompiler.Compile<Item>("-unique", Context).Matches(Sample));
-        Assert.True(FilterCompiler.Compile<Item>("-unique", Context).Matches(Sample with { Unique = false }));
+        Assert.False(FilterCompiler.Compile<Item>("unique", Context).Matches(Sample));
+        Assert.True(FilterCompiler.Compile<Item>("-unique", Context).Matches(Sample));
+        Assert.True(FilterCompiler.Compile<Item>("-iron", Context).Matches(Sample));
+        Assert.False(FilterCompiler.Compile<Item>("-iron", Context).Matches(Sample with { Name = "Iron Ingot" }));
     }
 
     [Fact]
@@ -108,13 +109,53 @@ public sealed class FilterCompilerTests
     [InlineData("instance.quality:nq", false)]
     [InlineData("job:Paladin", true)]
     [InlineData("job=(Paladin | Warrior)", true)]
-    [InlineData("job=Paladin", false)]
+    [InlineData("job=Paladin", true)]
     public void NamedAndSetValues_AreResolvedBeforeEvaluation(string expression, bool expected)
     {
         var compilation = FilterCompiler.Compile<Item>(expression, Context);
 
         Assert.True(compilation.IsValid);
         Assert.Equal(expected, compilation.Matches(Sample));
+    }
+
+    [Theory]
+    [InlineData("name=credendum", true)]
+    [InlineData("name!=credendum", false)]
+    [InlineData("name==\"augmented credendum cuirass\"", true)]
+    [InlineData("name!==\"augmented credendum cuirass\"", false)]
+    [InlineData("name==credendum", false)]
+    public void EqualityOperators_FormFuzzyAndExactNegationPairs(string expression, bool expected)
+    {
+        var compilation = FilterCompiler.Compile<Item>(expression, Context);
+        Assert.True(compilation.IsValid);
+        Assert.Equal(expected, compilation.Matches(Sample));
+    }
+
+    [Fact]
+    public void FuzzyFiniteVocabulary_DiagnosesAmbiguityInsteadOfChoosing()
+    {
+        var compilation = FilterCompiler.Compile<Item>("job=a", Context);
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Code == FilterDiagnosticCodes.AmbiguousValue);
+    }
+
+    [Fact]
+    public void HumanSpellingAndSemanticNormalization_AreSeparate()
+    {
+        var direct = FilterCompiler.Compile<Item>("qty:4 -name:iron", Context);
+        var legacy = FilterCompiler.Compile<Item>("ownership.quantity==4 AND !item.name=iron", Context);
+
+        Assert.Equal("qty:4 -name:iron", direct.NormalizedExpression);
+        Assert.Equal("qty:4 -name:iron", direct.Syntax.Source);
+        Assert.Equal(legacy.SemanticExpression, direct.SemanticExpression);
+    }
+
+    [Fact]
+    public void ReservedNestedQualifier_HasFocusedDiagnosticAndRoundTrips()
+    {
+        const string expression = "stat:range:>=50";
+        var compilation = FilterCompiler.Compile<Item>(expression, Context);
+        Assert.Equal(expression, compilation.NormalizedExpression);
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Code == FilterDiagnosticCodes.ReservedNestedQualifier);
     }
 
     [Fact]
@@ -126,6 +167,16 @@ public sealed class FilterCompilerTests
         Assert.Equal(FilterTruth.Unknown, FilterCompiler.Compile<Item>("NOT price<200000", Context).Evaluate(item));
         Assert.True(FilterCompiler.Compile<Item>("unknown(price)", Context).Matches(item));
         Assert.False(FilterCompiler.Compile<Item>("known(price)", Context).Matches(item));
+        Assert.Equal(FilterTruth.Unknown, FilterCompiler.Compile<Item>("price!==200000", Context).Evaluate(item));
+    }
+
+
+    [Fact]
+    public void NestedQualifierShape_IsReservedRatherThanReinterpreted()
+    {
+        var compilation = FilterCompiler.Compile<Item>("is:quality:hq", Context);
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Code == FilterDiagnosticCodes.ReservedNestedQualifier);
+        Assert.DoesNotContain(compilation.Diagnostics, diagnostic => diagnostic.Code == FilterDiagnosticCodes.UnknownField);
     }
 
     [Fact]

@@ -18,7 +18,10 @@ public static class FilterCompiler
         var diagnostics = new DiagnosticBag(effectiveLimits.MaximumDiagnostics);
         diagnostics.AddRange(syntax.Diagnostics);
         var evaluator = Bind(syntax.Root.Expression, context, diagnostics);
-        return new FilterCompilation<TRecord>(syntax, diagnostics.Diagnostics.ToArray(), evaluator);
+        return new FilterCompilation<TRecord>(syntax, diagnostics.Diagnostics.ToArray(), evaluator)
+        {
+            SemanticExpression = FilterSemanticFormatter.Format(syntax, context.Catalog, context.AvailableKeys),
+        };
     }
 
     private static Func<TRecord, FilterTruth> Bind<TRecord>(
@@ -46,8 +49,34 @@ public static class FilterCompiler
                     : record => FilterTruthOperations.Or(left(record), right(record));
             }
             case FilterFieldExpressionSyntax fieldExpression:
+                if (fieldExpression.Comparator.Kind == FilterTokenKind.Colon &&
+                    fieldExpression.Value is FilterScalarValueSyntax predicateValue)
+                {
+                    var predicate = context.Catalog.ResolvePredicate(fieldExpression.Field.Value, predicateValue.Token.Value);
+                    if (predicate is not null)
+                    {
+                        var target = context.Catalog.Resolve(predicate.TargetFieldKey, context.AvailableKeys);
+                        var syntheticValue = new FilterScalarValueSyntax(predicateValue.Token with
+                        {
+                            Text = predicate.TargetValue,
+                            Value = predicate.TargetValue,
+                        });
+                        var syntheticComparator = fieldExpression.Comparator with
+                        {
+                            Kind = FilterTokenKind.ExactEquals,
+                            Text = "==",
+                            Value = "==",
+                        };
+                        return BindResolvedField(target.Field!, syntheticComparator, syntheticValue, context, diagnostics, fieldExpression.Span);
+                    }
+                }
                 return BindField(fieldExpression.Field.Value, fieldExpression.Field.Span, fieldExpression.Comparator,
                     fieldExpression.Value, context, diagnostics);
+            case FilterReservedNestedQualifierSyntax nested:
+                diagnostics.Add(FilterDiagnosticCodes.ReservedNestedQualifier,
+                    $"Nested qualifier '{string.Join(':', nested.Segments.Select(segment => segment.Value))}:' is reserved for future parameterized domains.",
+                    nested.Span);
+                return _ => FilterTruth.Unknown;
             case FilterFunctionCallSyntax function:
                 return BindEvidenceFunction(function, context, diagnostics);
             case FilterFreeTextSyntax freeText:
@@ -62,18 +91,6 @@ public static class FilterCompiler
         FilterContext<TRecord> context,
         DiagnosticBag diagnostics)
     {
-        if (freeText.Text.Kind != FilterTokenKind.QuotedString)
-        {
-            var resolution = context.Catalog.Resolve(freeText.Text.Value, context.AvailableKeys);
-            if (resolution.Kind == FilterFieldResolutionKind.Success && resolution.Field!.CanBeBareBoolean)
-            {
-                var syntheticValue = new FilterScalarValueSyntax(new FilterToken(
-                    FilterTokenKind.Word, "true", "true", freeText.Span));
-                var syntheticComparator = new FilterToken(FilterTokenKind.Equals, "=", "=", freeText.Span);
-                return BindResolvedField(resolution.Field, syntheticComparator, syntheticValue, context, diagnostics, freeText.Span);
-            }
-        }
-
         if (context.DefaultTextBindings.Count == 0)
         {
             diagnostics.Add(FilterDiagnosticCodes.NoDefaultTextField,
@@ -88,7 +105,7 @@ public static class FilterCompiler
                 var evidence = binding.Accessor(record);
                 if (!evidence.IsKnown)
                     return FilterTruth.Unknown;
-                return evidence.Value.Contains(searchText, StringComparison.OrdinalIgnoreCase)
+                return FilterText.Contains(evidence.Value, searchText)
                     ? FilterTruth.True
                     : FilterTruth.False;
             }))
