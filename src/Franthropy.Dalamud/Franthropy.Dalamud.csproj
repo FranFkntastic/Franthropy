@@ -77,6 +77,7 @@
     <Compile Remove="UI\Settings\DalamudSettingsTreeRenderer.cs" />
     <Compile Remove="UI\Items\DalamudItemAutocompleteRenderer.cs" />
     <Compile Remove="AgentBridge\AgentBridgeUiReviewRegistryImGuiExtensions.cs" />
+    <Compile Remove="UI\Plots\DalamudPlotRenderer.cs" />
   </ItemGroup>
 
 </Project>
