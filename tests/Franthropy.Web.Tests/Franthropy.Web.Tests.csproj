@@ -18,6 +18,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\Franthropy.Filtering\Franthropy.Filtering.csproj" />
     <ProjectReference Include="..\..\src\Franthropy.Web\Franthropy.Web.csproj" />
   </ItemGroup>
 
