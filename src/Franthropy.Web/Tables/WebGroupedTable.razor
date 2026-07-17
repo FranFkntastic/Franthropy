@@ -1,0 +1,165 @@
+@typeparam TGroup
+@typeparam TChild
+@typeparam TGroupKey where TGroupKey : notnull
+@typeparam TColumnId where TColumnId : struct, Enum
+
+<WebTableResizeSurface Columns="ResizeColumns"
+                       StorageKey="@StorageKey"
+                       ScrollClass="@ScrollClass"
+                       CssClass="@ResizeSurfaceClass"
+                       AccentColor="@AccentColor"
+                       BoundaryColor="@BoundaryColor">
+    <table class="@TableClass" data-franthropy-resizable-table aria-label="@AriaLabel">
+        <colgroup>
+            @foreach (var column in Columns)
+            {
+                <col data-column-id="@column.Key"
+                     data-default-width="@column.ToResizeColumn().SafeDefaultWidthPx"
+                     data-min-width="@column.ToResizeColumn().SafeMinWidthPx"
+                     style="width: @(column.ToResizeColumn().SafeDefaultWidthPx)px" />
+            }
+        </colgroup>
+        <thead>
+            <tr class="franthropy-grouped-table-header-row">
+                @foreach (var column in Columns)
+                {
+                    <th class="@column.HeaderCssClass"
+                        data-column-id="@column.Key"
+                        aria-sort="@SortState.GetAriaSort(column.Id)"
+                        title="@column.Tooltip">
+                        @if (column.Sortable)
+                        {
+                            <button type="button"
+                                    class="franthropy-grouped-table-sort"
+                                    @onclick="() => ToggleSortAsync(column.Id)">
+                                <span>@column.Label</span>
+                                @if (SortState.IsSortedBy(column.Id))
+                                {
+                                    <span class="franthropy-grouped-table-sort-indicator" aria-hidden="true">@(SortState.Descending ? "▼" : "▲")</span>
+                                }
+                            </button>
+                        }
+                        else
+                        {
+                            <span>@column.Label</span>
+                        }
+                    </th>
+                }
+            </tr>
+            @if (FilterCell is not null)
+            {
+                <tr class="franthropy-grouped-table-filter-row">
+                    @foreach (var column in Columns)
+                    {
+                        <th>@FilterCell(column.Id)</th>
+                    }
+                </tr>
+            }
+        </thead>
+        <tbody>
+            @if (Groups.Count == 0)
+            {
+                <tr class="franthropy-grouped-table-empty-row">
+                    <td colspan="@Columns.Count">@EmptyContent</td>
+                </tr>
+            }
+            else
+            {
+                @foreach (var group in Groups)
+                {
+                    var key = GroupKey(group.Value);
+                    var expanded = IsGroupExpanded(group.Value);
+                    var selected = Selection.IsSelected(key);
+                    <tr class="@GroupRowClass(group.Value, expanded, selected)"
+                        @key="key"
+                        tabindex="0"
+                        aria-expanded="@AriaBoolean(expanded)"
+                        aria-selected="@AriaBoolean(selected)"
+                        @onclick="() => ToggleGroupAsync(group.Value)"
+                        @onkeydown="args => ToggleGroupFromKeyboardAsync(group.Value, args)">
+                        @foreach (var column in Columns)
+                        {
+                            @if (column.SuppressGroupActivation)
+                            {
+                                <td class="@column.GroupCellCssClass"
+                                    title="@column.GroupCellTitle?.Invoke(group.Value)"
+                                    @onclick:stopPropagation="true">
+                                    @column.GroupCell(group.Value)
+                                </td>
+                            }
+                            else
+                            {
+                                <td class="@column.GroupCellCssClass" title="@column.GroupCellTitle?.Invoke(group.Value)">
+                                    @column.GroupCell(group.Value)
+                                </td>
+                            }
+                        }
+                    </tr>
+                    @if (expanded)
+                    {
+                        @foreach (var child in group.Children)
+                        {
+                            <tr class="@ChildRowClass(child)" @key="ChildKey(child)">
+                                @foreach (var column in Columns)
+                                {
+                                    <td class="@column.ChildCellCssClass" title="@column.ChildCellTitle?.Invoke(child)">
+                                        @column.ChildCell(child)
+                                    </td>
+                                }
+                            </tr>
+                        }
+                    }
+                }
+            }
+        </tbody>
+    </table>
+</WebTableResizeSurface>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<WebTableGroup<TGroup, TChild>> Groups { get; set; } = [];
+    [Parameter, EditorRequired] public IReadOnlyList<WebGroupedTableColumn<TGroup, TChild, TColumnId>> Columns { get; set; } = [];
+    [Parameter, EditorRequired] public Func<TGroup, TGroupKey> GroupKey { get; set; } = default!;
+    [Parameter, EditorRequired] public Func<TChild, object> ChildKey { get; set; } = default!;
+    [Parameter, EditorRequired] public Func<TGroup, bool> IsGroupExpanded { get; set; } = default!;
+    [Parameter] public EventCallback<TGroup> GroupToggled { get; set; }
+    [Parameter] public WebTableSelection<TGroupKey> Selection { get; set; } = WebTableSelection<TGroupKey>.None;
+    [Parameter] public WebTableSortState<TColumnId> SortState { get; set; } = WebTableSortState<TColumnId>.Unsorted;
+    [Parameter] public EventCallback<WebTableSortState<TColumnId>> SortChanged { get; set; }
+    [Parameter] public RenderFragment<TColumnId>? FilterCell { get; set; }
+    [Parameter] public RenderFragment? EmptyContent { get; set; }
+    [Parameter] public Func<TGroup, string?>? GroupCssClass { get; set; }
+    [Parameter] public Func<TChild, string?>? ChildCssClass { get; set; }
+    [Parameter, EditorRequired] public string StorageKey { get; set; } = string.Empty;
+    [Parameter] public string AriaLabel { get; set; } = "Grouped table";
+    [Parameter] public string? CssClass { get; set; }
+    [Parameter] public string? ScrollClass { get; set; }
+    [Parameter] public string? ResizeSurfaceClass { get; set; }
+    [Parameter] public string? AccentColor { get; set; }
+    [Parameter] public string? BoundaryColor { get; set; }
+
+    private IReadOnlyList<WebTableResizeColumn> ResizeColumns => Columns.Select(column => column.ToResizeColumn()).ToArray();
+    private string TableClass => CombineClasses("franthropy-grouped-table", CssClass);
+
+    private Task ToggleSortAsync(TColumnId column) =>
+        SortChanged.HasDelegate ? SortChanged.InvokeAsync(SortState.Toggle(column)) : Task.CompletedTask;
+
+    private Task ToggleGroupAsync(TGroup group) =>
+        GroupToggled.HasDelegate ? GroupToggled.InvokeAsync(group) : Task.CompletedTask;
+
+    private Task ToggleGroupFromKeyboardAsync(TGroup group, KeyboardEventArgs args) =>
+        args.Key is "Enter" or " " ? ToggleGroupAsync(group) : Task.CompletedTask;
+
+    private string GroupRowClass(TGroup group, bool expanded, bool selected) => CombineClasses(
+        "franthropy-grouped-table-group-row",
+        expanded ? "is-expanded" : null,
+        selected ? "is-selected" : null,
+        GroupCssClass?.Invoke(group));
+
+    private string ChildRowClass(TChild child) =>
+        CombineClasses("franthropy-grouped-table-child-row", ChildCssClass?.Invoke(child));
+
+    private static string CombineClasses(params string?[] values) =>
+        string.Join(" ", values.Where(value => !string.IsNullOrWhiteSpace(value)));
+
+    private static string AriaBoolean(bool value) => value ? "true" : "false";
+}

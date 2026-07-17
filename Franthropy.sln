@@ -25,6 +25,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Franthropy.Filtering.Benchm
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Franthropy.Web", "src\Franthropy.Web\Franthropy.Web.csproj", "{BEAFC1EB-3DD5-40B3-9263-2F58F97CC9AA}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Franthropy.Web.Tests", "tests\Franthropy.Web.Tests\Franthropy.Web.Tests.csproj", "{489B2B36-7E54-4BE8-AB3D-C10AF7993632}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -131,6 +133,18 @@ Global
 		{BEAFC1EB-3DD5-40B3-9263-2F58F97CC9AA}.Release|x64.Build.0 = Release|Any CPU
 		{BEAFC1EB-3DD5-40B3-9263-2F58F97CC9AA}.Release|x86.ActiveCfg = Release|Any CPU
 		{BEAFC1EB-3DD5-40B3-9263-2F58F97CC9AA}.Release|x86.Build.0 = Release|Any CPU
+		{489B2B36-7E54-4BE8-AB3D-C10AF7993632}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{489B2B36-7E54-4BE8-AB3D-C10AF7993632}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{489B2B36-7E54-4BE8-AB3D-C10AF7993632}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{489B2B36-7E54-4BE8-AB3D-C10AF7993632}.Debug|x64.Build.0 = Debug|Any CPU
+		{489B2B36-7E54-4BE8-AB3D-C10AF7993632}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{489B2B36-7E54-4BE8-AB3D-C10AF7993632}.Debug|x86.Build.0 = Debug|Any CPU
+		{489B2B36-7E54-4BE8-AB3D-C10AF7993632}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{489B2B36-7E54-4BE8-AB3D-C10AF7993632}.Release|Any CPU.Build.0 = Release|Any CPU
+		{489B2B36-7E54-4BE8-AB3D-C10AF7993632}.Release|x64.ActiveCfg = Release|Any CPU
+		{489B2B36-7E54-4BE8-AB3D-C10AF7993632}.Release|x64.Build.0 = Release|Any CPU
+		{489B2B36-7E54-4BE8-AB3D-C10AF7993632}.Release|x86.ActiveCfg = Release|Any CPU
+		{489B2B36-7E54-4BE8-AB3D-C10AF7993632}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -144,5 +158,6 @@ Global
 		{C2A0423F-B6DB-4579-9D4D-F79B875CAFCB} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{D3120E5E-6F0E-44FB-ADD0-3C414C069FAD} = {66320409-64EC-F7C5-3DEF-65E7510DAAD1}
 		{BEAFC1EB-3DD5-40B3-9263-2F58F97CC9AA} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{489B2B36-7E54-4BE8-AB3D-C10AF7993632} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal
