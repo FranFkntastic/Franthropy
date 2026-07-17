@@ -37,7 +37,6 @@ export function registerFilterAutocomplete(root, dotNetReference) {
             start: Number.isInteger(input.selectionStart) ? input.selectionStart : input.value.length,
             end: Number.isInteger(input.selectionEnd) ? input.selectionEnd : input.value.length,
         };
-        valueBeforeInput = input.value ?? "";
         if (!root.querySelector('[role="listbox"]')) return;
         if (!["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) return;
 
