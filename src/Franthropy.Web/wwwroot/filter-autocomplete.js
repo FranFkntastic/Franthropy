@@ -15,7 +15,9 @@ export function registerFilterAutocomplete(root, dotNetReference) {
         const value = input.value ?? "";
         const reportedCaret = Number.isInteger(input.selectionStart) ? input.selectionStart : value.length;
         let caret = reportedCaret;
-        if (selectionBeforeInput && reportedCaret === selectionBeforeInput.start) {
+        if (value.length > valueBeforeInput.length && value.startsWith(valueBeforeInput)) {
+            caret = value.length;
+        } else if (selectionBeforeInput && reportedCaret === selectionBeforeInput.start) {
             if (event.inputType === "deleteContentBackward" && selectionBeforeInput.start === selectionBeforeInput.end) {
                 caret = Math.max(0, selectionBeforeInput.start - 1);
             } else {
