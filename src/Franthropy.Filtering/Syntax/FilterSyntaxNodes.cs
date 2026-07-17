@@ -27,6 +27,7 @@ public sealed record FilterFieldExpressionSyntax(
     FilterToken Comparator,
     FilterValueSyntax Value) : FilterExpressionSyntax
 {
+    public FilterToken? Separator { get; init; }
     public override TextSpan Span => Field.Span.Union(Value.Span);
 }
 

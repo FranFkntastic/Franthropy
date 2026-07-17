@@ -168,8 +168,9 @@ primary        = "(" , or-expression , ")"
                | function-call
                | field-expression
                | free-text ;
-field-expression = field-name , comparator , field-value ;
-comparator     = ":" | "=" | "!=" | "<" | "<=" | ">" | ">=" ;
+field-expression = field-name , ( ":" , field-value
+                                  | [ ":" ] , comparison-operator , field-value ) ;
+comparison-operator = "=" | "!=" | "<" | "<=" | ">" | ">=" ;
 field-value    = scalar | range | value-list ;
 range          = [ scalar ] , ".." , [ scalar ] ;
 value-list     = "(" , scalar , { "|" , scalar } , ")" ;

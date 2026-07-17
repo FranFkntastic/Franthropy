@@ -93,11 +93,20 @@ internal sealed class FilterParser(
         if (Current.Kind is FilterTokenKind.Word or FilterTokenKind.QuotedString)
         {
             var token = NextToken();
+            FilterToken? separator = null;
+            if (token.Kind == FilterTokenKind.Word &&
+                Current.Kind == FilterTokenKind.Colon &&
+                IsComparisonOperator(Peek(1).Kind) &&
+                !Peek(1).HasLeadingWhitespace)
+            {
+                separator = NextToken();
+            }
+
             if (token.Kind == FilterTokenKind.Word && Current.IsComparator)
             {
                 var comparator = NextToken();
                 var value = ParseValue();
-                return new FilterFieldExpressionSyntax(token, comparator, value);
+                return new FilterFieldExpressionSyntax(token, comparator, value) { Separator = separator };
             }
 
             return new FilterFreeTextSyntax(token);
@@ -306,6 +315,14 @@ internal sealed class FilterParser(
 
     private static bool CanBeScalar(FilterTokenKind kind) => kind is
         FilterTokenKind.Word or FilterTokenKind.QuotedString;
+
+    private static bool IsComparisonOperator(FilterTokenKind kind) => kind is
+        FilterTokenKind.Equals or
+        FilterTokenKind.BangEquals or
+        FilterTokenKind.Less or
+        FilterTokenKind.LessOrEqual or
+        FilterTokenKind.Greater or
+        FilterTokenKind.GreaterOrEqual;
 
     private FilterToken Current => Peek(0);
 

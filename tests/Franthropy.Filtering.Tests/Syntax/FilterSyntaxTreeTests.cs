@@ -62,6 +62,21 @@ public sealed class FilterSyntaxTreeTests
     }
 
     [Fact]
+    public void Parser_AcceptsFriendlyColonBeforeAnOrderedComparator()
+    {
+        const string expression = "quantity:>99";
+
+        var tree = FilterSyntaxTree.Parse(expression);
+
+        Assert.False(tree.HasErrors);
+        var field = Assert.IsType<FilterFieldExpressionSyntax>(tree.Root.Expression);
+        Assert.Equal(":", field.Separator?.Text);
+        Assert.Equal(">", field.Comparator.Text);
+        Assert.Equal("99", Assert.IsType<FilterScalarValueSyntax>(field.Value).Token.Value);
+        Assert.Equal(expression, FilterFormatter.Format(tree));
+    }
+
+    [Fact]
     public void Parser_ParsesFieldValueListWithoutTreatingPipeAsExpressionOr()
     {
         var tree = FilterSyntaxTree.Parse("job:(WHM | SCH | AST)");

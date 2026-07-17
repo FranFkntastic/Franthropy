@@ -19,7 +19,10 @@ public sealed record FilterFieldReference(
     IReadOnlyList<string> Operators,
     bool IsAvailable,
     bool IsDefaultText,
-    IReadOnlyList<FilterValueReference> Values);
+    IReadOnlyList<FilterValueReference> Values)
+{
+    public string PreferredName { get; init; } = Key;
+}
 
 public static class FilterReferenceGenerator
 {
@@ -30,7 +33,11 @@ public static class FilterReferenceGenerator
             catalog.Version,
             "catalog",
             catalog.Version,
-            catalog.Fields.Select(field => CreateField(field, true, false)).ToArray());
+            catalog.Fields.Select(field => CreateField(
+                field,
+                true,
+                false,
+                catalog.GetPreferredName(field))).ToArray());
     }
 
     public static FilterReferenceModel Create<TRecord>(FilterContext<TRecord> context)
@@ -43,19 +50,25 @@ public static class FilterReferenceGenerator
             context.Catalog.Fields.Select(field => CreateField(
                 field,
                 context.AvailableKeys.Contains(field.Key),
-                context.DefaultTextBindings.Any(binding => binding.Field == field))).ToArray());
+                context.DefaultTextBindings.Any(binding => binding.Field == field),
+                context.Catalog.GetPreferredName(field, context.AvailableKeys))).ToArray());
     }
 
-    private static FilterFieldReference CreateField(FilterField field, bool isAvailable, bool isDefaultText) => new(
-        field.Key,
-        field.DisplayName,
-        field.Description,
-        field.ValueKind,
-        field.Aliases,
-        field.Operators.Select(value => value.Display()).OrderBy(value => value, StringComparer.Ordinal).ToArray(),
-        isAvailable,
-        isDefaultText,
-        field.Values);
+    private static FilterFieldReference CreateField(
+        FilterField field,
+        bool isAvailable,
+        bool isDefaultText,
+        string preferredName) => new(
+            field.Key,
+            field.DisplayName,
+            field.Description,
+            field.ValueKind,
+            field.Aliases,
+            field.Operators.Select(value => value.Display()).OrderBy(value => value, StringComparer.Ordinal).ToArray(),
+            isAvailable,
+            isDefaultText,
+            field.Values)
+        { PreferredName = preferredName };
 }
 
 public static class FilterReferenceWriter

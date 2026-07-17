@@ -29,6 +29,16 @@ public sealed class FilterCompletionServiceTests
     }
 
     [Fact]
+    public void Complete_PreservesUnaryNegationWhileReplacingTheFieldPrefix()
+    {
+        var result = FilterCompletionService.Complete(Context, new("test", "-qua", 4));
+
+        var field = Assert.Single(result.Items, item => item.Kind == FilterCompletionKind.Field && item.Label == "quality");
+        Assert.Equal(new(1, 3), field.ReplacementSpan);
+        Assert.Equal("quality", field.InsertionText);
+    }
+
+    [Fact]
     public void Complete_SuggestsTypedValuesAfterComparator()
     {
         var result = FilterCompletionService.Complete(Context, new("test", "quality:h", 9));
@@ -66,6 +76,54 @@ public sealed class FilterCompletionServiceTests
 
         Assert.Equal(["HQ", "NQ"], result.Items.Select(item => item.Label).Order());
         Assert.All(result.Items, item => Assert.Equal(FilterCompletionKind.Value, item.Kind));
+    }
+
+    [Fact]
+    public void Complete_SuggestsOrderedOperatorsAfterAFriendlyColon()
+    {
+        var result = FilterCompletionService.Complete(Context, new("test", "quantity:>", 10));
+
+        Assert.Equal([">", ">="], result.Items.Select(item => item.Label));
+        Assert.All(result.Items, item => Assert.Equal(new(9, 1), item.ReplacementSpan));
+    }
+
+    [Fact]
+    public void Complete_PrefersAnUnambiguousLeafAndFallsBackToCanonicalPathsWhenAmbiguous()
+    {
+        var ownedQuantity = FilterFields.Integer("ownership.quantity");
+        var stackQuantity = FilterFields.Integer("instance.quantity");
+        var catalog = new FilterCatalog([ownedQuantity, stackQuantity]);
+        var narrow = new FilterContextBuilder<Row>(catalog)
+            .Bind(stackQuantity, row => Evidence.Known(row.Quantity))
+            .Build();
+        var broad = new FilterContextBuilder<Row>(catalog)
+            .Bind(ownedQuantity, row => Evidence.Known(row.Quantity))
+            .Bind(stackQuantity, row => Evidence.Known(row.Quantity))
+            .Build();
+
+        var narrowResult = FilterCompletionService.Complete(narrow, new("test", "qua", 3));
+        var broadResult = FilterCompletionService.Complete(broad, new("test", "qua", 3));
+
+        Assert.Contains(narrowResult.Items, item => item.Kind == FilterCompletionKind.Field && item.InsertionText == "quantity");
+        Assert.Contains(broadResult.Items, item => item.InsertionText == "ownership.quantity");
+        Assert.Contains(broadResult.Items, item => item.InsertionText == "instance.quantity");
+        Assert.DoesNotContain(broadResult.Items, item => item.InsertionText == "quantity");
+    }
+
+    [Fact]
+    public void Complete_DoesNotOfferALeafShadowedByAnotherFieldsAlias()
+    {
+        var aliasedQuantity = FilterFields.Integer("ownership.total", aliases: ["quantity"]);
+        var stackQuantity = FilterFields.Integer("instance.quantity");
+        var catalog = new FilterCatalog([aliasedQuantity, stackQuantity]);
+        var context = new FilterContextBuilder<Row>(catalog)
+            .Bind(stackQuantity, row => Evidence.Known(row.Quantity))
+            .Build();
+
+        var result = FilterCompletionService.Complete(context, new("test", "qua", 3));
+
+        Assert.Contains(result.Items, item => item.InsertionText == "instance.quantity");
+        Assert.DoesNotContain(result.Items, item => item.InsertionText == "quantity");
     }
 
     [Fact]

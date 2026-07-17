@@ -78,4 +78,21 @@ public sealed class FilterCatalog
 
         return new FilterFieldResolution(FilterFieldResolutionKind.Ambiguous, null, candidates);
     }
+
+    public string GetPreferredName(FilterField field, IReadOnlySet<string>? availableKeys = null)
+    {
+        ArgumentNullException.ThrowIfNull(field);
+        if (!exact.TryGetValue(field.Key, out var registered) || !ReferenceEquals(registered, field))
+            throw new ArgumentException($"Field '{field.Key}' does not belong to this catalog.", nameof(field));
+
+        var alias = field.Aliases.OrderBy(value => value.Length).FirstOrDefault();
+        if (alias is not null)
+            return alias;
+
+        var leaf = field.Key.Split('.').Last();
+        var resolution = Resolve(leaf, availableKeys);
+        return resolution.Kind == FilterFieldResolutionKind.Success && ReferenceEquals(resolution.Field, field)
+            ? leaf
+            : field.Key;
+    }
 }

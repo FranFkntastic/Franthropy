@@ -76,6 +76,8 @@ public sealed class FilterCompilerTests
     [InlineData("qty:..3", false)]
     [InlineData("qty:5..", false)]
     [InlineData("qty>=4", true)]
+    [InlineData("qty:>=4", true)]
+    [InlineData("qty:>4", false)]
     public void NumericComparisonsAndRanges_AreTyped(string expression, bool expected)
     {
         var compilation = FilterCompiler.Compile<Item>(expression, Context);
@@ -199,6 +201,22 @@ public sealed class FilterCompilerTests
         Assert.Contains(reference.Fields, field => field.Key == "instance.quantity" && !field.IsAvailable);
         Assert.Contains(reference.Fields.Single(field => field.Key == "instance.quality").Values,
             value => value.Aliases.Contains("hq"));
+    }
+
+    [Fact]
+    public void ReferenceModel_UsesCatalogResolutionForAliasShadowedLeaves()
+    {
+        var aliasedQuantity = FilterFields.Integer("ownership.total", aliases: ["quantity"]);
+        var stackQuantity = FilterFields.Integer("instance.quantity");
+        var catalog = new FilterCatalog([aliasedQuantity, stackQuantity]);
+        var context = new FilterContextBuilder<Item>(catalog)
+            .Bind(stackQuantity, item => Evidence.Known(item.Quantity))
+            .Build();
+
+        var reference = FilterReferenceGenerator.Create(context);
+
+        Assert.Equal("quantity", reference.Fields.Single(field => field.Key == "ownership.total").PreferredName);
+        Assert.Equal("instance.quantity", reference.Fields.Single(field => field.Key == "instance.quantity").PreferredName);
     }
 
     [Fact]

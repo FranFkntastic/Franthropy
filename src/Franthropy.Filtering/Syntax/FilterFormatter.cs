@@ -24,6 +24,7 @@ public static class FilterFormatter
                 return;
             case FilterFieldExpressionSyntax field:
                 builder.Append(field.Field.Value);
+                builder.Append(field.Separator?.Text);
                 builder.Append(field.Comparator.Text);
                 WriteValue(builder, field.Value);
                 return;
