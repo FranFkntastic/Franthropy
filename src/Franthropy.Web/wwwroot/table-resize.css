@@ -1,0 +1,64 @@
+.franthropy-table-resize-surface {
+    height: 100%;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    position: relative;
+}
+
+.franthropy-table-resize-scroll {
+    height: 100%;
+    min-height: 0;
+    min-width: 0;
+    overflow: auto;
+}
+
+.franthropy-table-resize-overlay {
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    position: absolute;
+    z-index: 8;
+}
+
+.franthropy-table-resize-rail {
+    background: transparent;
+    border: 0;
+    bottom: 0;
+    cursor: col-resize;
+    display: none;
+    padding: 0;
+    pointer-events: auto;
+    position: absolute;
+    top: 0;
+    touch-action: none;
+    transform: translateX(-50%);
+    width: 9px;
+}
+
+.franthropy-table-resize-rail::after {
+    background: var(--franthropy-table-resize-boundary, rgb(255 255 255 / 12%));
+    bottom: 0;
+    content: "";
+    left: 4px;
+    position: absolute;
+    top: 0;
+    width: 1px;
+}
+
+.franthropy-table-resize-rail:hover::after,
+.franthropy-table-resize-rail:focus-visible::after,
+.franthropy-table-resize-rail.is-resizing::after {
+    background: var(--franthropy-table-resize-accent, #d4a73a);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--franthropy-table-resize-accent, #d4a73a) 18%, transparent);
+}
+
+.franthropy-table-resize-rail:focus-visible {
+    outline: 0;
+}
+
+.franthropy-table-resize-surface.is-resizing,
+.franthropy-table-resize-surface.is-resizing * {
+    cursor: col-resize !important;
+    user-select: none !important;
+}

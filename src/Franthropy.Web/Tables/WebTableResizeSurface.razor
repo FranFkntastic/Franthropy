@@ -1,0 +1,99 @@
+@inject IJSRuntime JsRuntime
+@implements IAsyncDisposable
+
+<div class="@RootClass"
+     @ref="_rootElement"
+     data-franthropy-table-resize-root
+     data-franthropy-table-storage-key="@StorageKey"
+     style="@CssVariables">
+    <div class="franthropy-table-resize-scroll @ScrollClass" data-franthropy-table-resize-scroll>
+        @ChildContent
+    </div>
+    <div class="franthropy-table-resize-overlay" aria-hidden="true">
+        @foreach (var column in Columns)
+        {
+            <button type="button"
+                    class="franthropy-table-resize-rail"
+                    tabindex="-1"
+                    aria-label="Resize @column.Label column"
+                    data-franthropy-table-resize-rail="@column.Id"
+                    data-franthropy-table-default-width="@column.SafeDefaultWidthPx"
+                    data-franthropy-table-min-width="@column.SafeMinWidthPx"></button>
+        }
+    </div>
+</div>
+
+@code {
+    private ElementReference _rootElement;
+    private IJSObjectReference? _module;
+    private bool _registered;
+
+    [Parameter, EditorRequired] public IReadOnlyList<WebTableResizeColumn> Columns { get; set; } = [];
+    [Parameter, EditorRequired] public RenderFragment ChildContent { get; set; } = default!;
+    [Parameter, EditorRequired] public string StorageKey { get; set; } = string.Empty;
+    [Parameter] public string? CssClass { get; set; }
+    [Parameter] public string? ScrollClass { get; set; }
+    [Parameter] public string? AccentColor { get; set; }
+    [Parameter] public string? BoundaryColor { get; set; }
+
+    private string RootClass => string.Join(
+        " ",
+        new[] { "franthropy-table-resize-surface", CssClass }
+            .Where(value => !string.IsNullOrWhiteSpace(value)));
+
+    private string CssVariables => string.Join(
+        "; ",
+        new[]
+        {
+            CssVariable("--franthropy-table-resize-accent", AccentColor),
+            CssVariable("--franthropy-table-resize-boundary", BoundaryColor)
+        }.Where(value => value is not null));
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        _module ??= await JsRuntime.InvokeAsync<IJSObjectReference>(
+            "import",
+            "./_content/Franthropy.Web/table-resize.js?module=1");
+
+        if (!_registered)
+        {
+            await _module.InvokeVoidAsync("registerTableResizeSurface", _rootElement);
+            _registered = true;
+            return;
+        }
+
+        await _module.InvokeVoidAsync("refreshTableResizeSurface", _rootElement);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_module is null)
+        {
+            return;
+        }
+
+        if (_registered)
+        {
+            try
+            {
+                await _module.InvokeVoidAsync("unregisterTableResizeSurface", _rootElement);
+            }
+            catch (JSDisconnectedException)
+            {
+                // The browser is already gone; there is no remaining DOM state to clean up.
+            }
+        }
+
+        try
+        {
+            await _module.DisposeAsync();
+        }
+        catch (JSDisconnectedException)
+        {
+            // The browser is already gone.
+        }
+    }
+
+    private static string? CssVariable(string name, string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : $"{name}: {value}";
+}
