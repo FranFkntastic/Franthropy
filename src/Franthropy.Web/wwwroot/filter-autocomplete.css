@@ -1,0 +1,76 @@
+.franthropy-filter-autocomplete {
+    min-width: 0;
+    position: relative;
+}
+
+.franthropy-filter-autocomplete-input {
+    background: var(--franthropy-filter-field-bg, transparent);
+    border: 1px solid var(--franthropy-filter-border, currentColor);
+    border-radius: var(--franthropy-filter-radius, 4px);
+    color: inherit;
+    font: inherit;
+    height: var(--franthropy-filter-height, 34px);
+    min-width: 0;
+    outline: 0;
+    padding: 0 10px;
+    width: 100%;
+}
+
+.franthropy-filter-autocomplete-input:focus {
+    border-color: var(--franthropy-filter-accent, currentColor);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--franthropy-filter-accent, currentColor) 22%, transparent);
+}
+
+.franthropy-filter-autocomplete-list {
+    background: var(--franthropy-filter-popup-bg, Canvas);
+    border: 1px solid var(--franthropy-filter-border, currentColor);
+    box-shadow: var(--franthropy-filter-shadow, 0 8px 22px rgb(0 0 0 / 28%));
+    display: grid;
+    left: 0;
+    max-height: min(320px, 48vh);
+    overflow-y: auto;
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 20;
+}
+
+.franthropy-filter-autocomplete-list button {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--franthropy-filter-divider, var(--franthropy-filter-border, currentColor));
+    color: inherit;
+    cursor: pointer;
+    display: grid;
+    gap: 3px 10px;
+    grid-template-columns: minmax(84px, auto) minmax(0, 1fr) auto;
+    min-height: 34px;
+    padding: 6px 9px;
+    text-align: left;
+    width: 100%;
+}
+
+.franthropy-filter-autocomplete-list button:last-child {
+    border-bottom: 0;
+}
+
+.franthropy-filter-autocomplete-list button:hover,
+.franthropy-filter-autocomplete-list button.is-selected {
+    background: var(--franthropy-filter-selected-bg, color-mix(in srgb, currentColor 10%, transparent));
+}
+
+.franthropy-filter-autocomplete-label {
+    font-weight: 700;
+}
+
+.franthropy-filter-autocomplete-description,
+.franthropy-filter-autocomplete-detail {
+    color: var(--franthropy-filter-muted, color-mix(in srgb, currentColor 62%, transparent));
+    font-size: 0.86em;
+}
+
+.franthropy-filter-autocomplete-detail {
+    text-align: right;
+    white-space: nowrap;
+}

@@ -7,6 +7,16 @@ namespace Franthropy.Filtering.Completion;
 public static class FilterCompletionService
 {
     private static readonly char[] ComparatorCharacters = [':', '=', '!', '<', '>'];
+    private static readonly FilterComparisonOperator[] OperatorOrder =
+    [
+        FilterComparisonOperator.Match,
+        FilterComparisonOperator.Equals,
+        FilterComparisonOperator.NotEquals,
+        FilterComparisonOperator.Less,
+        FilterComparisonOperator.LessOrEqual,
+        FilterComparisonOperator.Greater,
+        FilterComparisonOperator.GreaterOrEqual,
+    ];
 
     public static FilterCompletionResult Complete<TRecord>(
         FilterContext<TRecord> context,
@@ -22,7 +32,8 @@ public static class FilterCompletionService
         var caret = Math.Clamp(request.CaretPosition, 0, expression.Length);
         var replacement = FindReplacementSpan(expression, caret);
         var prefix = expression[replacement.Start..caret].Trim('"');
-        var items = CompleteValues(context, expression, replacement, prefix, maximumItems)
+        var items = CompleteOperators(context, expression, caret)
+                    ?? CompleteValues(context, expression, replacement, prefix, maximumItems)
                     ?? CompleteFunctionField(context, expression, replacement, prefix)
                     ?? CompleteFields(context, replacement, prefix);
         var diagnostics = FilterCompiler.Compile(expression, context).Diagnostics;
@@ -33,6 +44,55 @@ public static class FilterCompletionService
             context.SchemaVersion,
             items.Take(maximumItems).ToArray(),
             diagnostics);
+    }
+
+    private static IReadOnlyList<FilterCompletionItem>? CompleteOperators<TRecord>(
+        FilterContext<TRecord> context,
+        string expression,
+        int caret)
+    {
+        var operatorStart = caret;
+        while (operatorStart > 0 && ComparatorCharacters.Contains(expression[operatorStart - 1]))
+            operatorStart--;
+
+        var fieldEnd = operatorStart;
+        while (fieldEnd > 0 && char.IsWhiteSpace(expression[fieldEnd - 1]))
+            fieldEnd--;
+        var fieldStart = fieldEnd;
+        while (fieldStart > 0 && IsFieldCharacter(expression[fieldStart - 1]))
+            fieldStart--;
+        if (fieldStart == fieldEnd || IsEvidenceFunctionArgument(expression, fieldStart) ||
+            IsInsideListValue(expression, fieldStart))
+            return null;
+
+        var resolution = context.Catalog.Resolve(expression[fieldStart..fieldEnd], context.AvailableKeys);
+        if (resolution.Kind != FilterFieldResolutionKind.Success || resolution.Field is null ||
+            !context.AvailableKeys.Contains(resolution.Field.Key))
+            return null;
+
+        var operatorPrefix = expression[operatorStart..caret];
+        var candidates = OperatorOrder
+            .Where(resolution.Field.Operators.Contains)
+            .Select(value => (Value: value, Display: value.Display()))
+            .Where(candidate => candidate.Display.StartsWith(operatorPrefix, StringComparison.Ordinal))
+            .ToArray();
+        if (candidates.Length == 0)
+            return operatorPrefix.Length == 0 ? null : [];
+
+        var exact = candidates.Any(candidate => candidate.Display.Equals(operatorPrefix, StringComparison.Ordinal));
+        var hasLonger = candidates.Any(candidate => candidate.Display.Length > operatorPrefix.Length);
+        if (operatorPrefix.Length > 0 && exact && !hasLonger)
+            return null;
+
+        var replacement = TextSpan.FromBounds(operatorStart, caret);
+        return candidates.Select(candidate => new FilterCompletionItem(
+                candidate.Display,
+                candidate.Display,
+                FilterCompletionKind.Operator,
+                replacement,
+                DescribeOperator(candidate.Value),
+                $"{resolution.Field.DisplayName} · {resolution.Field.ValueKind}"))
+            .ToArray();
     }
 
     private static IReadOnlyList<FilterCompletionItem>? CompleteValues<TRecord>(
@@ -51,6 +111,10 @@ public static class FilterCompletionService
         if (comparatorStart > 0 && before[comparatorStart - 1] is '!' or '<' or '>')
             comparatorStart--;
         if (before[comparatorStart..comparatorEnd].Any(char.IsWhiteSpace))
+            return null;
+        var valueContext = before[comparatorEnd..];
+        if (valueContext.Any(character => !char.IsWhiteSpace(character)) &&
+            valueContext.Count(character => character == '(') <= valueContext.Count(character => character == ')'))
             return null;
 
         var fieldEnd = comparatorStart;
@@ -153,4 +217,41 @@ public static class FilterCompletionService
     private static bool Matches(string candidate, string prefix) => string.IsNullOrEmpty(prefix) || candidate.Contains(prefix, StringComparison.OrdinalIgnoreCase);
     private static int Rank(string candidate, string prefix) => candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? 0 : 1;
     private static string QuoteWhenNeeded(string value) => value.Any(char.IsWhiteSpace) ? $"\"{value.Replace("\"", "\\\"")}\"" : value;
+
+    private static bool IsEvidenceFunctionArgument(string expression, int fieldStart)
+    {
+        if (fieldStart == 0 || expression[fieldStart - 1] != '(')
+            return false;
+
+        var functionEnd = fieldStart - 1;
+        var functionStart = functionEnd;
+        while (functionStart > 0 && char.IsLetter(expression[functionStart - 1]))
+            functionStart--;
+        var function = expression[functionStart..functionEnd];
+        return function.Equals("known", StringComparison.OrdinalIgnoreCase) ||
+               function.Equals("unknown", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsInsideListValue(string expression, int fieldStart)
+    {
+        var beforeField = expression[..fieldStart];
+        var comparator = beforeField.LastIndexOfAny(ComparatorCharacters);
+        if (comparator < 0)
+            return false;
+
+        var valueContext = beforeField[(comparator + 1)..];
+        return valueContext.Count(character => character == '(') > valueContext.Count(character => character == ')');
+    }
+
+    private static string DescribeOperator(FilterComparisonOperator value) => value switch
+    {
+        FilterComparisonOperator.Match => "Match a value using the field's normal search semantics.",
+        FilterComparisonOperator.Equals => "Match an exact value.",
+        FilterComparisonOperator.NotEquals => "Exclude an exact value.",
+        FilterComparisonOperator.Less => "Match values below the supplied value.",
+        FilterComparisonOperator.LessOrEqual => "Match values at or below the supplied value.",
+        FilterComparisonOperator.Greater => "Match values above the supplied value.",
+        FilterComparisonOperator.GreaterOrEqual => "Match values at or above the supplied value.",
+        _ => throw new ArgumentOutOfRangeException(nameof(value), value, null),
+    };
 }
