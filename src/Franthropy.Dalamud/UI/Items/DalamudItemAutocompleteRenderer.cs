@@ -7,6 +7,56 @@ namespace Franthropy.Dalamud.UI.Items;
 
 public static class DalamudItemAutocompleteRenderer
 {
+    public static bool DrawMultiSelect(
+        string id,
+        IReadOnlyList<DalamudItemOption> itemOptions,
+        DalamudItemAutocompleteState state,
+        IReadOnlySet<uint>? selectedItemIds,
+        Vector4 mutedColor,
+        Vector4 successColor,
+        Vector4 errorColor,
+        out IReadOnlySet<uint>? updatedItemIds)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        ArgumentNullException.ThrowIfNull(itemOptions);
+        ArgumentNullException.ThrowIfNull(state);
+
+        var selected = selectedItemIds is null ? new HashSet<uint>() : new HashSet<uint>(selectedItemIds);
+        var changed = false;
+        if (selected.Count > 0 && ImGui.BeginTable($"##{id}SelectedItems", 2, ImGuiTableFlags.SizingStretchProp))
+        {
+            ImGui.TableSetupColumn("Item", ImGuiTableColumnFlags.WidthStretch);
+            ImGui.TableSetupColumn("Remove", ImGuiTableColumnFlags.WidthFixed, 28);
+            foreach (var itemId in selected.Order().ToArray())
+            {
+                var option = itemOptions.FirstOrDefault(value => value.ItemId == itemId);
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn();
+                ImGui.TextUnformatted(option is null
+                    ? "Unavailable item"
+                    : DalamudItemAutocompletePresenter.FormatDisplayName(itemOptions, option));
+                ImGui.TableNextColumn();
+                if (ImGui.SmallButton($"x##{id}Remove{itemId}"))
+                {
+                    selected.Remove(itemId);
+                    changed = true;
+                }
+            }
+            ImGui.EndTable();
+        }
+
+        DrawInline(id, itemOptions, state, mutedColor, successColor, errorColor);
+        if (state.SelectedItem is { } selectedItem && selected.Add(selectedItem.ItemId))
+        {
+            state.SearchBuffer = string.Empty;
+            state.SelectedItem = null;
+            changed = true;
+        }
+
+        updatedItemIds = selected.Count == 0 ? null : selected;
+        return changed;
+    }
+
     public static bool DrawInline(
         string id,
         IReadOnlyList<DalamudItemOption> itemOptions,
