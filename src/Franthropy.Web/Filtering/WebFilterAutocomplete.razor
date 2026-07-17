@@ -159,12 +159,15 @@
 
     private async Task AcceptAsync(int index)
     {
-        if (index < 0 || index >= VisibleItems.Count ||
-            !WebFilterAutocompleteEdit.TryApply(Value, VisibleItems[index], out var edit))
+        if (index < 0 || index >= VisibleItems.Count)
+            return;
+
+        var completion = VisibleItems[index];
+        if (!WebFilterAutocompleteEdit.TryApply(Value, completion, out var edit))
             return;
 
         selectedIndex = 0;
-        dismissed = false;
+        dismissed = completion.Kind == FilterCompletionKind.Value;
         pendingCaret = edit.CaretPosition;
         if (Edited.HasDelegate)
             await Edited.InvokeAsync(edit);
