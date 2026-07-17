@@ -160,6 +160,53 @@ public sealed class PlotSubstrateTests
     }
 
     [Fact]
+    public void ViewportInput_LeavesOrdinaryWheelAndUnmodifiedDragToDalamud()
+    {
+        var spec = new PlotSpec("input", new(0, 100), new(0, 100), new("X"), new("Y"), []);
+        var frame = new PlotCompiler().Compile(spec, new(Vector2.Zero, new(600, 400)));
+        var viewport = new PlotViewportState();
+        var pointer = (frame.Layout.DataArea.Minimum + frame.Layout.DataArea.Maximum) * .5f;
+
+        var changed = PlotViewportInputController.Apply(
+            viewport,
+            spec,
+            frame,
+            new(1f, ControlHeld: false, RightButtonDragging: false, pointer, new(80, 40)));
+
+        Assert.False(changed);
+        Assert.True(viewport.IsFit);
+    }
+
+    [Fact]
+    public void ViewportInput_MapsControlWheelToZoomAndRightDragToPan()
+    {
+        var spec = new PlotSpec("input", new(0, 100), new(0, 100), new("X"), new("Y"), []);
+        var frame = new PlotCompiler().Compile(spec, new(Vector2.Zero, new(600, 400)));
+        var viewport = new PlotViewportState();
+        var pointer = (frame.Layout.DataArea.Minimum + frame.Layout.DataArea.Maximum) * .5f;
+
+        Assert.True(PlotViewportInputController.Apply(
+            viewport,
+            spec,
+            frame,
+            new(1f, ControlHeld: true, RightButtonDragging: false, pointer, Vector2.Zero)));
+        var zoomed = viewport.Apply(spec);
+        Assert.True(zoomed.XDomain.Length < spec.XDomain.Length);
+        Assert.True(zoomed.YDomain.Length < spec.YDomain.Length);
+
+        Assert.True(PlotViewportInputController.Apply(
+            viewport,
+            spec,
+            frame,
+            new(0f, ControlHeld: false, RightButtonDragging: true, pointer, new(30, 20))));
+        var panned = viewport.Apply(spec);
+        Assert.True(panned.XDomain.Minimum < zoomed.XDomain.Minimum);
+        Assert.True(panned.YDomain.Minimum > zoomed.YDomain.Minimum);
+        Assert.Equal(zoomed.XDomain.Length, panned.XDomain.Length, 6);
+        Assert.Equal(zoomed.YDomain.Length, panned.YDomain.Length, 6);
+    }
+
+    [Fact]
     public void ParetoSpecialization_MapsQualityTransactionsAndConfidenceToPointAttributes()
     {
         var frontier = Solution("frontier", 10_000, 80, EquipmentQuality.High, 3, EquipmentEvaluationConfidence.Low) with

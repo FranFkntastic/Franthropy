@@ -1,3 +1,5 @@
+using System.Numerics;
+
 namespace Franthropy.Dalamud.UI.Plots;
 
 /// <summary>
@@ -97,5 +99,50 @@ public sealed class PlotViewportState
         extent = extent.Normalize();
         var tolerance = Math.Max(1e-9d, extent.Length * 1e-9d);
         return candidate.Minimum <= extent.Minimum + tolerance && candidate.Maximum >= extent.Maximum - tolerance;
+    }
+}
+
+public readonly record struct PlotViewportInput(
+    float WheelDelta,
+    bool ControlHeld,
+    bool RightButtonDragging,
+    Vector2 Pointer,
+    Vector2 DragDelta);
+
+/// <summary>
+/// Maps guarded pointer gestures onto viewport operations. Unmodified wheel input is deliberately
+/// ignored so the containing Dalamud window retains ordinary scrolling.
+/// </summary>
+public static class PlotViewportInputController
+{
+    public static bool Apply(
+        PlotViewportState viewport,
+        PlotSpec spec,
+        PlotCompiledFrame frame,
+        PlotViewportInput input)
+    {
+        ArgumentNullException.ThrowIfNull(viewport);
+        ArgumentNullException.ThrowIfNull(spec);
+        ArgumentNullException.ThrowIfNull(frame);
+        var changed = false;
+        if (input.ControlHeld && input.WheelDelta != 0)
+        {
+            viewport.Zoom(
+                spec,
+                frame.XScale.Invert(input.Pointer.X),
+                frame.YScale.Invert(input.Pointer.Y),
+                Math.Pow(.82d, input.WheelDelta));
+            changed = true;
+        }
+        if (input.RightButtonDragging && input.DragDelta != Vector2.Zero)
+        {
+            var visible = viewport.Apply(spec);
+            viewport.Pan(
+                spec,
+                -input.DragDelta.X / frame.Layout.DataArea.Width * visible.XDomain.Length,
+                input.DragDelta.Y / frame.Layout.DataArea.Height * visible.YDomain.Length);
+            changed = true;
+        }
+        return changed;
     }
 }
