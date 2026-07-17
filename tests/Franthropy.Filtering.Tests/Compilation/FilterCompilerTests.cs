@@ -26,7 +26,12 @@ public sealed class FilterCompilerTests
     private static readonly FilterField<long> Quantity = FilterFields.Integer("ownership.quantity", aliases: ["qty"]);
     private static readonly FilterField<bool> Unique = FilterFields.Boolean("item.unique", aliases: ["unique"]);
     private static readonly FilterField<Quality> ItemQuality = FilterFields.Enumeration<Quality>(
-        "instance.quality", valueAliases: new Dictionary<string, Quality> { ["nq"] = Quality.Normal, ["hq"] = Quality.High });
+        "instance.quality", valueAliases: new Dictionary<string, Quality>
+        {
+            ["nq"] = Quality.Normal,
+            ["hq"] = Quality.High,
+            ["High Quality"] = Quality.High,
+        });
     private static readonly FilterNamedValueCatalog<string> Jobs = new(
     [
         new FilterLiteralCandidate<string>("PLD", "Paladin", ["PLD"]),
@@ -129,6 +134,29 @@ public sealed class FilterCompilerTests
         var compilation = FilterCompiler.Compile<Item>(expression, Context);
         Assert.True(compilation.IsValid);
         Assert.Equal(expected, compilation.Matches(Sample));
+    }
+
+    [Fact]
+    public void ExactEquality_NormalizesUnicodeCaseAndWhitespaceAcrossValueKinds()
+    {
+        var text = FilterCompiler.Compile<Item>("name==\"Ａｕｇｍｅｎｔｅｄ   Ｃｒｅｄｅｎｄｕｍ   Ｃｕｉｒａｓｓ\"", Context);
+        var enumeration = FilterCompiler.Compile<Item>("instance.quality==\"high   quality\"", Context);
+
+        Assert.True(text.IsValid);
+        Assert.True(text.Matches(Sample));
+        Assert.True(enumeration.IsValid);
+        Assert.True(enumeration.Matches(Sample));
+    }
+
+    [Fact]
+    public void NamedValueCatalog_UsesTheSameExactNormalization()
+    {
+        var catalog = new FilterNamedValueCatalog<string>(
+            [new FilterLiteralCandidate<string>("hq", "High Quality")]);
+
+        var match = Assert.Single(catalog.Resolve("Ｈｉｇｈ   Ｑｕａｌｉｔｙ"));
+
+        Assert.Equal("hq", match.Value);
     }
 
     [Fact]

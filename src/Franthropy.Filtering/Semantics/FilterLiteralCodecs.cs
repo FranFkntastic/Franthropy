@@ -35,6 +35,11 @@ public interface IFilterLiteralCodec<T>
     string TypeName { get; }
     FilterLiteralResolution<T> Resolve(string text);
     FilterLiteralResolution<T> ResolveFuzzy(string text) => Resolve(text);
+    bool IsFuzzyMatch(T value, string text, IEqualityComparer<T> comparer)
+    {
+        var resolution = ResolveFuzzy(text);
+        return resolution.Kind == FilterLiteralResolutionKind.Success && comparer.Equals(value, resolution.Value!);
+    }
     IReadOnlyList<FilterLiteralCandidate<T>> Values { get; }
 }
 
@@ -69,11 +74,11 @@ public sealed class FilterNamedValueCatalog<T> : IFilterNamedValueResolver<T>
 
     public IReadOnlyList<FilterLiteralCandidate<T>> Resolve(string text)
     {
-        var normalized = text.Trim();
+        var normalized = FilterText.Normalize(text);
         return values
             .Where(candidate =>
-                candidate.DisplayName.Equals(normalized, StringComparison.OrdinalIgnoreCase) ||
-                (candidate.Aliases?.Any(alias => alias.Equals(normalized, StringComparison.OrdinalIgnoreCase)) ?? false))
+                FilterText.Equals(candidate.DisplayName, normalized) ||
+                (candidate.Aliases?.Any(alias => FilterText.Equals(alias, normalized)) ?? false))
             .ToArray();
     }
 }
@@ -83,6 +88,7 @@ internal sealed class TextLiteralCodec : IFilterLiteralCodec<string>
     public string TypeName => "text";
     public IReadOnlyList<FilterLiteralCandidate<string>> Values => [];
     public FilterLiteralResolution<string> Resolve(string text) => FilterLiteralResolution<string>.Success(text);
+    public bool IsFuzzyMatch(string value, string text, IEqualityComparer<string> comparer) => FilterText.Contains(value, text);
 }
 
 internal sealed class BooleanLiteralCodec : IFilterLiteralCodec<bool>
@@ -233,6 +239,12 @@ internal sealed class NamedLiteralCodec<T>(IFilterNamedValueResolver<T> resolver
     public FilterLiteralResolution<T> Resolve(string text)
     {
         var matches = resolver.Resolve(text);
+        if (matches.Count == 0)
+        {
+            matches = resolver.Values.Where(candidate =>
+                new[] { candidate.DisplayName }.Concat(candidate.Aliases ?? [])
+                    .Any(name => FilterText.Equals(name, text))).ToArray();
+        }
         return matches.Count switch
         {
             1 => FilterLiteralResolution<T>.Success(matches[0].Value),
@@ -240,6 +252,12 @@ internal sealed class NamedLiteralCodec<T>(IFilterNamedValueResolver<T> resolver
             _ => FilterLiteralResolution<T>.NotFound($"No {typeName} named '{text}' was found."),
         };
     }
+
+
+    public bool IsFuzzyMatch(T value, string text, IEqualityComparer<T> comparer) => resolver.Values
+        .Where(candidate => comparer.Equals(candidate.Value, value))
+        .SelectMany(candidate => new[] { candidate.DisplayName }.Concat(candidate.Aliases ?? []))
+        .Any(name => FilterText.Contains(name, text));
 
 
     public FilterLiteralResolution<T> ResolveFuzzy(string text)

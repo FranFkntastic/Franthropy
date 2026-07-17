@@ -86,7 +86,7 @@ unknown(age)
 | Field type | `:` behavior | `=` behavior | Ordered comparisons |
 | --- | --- | --- | --- |
 | text | normalized containment | normalized containment (`!=` negates it); `==` is normalized whole-value equality | unavailable |
-| named entity | exact name or alias resolution, then identity equality | uniquely resolved partial name or alias; `==` requires a complete name or alias | unavailable unless the type declares ordering |
+| named entity | exact identity resolution, except fields such as item name that explicitly declare record-level display-name containment | uniquely resolved partial name or alias; `==` requires a complete normalized name or alias | unavailable unless the type declares ordering |
 | enum | named-value equality | uniquely resolved partial value; `==` requires a complete value or alias | unavailable unless explicitly ordered |
 | set | contains or overlaps the supplied values | contains a uniquely resolved value; exact operators also compare member identity rather than whole-set shape | unavailable |
 | boolean | typed equality | typed equality | unavailable |
@@ -120,7 +120,7 @@ item:"Aetheryte Ring"
 item="Grade 8 Dark Matter"
 ```
 
-`:` and `=` allow the normal name-search experience, with `=` also accepting a uniquely resolved partial. `==` requests a normalized whole-name match. If localized names or partials collide, completion and diagnostics disambiguate with user-recognizable metadata rather than asking for a numeric ID.
+`:` is the broad name-search experience: `name:darksteel` evaluates each record's normalized display name and can match several distinct item identities. `=` instead resolves a partial against the finite item catalog and succeeds only when one identity remains. `==` requests a normalized whole-name or alias match. If localized exact names or partial identity searches collide, completion and diagnostics disambiguate with user-recognizable metadata rather than asking for a numeric ID.
 
 ### `item.itemLevel`
 

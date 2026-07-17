@@ -122,7 +122,7 @@ The first expression means that the default text fields contain `darksteel`, ite
 | `a OR b`, `a \| b` | either expression may match |
 | `NOT a`, `!a`, `-a` | negate an expression; `-darksteel` excludes the default-name match |
 | `( ... )` | explicit grouping |
-| `field:value` | concise, type-appropriate direct match; text uses fuzzy containment while typed and named values resolve exactly |
+| `field:value` | concise, type-appropriate direct match; text and explicitly searchable name fields use record-level fuzzy containment, while other typed and named values resolve exactly |
 | `field=value`, `field!=value` | fuzzy match or its negation; finite vocabularies accept a partial only when it resolves uniquely |
 | `field==value`, `field!==value` | normalized whole-value exact equality or its negation |
 | `<`, `<=`, `>`, `>=` | ordered comparison for numeric, temporal, and other ordered types |
@@ -130,7 +130,9 @@ The first expression means that the default text fields contain `darksteel`, ite
 | `field:(a \| b \| c)` | match any listed value |
 | `known(field)`, `unknown(field)` | explicitly test whether a record has evidence for a field |
 
-The negation modifier never changes the equality mode: `!=` is the negative partner of fuzzy `=`, while `!==` is the negative partner of exact `==`. Exact text comparison normalizes Unicode, case, and whitespace before comparing the whole value. Fuzzy text comparison performs normalized substring matching; it does not use regexes, edit distance, or stemming.
+The negation modifier never changes the equality mode: `!=` is the negative partner of fuzzy `=`, while `!==` is the negative partner of exact `==`. Exact text and named-value comparison normalizes Unicode compatibility forms, case, and whitespace before comparing the whole text, name, or alias. Fuzzy text comparison performs normalized substring matching; it does not use regexes, edit distance, or stemming.
+
+Item names deliberately distinguish direct search from identity resolution. `name:darksteel` tests every record's normalized display name and may return many different Darksteel items. `name=darksteel` asks the finite item catalog to resolve that partial to one identity and diagnoses ambiguity rather than choosing, while `name=="Darksteel Ingot"` requires a complete normalized name or alias. All three retain stable item keys internally; none exposes IDs to users.
 
 Human-readable predicate namespaces express common states: `is:equipped`, `is:hq`, and `is:nq`. Canonical quality forms remain `quality:hq` and `quality:nq`; the `is:` spellings share those predicates' semantic identities. `has:` is reserved for future evidence predicates such as `has:price`.
 

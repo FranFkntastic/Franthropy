@@ -9,7 +9,7 @@ public sealed class FfxivFilterCatalog
     private FfxivFilterCatalog(IFfxivFilterResolvers resolvers)
     {
         ArgumentNullException.ThrowIfNull(resolvers);
-        ItemName = FilterFields.Named("item.name", resolvers.Items, "item", "Item", "Localized FFXIV item identity.", ["item", "name"], matchUsesFuzzyResolution: true);
+        ItemName = FilterFields.Named("item.name", resolvers.Items, "item", "Item", "Localized FFXIV item identity.", ["item", "name"], matchUsesRecordFuzzy: true);
         ItemLevel = FilterFields.Integer("item.itemLevel", "Item level", "FFXIV item level used for gear progression.", ["ilvl"], minimum: 0);
         EquipLevel = FilterFields.Integer("item.equipLevel", "Equip level", "Character level required to equip the item.", ["level", "lvl"], minimum: 0);
         ItemJobs = FilterFields.Set("item.job", resolvers.Jobs, "job", "Eligible jobs", "Jobs or classes eligible to use the item.", ["job", "class"]);

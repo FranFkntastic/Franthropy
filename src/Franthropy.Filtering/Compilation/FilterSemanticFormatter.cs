@@ -81,14 +81,19 @@ internal static class FilterSemanticFormatter
             : FilterComparisonOperator.Match;
         var semanticOperator = comparison switch
         {
-            FilterComparisonOperator.Match when field?.MatchUsesFuzzyResolution == true => "=",
+            FilterComparisonOperator.Match when field?.ValueKind == FilterValueKind.Text => "=",
+            FilterComparisonOperator.Match when field?.MatchUsesRecordFuzzy == true => ":",
             FilterComparisonOperator.Match => "==",
             _ => comparison.Display(),
         };
         builder.Append(semanticOperator);
+        if (comparison == FilterComparisonOperator.Match && field?.MatchUsesRecordFuzzy == true)
+        {
+            WriteValue(builder, syntax.Value, null, false);
+            return;
+        }
         WriteValue(builder, syntax.Value, field,
-            comparison is FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals ||
-            comparison == FilterComparisonOperator.Match && field?.MatchUsesFuzzyResolution == true);
+            comparison is FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals);
     }
 
     private static void WriteValue(StringBuilder builder, FilterValueSyntax value, FilterField? field, bool fuzzy)

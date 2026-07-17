@@ -47,7 +47,7 @@ public abstract class FilterField
     public IReadOnlyList<string> Aliases { get; }
     public abstract IReadOnlySet<FilterComparisonOperator> Operators { get; }
     public abstract IReadOnlyList<FilterValueReference> Values { get; }
-    internal abstract bool MatchUsesFuzzyResolution { get; }
+    internal abstract bool MatchUsesRecordFuzzy { get; }
     internal abstract string? NormalizeLiteral(string text, bool fuzzy);
 }
 
@@ -57,7 +57,7 @@ public sealed class FilterField<T> : FilterField
     private readonly IEqualityComparer<T> equalityComparer;
     private readonly IComparer<T>? orderComparer;
     private readonly bool textMatching;
-    private readonly bool matchUsesFuzzyResolution;
+    private readonly bool matchUsesRecordFuzzy;
     private readonly IReadOnlySet<FilterComparisonOperator> operators;
 
     internal FilterField(
@@ -71,14 +71,14 @@ public sealed class FilterField<T> : FilterField
         IEqualityComparer<T>? equalityComparer = null,
         IComparer<T>? orderComparer = null,
         bool textMatching = false,
-        bool matchUsesFuzzyResolution = false)
+        bool matchUsesRecordFuzzy = false)
         : base(key, displayName, description, valueKind, aliases)
     {
         this.codec = codec;
         this.equalityComparer = equalityComparer ?? EqualityComparer<T>.Default;
         this.orderComparer = orderComparer;
         this.textMatching = textMatching;
-        this.matchUsesFuzzyResolution = matchUsesFuzzyResolution || textMatching;
+        this.matchUsesRecordFuzzy = matchUsesRecordFuzzy || textMatching;
         this.operators = new HashSet<FilterComparisonOperator>(operators);
     }
 
@@ -87,7 +87,7 @@ public sealed class FilterField<T> : FilterField
     public override IReadOnlyList<FilterValueReference> Values => codec.Values
         .Select(candidate => new FilterValueReference(candidate.DisplayName, candidate.Aliases ?? []))
         .ToArray();
-    internal override bool MatchUsesFuzzyResolution => matchUsesFuzzyResolution;
+    internal override bool MatchUsesRecordFuzzy => matchUsesRecordFuzzy;
     internal override string? NormalizeLiteral(string text, bool fuzzy)
     {
         var resolution = fuzzy ? codec.ResolveFuzzy(text) : codec.Resolve(text);
@@ -143,6 +143,9 @@ public sealed class FilterField<T> : FilterField
                 ? ToTruth(!result)
                 : ToTruth(result);
         }
+
+        if (operand is BoundFuzzyOperand<T> fuzzy)
+            return ToTruth(fuzzy.Searches.Any(search => codec.IsFuzzyMatch(actual, search, equalityComparer)));
 
         var values = ((BoundValuesOperand<T>)operand).Values;
         result = comparison switch
@@ -208,6 +211,25 @@ public sealed class FilterField<T> : FilterField
         if (syntax is FilterMissingValueSyntax)
             return false;
 
+        if (comparison == FilterComparisonOperator.Match && matchUsesRecordFuzzy)
+        {
+            var searches = syntax switch
+            {
+                FilterScalarValueSyntax scalar => new[] { scalar.Token.Value },
+                FilterListValueSyntax list => list.Values.Select(value => value.Token.Value).ToArray(),
+                _ => [],
+            };
+            if (searches.Length == 0)
+            {
+                diagnostics.Add(FilterDiagnosticCodes.InvalidValue,
+                    $"Field '{Key}' expects a fuzzy search value or value list.", syntax.Span);
+                return false;
+            }
+
+            operand = new BoundFuzzyOperand<T>(searches);
+            return true;
+        }
+
         if (syntax is FilterRangeValueSyntax range)
         {
             if (comparison is not (FilterComparisonOperator.Match or FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals
@@ -256,8 +278,7 @@ public sealed class FilterField<T> : FilterField
         var values = new List<T>(scalarValues.Length);
         foreach (var scalar in scalarValues)
         {
-            var resolution = comparison is FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals ||
-                             comparison == FilterComparisonOperator.Match && matchUsesFuzzyResolution
+            var resolution = comparison is FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals
                 ? codec.ResolveFuzzy(scalar.Token.Value)
                 : codec.Resolve(scalar.Token.Value);
             if (resolution.Kind != FilterLiteralResolutionKind.Success)
@@ -339,7 +360,7 @@ public sealed class FilterSetField<T> : FilterField
     public override IReadOnlyList<FilterValueReference> Values => codec.Values
         .Select(candidate => new FilterValueReference(candidate.DisplayName, candidate.Aliases ?? []))
         .ToArray();
-    internal override bool MatchUsesFuzzyResolution => false;
+    internal override bool MatchUsesRecordFuzzy => false;
     internal override string? NormalizeLiteral(string text, bool fuzzy)
     {
         var resolution = fuzzy ? codec.ResolveFuzzy(text) : codec.Resolve(text);
@@ -413,6 +434,7 @@ internal delegate FilterTruth BoundSetFieldTest<T>(FieldEvidence<IReadOnlyCollec
 internal abstract record BoundOperand<T>;
 internal sealed record BoundValuesOperand<T>(IReadOnlyList<T> Values) : BoundOperand<T>;
 internal sealed record BoundRangeOperand<T>(bool HasLower, T Lower, bool HasUpper, T Upper) : BoundOperand<T>;
+internal sealed record BoundFuzzyOperand<T>(IReadOnlyList<string> Searches) : BoundOperand<T>;
 
 public sealed record FilterValueReference(string DisplayName, IReadOnlyList<string> Aliases);
 
@@ -499,9 +521,9 @@ public static class FilterFields
         string description = "",
         IEnumerable<string>? aliases = null,
         IEqualityComparer<T>? comparer = null,
-        bool matchUsesFuzzyResolution = false) =>
+        bool matchUsesRecordFuzzy = false) =>
         new(key, displayName ?? key, description, FilterValueKind.Named, new NamedLiteralCodec<T>(resolver, typeName),
-            EqualityOperators, aliases, comparer, matchUsesFuzzyResolution: matchUsesFuzzyResolution);
+            EqualityOperators, aliases, comparer, matchUsesRecordFuzzy: matchUsesRecordFuzzy);
 
     public static FilterSetField<T> Set<T>(
         string key,

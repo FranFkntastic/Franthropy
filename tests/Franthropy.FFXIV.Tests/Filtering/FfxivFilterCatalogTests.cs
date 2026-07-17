@@ -9,12 +9,15 @@ namespace Franthropy.FFXIV.Tests.Filtering;
 public sealed class FfxivFilterCatalogTests
 {
     private static readonly FfxivItemKey Cuirass = new(1);
+    private static readonly FfxivItemKey Breeches = new(2);
     private static readonly FfxivJobKey Paladin = new(19);
     private static readonly FfxivJobKey Warrior = new(21);
     private static readonly FfxivWorldKey Siren = new(64);
 
     private static readonly FfxivFilterCatalog Vocabulary = FfxivFilterCatalog.Create(new FfxivFilterResolvers(
-        Catalog(new FilterLiteralCandidate<FfxivItemKey>(Cuirass, "Augmented Credendum Cuirass")),
+        Catalog(
+            new FilterLiteralCandidate<FfxivItemKey>(Cuirass, "Augmented Credendum Cuirass"),
+            new FilterLiteralCandidate<FfxivItemKey>(Breeches, "Augmented Credendum Breeches")),
         Catalog(
             new FilterLiteralCandidate<FfxivJobKey>(Paladin, "Paladin", ["PLD"]),
             new FilterLiteralCandidate<FfxivJobKey>(Warrior, "Warrior", ["WAR"])),
@@ -132,6 +135,30 @@ public sealed class FfxivFilterCatalogTests
         Assert.Contains("`ilvl`", markdown);
         Assert.Contains("\"catalogVersion\": \"1.1\"", json);
         Assert.Contains("\"key\": \"acquisition.source\"", json);
+    }
+
+
+    [Fact]
+    public void ItemNameDirectMatch_FiltersEveryMatchingRecordWithoutCollapsingToOneIdentity()
+    {
+        var context = new FilterContextBuilder<Instance>(Vocabulary.Catalog)
+            .Bind(Vocabulary.ItemName, row => Evidence.Known(row.Item))
+            .UseDefaultText(Vocabulary.ItemName, row => Evidence.Known(row.Item == Cuirass
+                ? "Augmented Credendum Cuirass"
+                : "Augmented Credendum Breeches"))
+            .Build();
+        var rows = new[]
+        {
+            new Instance(Cuirass, 660, [], FfxivItemQuality.HQ, 1, FfxivStorageLocation.Inventory),
+            new Instance(Breeches, 660, [], FfxivItemQuality.NQ, 1, FfxivStorageLocation.Inventory),
+        };
+
+        var direct = FilterCompiler.Compile<Instance>("name:credendum", context);
+        var identity = FilterCompiler.Compile<Instance>("name=credendum", context);
+
+        Assert.True(direct.IsValid);
+        Assert.Equal(2, rows.Count(direct.Matches));
+        Assert.Contains(identity.Diagnostics, diagnostic => diagnostic.Code == "FLT3005");
     }
 
 
