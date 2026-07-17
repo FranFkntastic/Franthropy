@@ -138,6 +138,24 @@ public sealed class DalamudPlotRenderer
 /// Reusable direct-manipulation container for any Dalamud plot. The container owns viewport and
 /// height state while the plot renderer remains a thin painter of compiled geometry.
 /// </summary>
+public sealed record DalamudPlotContainerControl(
+    string Id,
+    string Label,
+    PlotRect Bounds,
+    bool Enabled,
+    bool Selected,
+    string Value,
+    Action Invoke);
+
+public sealed record DalamudPlotContainerResult(
+    DalamudPlotRenderResult Plot,
+    IReadOnlyList<DalamudPlotContainerControl> Controls)
+{
+    public PlotCompiledFrame Frame => Plot.Frame;
+    public string? HoveredDatumId => Plot.HoveredDatumId;
+    public string? ClickedDatumId => Plot.ClickedDatumId;
+}
+
 public sealed class DalamudPlotContainer
 {
     private sealed class ContainerState(float height)
@@ -149,7 +167,7 @@ public sealed class DalamudPlotContainer
     private readonly DalamudPlotRenderer renderer = new();
     private readonly Dictionary<string, ContainerState> states = new(StringComparer.Ordinal);
 
-    public DalamudPlotRenderResult Draw(
+    public DalamudPlotContainerResult Draw(
         string id,
         PlotSpec spec,
         Vector2 requestedSize,
@@ -162,52 +180,70 @@ public sealed class DalamudPlotContainer
             states[id] = state = new(Math.Clamp(initialHeight, 180f, 900f));
 
         ImGui.PushID(id);
+        var controls = new List<DalamudPlotContainerControl>(3);
+        var fitEnabled = !state.Viewport.IsFit;
+        if (!fitEnabled)
+            ImGui.BeginDisabled();
         if (ImGui.SmallButton("Fit"))
             state.Viewport.Fit();
+        if (!fitEnabled)
+            ImGui.EndDisabled();
+        controls.Add(Control("fit", "Fit plot to all evidence", fitEnabled, state.Viewport.IsFit, state, spec, state.Viewport.Fit));
         ImGui.SameLine();
+        if (!fitEnabled)
+            ImGui.BeginDisabled();
         if (ImGui.SmallButton("Zoom -"))
             ZoomFromCenter(state.Viewport, spec, 1.25d);
+        if (!fitEnabled)
+            ImGui.EndDisabled();
+        controls.Add(Control("zoom-out", "Zoom plot out", fitEnabled, false, state, spec, () => ZoomFromCenter(state.Viewport, spec, 1.25d)));
         ImGui.SameLine();
         if (ImGui.SmallButton("Zoom +"))
             ZoomFromCenter(state.Viewport, spec, .80d);
+        controls.Add(Control("zoom-in", "Zoom plot in", true, false, state, spec, () => ZoomFromCenter(state.Viewport, spec, .80d)));
         ImGui.SameLine();
-        ImGui.TextDisabled(state.Viewport.IsFit ? "Fit view" : "Zoomed view");
+        ImGui.TextDisabled(state.Viewport.IsFit
+            ? "Fit view · Ctrl+wheel zoom · right-drag pan"
+            : "Zoomed view · Ctrl+wheel zoom · right-drag pan");
 
         var visibleSpec = state.Viewport.Apply(spec);
         var result = renderer.Draw("Viewport", visibleSpec, new(requestedSize.X, state.Height), interaction);
-        HandleViewportInput(state.Viewport, spec, result.Frame);
+        if (HandleViewportInput(state.Viewport, spec, result.Frame))
+            result = result with { HoveredDatumId = null };
         DrawResizeHandle(state);
         ImGui.PopID();
-        return result;
+        return new(result, controls);
     }
 
-    private static void HandleViewportInput(PlotViewportState viewport, PlotSpec spec, PlotCompiledFrame frame)
+    private static bool HandleViewportInput(PlotViewportState viewport, PlotSpec spec, PlotCompiledFrame frame)
     {
         if (!ImGui.IsItemHovered())
-            return;
+            return false;
         var io = ImGui.GetIO();
-        if (io.MouseWheel != 0)
-        {
-            var mouse = ImGui.GetMousePos();
-            var factor = Math.Pow(.82d, io.MouseWheel);
-            viewport.Zoom(
-                spec,
-                frame.XScale.Invert(mouse.X),
-                frame.YScale.Invert(mouse.Y),
-                factor,
-                zoomX: !io.KeyCtrl,
-                zoomY: !io.KeyShift);
-        }
-        if (ImGui.IsMouseDragging(ImGuiMouseButton.Middle, 0f))
-        {
-            var delta = io.MouseDelta;
-            var visible = viewport.Apply(spec);
-            viewport.Pan(
-                spec,
-                -delta.X / frame.Layout.DataArea.Width * visible.XDomain.Length,
-                delta.Y / frame.Layout.DataArea.Height * visible.YDomain.Length);
-        }
+        var rightDragging = ImGui.IsMouseDragging(ImGuiMouseButton.Right, 0f);
+        PlotViewportInputController.Apply(
+            viewport,
+            spec,
+            frame,
+            new(io.MouseWheel, io.KeyCtrl, rightDragging, ImGui.GetMousePos(), io.MouseDelta));
+        return rightDragging;
     }
+
+    private static DalamudPlotContainerControl Control(
+        string id,
+        string label,
+        bool enabled,
+        bool selected,
+        ContainerState state,
+        PlotSpec spec,
+        Action invoke) => new(
+            id,
+            label,
+            new(ImGui.GetItemRectMin(), ImGui.GetItemRectMax()),
+            enabled,
+            selected,
+            ViewSummary(state.Viewport.Apply(spec)),
+            invoke);
 
     private static void DrawResizeHandle(ContainerState state)
     {
@@ -237,4 +273,7 @@ public sealed class DalamudPlotContainer
             (visible.YDomain.Minimum + visible.YDomain.Maximum) * .5d,
             factor);
     }
+
+    private static string ViewSummary(PlotSpec spec) =>
+        $"x {spec.XDomain.Minimum:0.##}..{spec.XDomain.Maximum:0.##}; y {spec.YDomain.Minimum:0.##}..{spec.YDomain.Maximum:0.##}";
 }
