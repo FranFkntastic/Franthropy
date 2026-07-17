@@ -10,23 +10,32 @@ public sealed class PlotViewportState
 {
     private PlotRange? xDomain;
     private PlotRange? yDomain;
+    private PlotRange? xNavigationExtent;
 
     public bool IsFit => xDomain is null && yDomain is null;
+    public bool HasHorizontalViewport => xDomain is not null;
 
     public PlotSpec Apply(PlotSpec spec)
     {
         ArgumentNullException.ThrowIfNull(spec);
         return spec with
         {
-            XDomain = xDomain is { } x ? Clamp(x, spec.XDomain) : spec.XDomain,
+            XDomain = xDomain is { } x ? Clamp(x, EffectiveXExtent(spec)) : spec.XDomain,
             YDomain = yDomain is { } y ? Clamp(y, spec.YDomain) : spec.YDomain,
         };
+    }
+
+    public PlotSpec ApplyForRendering(PlotSpec spec)
+    {
+        var applied = Apply(spec);
+        return HasHorizontalViewport ? applied with { XAxisBreak = null } : applied;
     }
 
     public void Fit()
     {
         xDomain = null;
         yDomain = null;
+        xNavigationExtent = null;
     }
 
     public void Zoom(
@@ -35,14 +44,20 @@ public sealed class PlotViewportState
         double centerY,
         double factor,
         bool zoomX = true,
-        bool zoomY = true)
+        bool zoomY = true,
+        PlotRange? xExtent = null)
     {
         ArgumentNullException.ThrowIfNull(spec);
         if (!double.IsFinite(factor) || factor <= 0)
             throw new ArgumentOutOfRangeException(nameof(factor));
         var current = Apply(spec);
         if (zoomX)
-            xDomain = ZoomRange(current.XDomain, spec.XDomain, centerX, factor);
+        {
+            if (xExtent is { } requestedExtent)
+                xNavigationExtent = Intersect(requestedExtent, spec.XDomain);
+            var extent = EffectiveXExtent(spec);
+            xDomain = ZoomRange(Clamp(current.XDomain, extent), extent, centerX, factor);
+        }
         if (zoomY)
             yDomain = ZoomRange(current.YDomain, spec.YDomain, centerY, factor);
         CollapseFitDomains(spec);
@@ -53,7 +68,7 @@ public sealed class PlotViewportState
         ArgumentNullException.ThrowIfNull(spec);
         var current = Apply(spec);
         if (double.IsFinite(xDelta) && xDelta != 0)
-            xDomain = ShiftRange(current.XDomain, spec.XDomain, xDelta);
+            xDomain = ShiftRange(current.XDomain, EffectiveXExtent(spec), xDelta);
         if (double.IsFinite(yDelta) && yDelta != 0)
             yDomain = ShiftRange(current.YDomain, spec.YDomain, yDelta);
         CollapseFitDomains(spec);
@@ -93,6 +108,17 @@ public sealed class PlotViewportState
         return candidate;
     }
 
+    private static PlotRange Intersect(PlotRange first, PlotRange second)
+    {
+        first = first.Normalize();
+        second = second.Normalize();
+        var intersection = new PlotRange(Math.Max(first.Minimum, second.Minimum), Math.Min(first.Maximum, second.Maximum));
+        return intersection.Minimum < intersection.Maximum ? intersection : second;
+    }
+
+    private PlotRange EffectiveXExtent(PlotSpec spec) =>
+        xNavigationExtent is { } navigation ? Intersect(navigation, spec.XDomain) : spec.XDomain;
+
     private static bool Covers(PlotRange candidate, PlotRange extent)
     {
         candidate = candidate.Normalize();
@@ -127,11 +153,13 @@ public static class PlotViewportInputController
         var changed = false;
         if (input.ControlHeld && input.WheelDelta != 0)
         {
+            var centerX = frame.XScale.Invert(input.Pointer.X);
             viewport.Zoom(
                 spec,
-                frame.XScale.Invert(input.Pointer.X),
+                centerX,
                 frame.YScale.Invert(input.Pointer.Y),
-                Math.Pow(.82d, input.WheelDelta));
+                Math.Pow(.82d, input.WheelDelta),
+                xExtent: ResolveNavigationExtent(frame.XScale, centerX));
             changed = true;
         }
         if (input.RightButtonDragging && input.DragDelta != Vector2.Zero)
@@ -145,4 +173,12 @@ public static class PlotViewportInputController
         }
         return changed;
     }
+
+    private static PlotRange? ResolveNavigationExtent(LinearPlotScale scale, double value) =>
+        scale is BrokenLinearPlotScale
+            ? scale.VisibleDomainRanges
+                .Where(range => value >= range.Minimum && value <= range.Maximum)
+                .Select(range => (PlotRange?)range)
+                .FirstOrDefault()
+            : null;
 }

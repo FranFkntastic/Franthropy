@@ -207,6 +207,63 @@ public sealed class PlotSubstrateTests
     }
 
     [Fact]
+    public void BrokenAxisNavigation_StaysInsideSelectedSegmentAndPreservesPointDistanceWhilePanning()
+    {
+        var data = new[]
+        {
+            Datum("a", 2_800_000, 30, "HQ", 1, "High"),
+            Datum("b", 3_200_000, 50, "HQ", 1, "High"),
+            Datum("c", 3_600_000, 70, "HQ", 1, "High"),
+        };
+        var spec = new PlotSpec(
+            "broken-navigation",
+            new(0, 4_100_000),
+            new(0, 100),
+            new("Cost", "gil"),
+            new("Utility"),
+            [new PlotPointLayer("points", data, new(new(.5f, .5f, .5f)), Encodings())],
+            XAxisBreak: new());
+        var compiler = new PlotCompiler();
+        var fitFrame = compiler.Compile(spec, new(Vector2.Zero, new(900, 400)));
+        var broken = Assert.IsType<BrokenLinearPlotScale>(fitFrame.XScale);
+        var evidenceExtent = broken.VisibleDomainRanges[^1];
+        var viewport = new PlotViewportState();
+        var pointer = new Vector2(broken.Map(3_200_000), fitFrame.YScale.Map(50));
+
+        Assert.True(PlotViewportInputController.Apply(
+            viewport,
+            spec,
+            fitFrame,
+            new(1f, ControlHeld: true, RightButtonDragging: false, pointer, Vector2.Zero)));
+        var beforeSpec = viewport.ApplyForRendering(spec);
+        Assert.Null(beforeSpec.XAxisBreak);
+        Assert.True(beforeSpec.XDomain.Minimum >= evidenceExtent.Minimum);
+        Assert.True(beforeSpec.XDomain.Maximum <= evidenceExtent.Maximum);
+        var beforeFrame = compiler.Compile(beforeSpec, new(Vector2.Zero, new(900, 400)));
+        var beforeDistance = PointDistance(beforeFrame, "b", "c");
+
+        Assert.True(PlotViewportInputController.Apply(
+            viewport,
+            spec,
+            beforeFrame,
+            new(0f, ControlHeld: false, RightButtonDragging: true, pointer, new(-20, 0))));
+        var afterSpec = viewport.ApplyForRendering(spec);
+        var afterFrame = compiler.Compile(afterSpec, new(Vector2.Zero, new(900, 400)));
+
+        Assert.True(afterSpec.XDomain.Minimum > beforeSpec.XDomain.Minimum);
+        Assert.True(afterSpec.XDomain.Maximum <= evidenceExtent.Maximum);
+        Assert.Equal(beforeSpec.XDomain.Length, afterSpec.XDomain.Length, 6);
+        Assert.Equal(beforeDistance, PointDistance(afterFrame, "b", "c"), 3);
+
+        viewport.Zoom(spec, 3_200_000, 50, 100d);
+        Assert.Equal(evidenceExtent, viewport.Apply(spec).XDomain);
+        Assert.True(viewport.HasHorizontalViewport);
+        viewport.Fit();
+        Assert.Equal(spec.XDomain, viewport.Apply(spec).XDomain);
+        Assert.NotNull(viewport.ApplyForRendering(spec).XAxisBreak);
+    }
+
+    [Fact]
     public void ParetoSpecialization_MapsQualityTransactionsAndConfidenceToPointAttributes()
     {
         var frontier = Solution("frontier", 10_000, 80, EquipmentQuality.High, 3, EquipmentEvaluationConfidence.Low) with
@@ -321,6 +378,13 @@ public sealed class PlotSubstrateTests
         new(Quality, [new("NQ", new(.2f, .6f, .9f)), new("HQ", new(.9f, .5f, .2f))], new(.5f, .5f, .5f)),
         new(Confidence, [new("High", PlotPointShape.Circle), new("Low", PlotPointShape.Triangle)]),
         new(Quantity, new(1, 4), 4, 9));
+
+    private static float PointDistance(PlotCompiledFrame frame, string firstId, string secondId)
+    {
+        var first = frame.HitTargets.Single(value => value.DatumId == firstId);
+        var second = frame.HitTargets.Single(value => value.DatumId == secondId);
+        return Math.Abs(second.Position.X - first.Position.X);
+    }
 
     private static PlotDatum Datum(string id, double x, double y, string quality, double quantity, string confidence) => new(
         id,
