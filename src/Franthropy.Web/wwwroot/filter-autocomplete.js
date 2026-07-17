@@ -8,6 +8,13 @@ export function registerFilterAutocomplete(root, dotNetReference) {
     if (!input) return;
 
     const abortController = new AbortController();
+    let inputRevision = 0;
+    input.addEventListener("input", () => {
+        const value = input.value ?? "";
+        const caret = Number.isInteger(input.selectionStart) ? input.selectionStart : value.length;
+        dotNetReference.invokeMethodAsync("HandleAutocompleteInput", value, caret, ++inputRevision);
+    }, { signal: abortController.signal });
+
     input.addEventListener("keydown", event => {
         if (!root.querySelector('[role="listbox"]')) return;
         if (!["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) return;
@@ -25,10 +32,6 @@ export function unregisterFilterAutocomplete(root) {
     if (!registration) return;
     registration.abortController.abort();
     registrations.delete(root);
-}
-
-export function readCaret(input, fallback) {
-    return Number.isInteger(input?.selectionStart) ? input.selectionStart : fallback;
 }
 
 export function focusAndSetCaret(input, position) {

@@ -15,7 +15,6 @@
            aria-activedescendant="@ActiveOptionId"
            autocomplete="off"
            spellcheck="false"
-           @oninput="HandleInputAsync"
            @onfocus="HandleFocus"
            @onblur="HandleBlur" />
 
@@ -62,6 +61,7 @@
     private bool dismissed;
     private int selectedIndex;
     private int? pendingCaret;
+    private long latestInputRevision;
     private string itemSignature = string.Empty;
 
     [Parameter] public string Value { get; set; } = string.Empty;
@@ -111,16 +111,18 @@
         }
     }
 
-    private async Task HandleInputAsync(ChangeEventArgs args)
+    [JSInvokable]
+    public async Task HandleAutocompleteInput(string? value, int caret, long revision)
     {
-        var value = args.Value?.ToString() ?? string.Empty;
-        var caret = module is null
-            ? value.Length
-            : await module.InvokeAsync<int>("readCaret", inputElement, value.Length);
+        if (revision <= latestInputRevision)
+            return;
+
+        latestInputRevision = revision;
+        value ??= string.Empty;
         dismissed = false;
         selectedIndex = 0;
         if (Edited.HasDelegate)
-            await Edited.InvokeAsync(new(value, caret));
+            await Edited.InvokeAsync(new(value, Math.Clamp(caret, 0, value.Length)));
     }
 
     private void HandleFocus()
