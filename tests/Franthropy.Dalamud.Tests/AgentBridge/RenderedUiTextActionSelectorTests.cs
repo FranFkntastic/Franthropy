@@ -4,6 +4,29 @@ namespace Franthropy.Dalamud.Tests.AgentBridge;
 
 public sealed class RenderedUiTextActionSelectorTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(9)]
+    public void Retainer_activation_policy_authorizes_only_the_supported_selection_callback(int rowIndex)
+    {
+        var result = RenderedRetainerListActivationPolicy.Create(rowIndex);
+
+        Assert.True(result.Success);
+        Assert.Equal(2, result.Command);
+        Assert.Equal((uint)rowIndex, result.RowIndex);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(10)]
+    public void Retainer_activation_policy_rejects_rows_outside_the_rendered_retainer_list(int rowIndex)
+    {
+        var result = RenderedRetainerListActivationPolicy.Create(rowIndex);
+
+        Assert.False(result.Success);
+        Assert.Equal("RenderedRetainerRowOutOfRange", result.Code);
+    }
+
     [Fact]
     public void Selects_smallest_registered_hit_target_covering_unique_text()
     {

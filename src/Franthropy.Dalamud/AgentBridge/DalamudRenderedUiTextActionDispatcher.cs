@@ -54,6 +54,20 @@ public sealed record RenderedUiTextActionSelection(
 
 public sealed record RenderedUiTextActionResult(bool Success, string Code, string Message, string? AddonName, string? TargetNodePath);
 
+public sealed record RenderedRetainerListActivationRequest(bool Success, int Command, uint RowIndex, string Code, string Message);
+
+/// <summary>
+/// Constrains retainer activation to the game's ten rendered retainer rows and the documented
+/// RetainerList selection command. Keeping this policy pure makes the callback contract testable
+/// without exposing a general-purpose addon callback escape hatch.
+/// </summary>
+public static class RenderedRetainerListActivationPolicy
+{
+    public static RenderedRetainerListActivationRequest Create(int rowIndex) => rowIndex is >= 0 and < 10
+        ? new(true, 2, (uint)rowIndex, "RenderedRetainerActivationAuthorized", "The rendered retainer row is within the supported callback contract.")
+        : new(false, 0, 0, "RenderedRetainerRowOutOfRange", "The rendered retainer row is outside the supported callback contract.");
+}
+
 /// <summary>
 /// Pure selection policy for resolving one rendered text component to its registered hit target.
 /// Ambiguous text components fail closed instead of choosing by traversal order.
@@ -220,6 +234,54 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         if (list->SelectedItemIndex != row->ListItemIndex)
             return Fail("RenderedListSelectionRejected", "The rendered list rejected the requested row selection.", addonName, selection.TargetNodePath);
         return new(true, "RenderedListRowSelected", $"The unique rendered list row at index {row->ListItemIndex} was selected through its owning UI list.", addonName, selection.TargetNodePath);
+    }
+
+    /// <summary>
+    /// Activates one retainer through the RetainerList addon's supported callback contract after
+    /// proving that its name is rendered exactly once and resolving the owning list row. This is
+    /// deliberately narrower than an arbitrary addon callback API: rendered UI supplies identity,
+    /// while the callback only replaces the unsafe synthetic double-click normally used to open it.
+    /// Callers must still prove the expected rendered retainer menu before treating activation as
+    /// complete.
+    /// </summary>
+    public unsafe RenderedUiTextActionResult TryActivateUniqueRetainerListRowText(string visibleText)
+    {
+        const string addonName = "RetainerList";
+        var selected = TrySelectUniqueListRowText(addonName, visibleText);
+        if (!selected.Success || selected.TargetNodePath == null)
+            return selected;
+
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
+        if (addon == null)
+            addon = FindVisibleLoadedAddon(addonName);
+        if (addon == null || addon->RootNode == null || !addon->RootNode->IsVisible() || !addon->IsReady)
+            return Fail("RenderedAddonUnavailable", "The rendered retainer list changed before activation.", addonName, selected.TargetNodePath);
+
+        var rowSeparator = selected.TargetNodePath.LastIndexOf('/');
+        if (rowSeparator <= addonName.Length)
+            return Fail("RenderedListRowNotFound", "The rendered retainer name is no longer inside a list row.", addonName, selected.TargetNodePath);
+        var rowNode = FindNodeByPath(addon, addonName, selected.TargetNodePath[..rowSeparator]);
+        var componentNode = rowNode == null ? null : rowNode->GetAsAtkComponentNode();
+        if (componentNode == null || componentNode->Component == null ||
+            componentNode->Component->GetComponentType() != ComponentType.ListItemRenderer)
+            return Fail("RenderedListStructureChanged", "The rendered retainer name no longer resolves to a standard list row.", addonName, selected.TargetNodePath);
+
+        var row = (AtkComponentListItemRenderer*)componentNode->Component;
+        var request = RenderedRetainerListActivationPolicy.Create(row->ListItemIndex);
+        if (!request.Success)
+            return Fail(request.Code, request.Message, addonName, selected.TargetNodePath);
+
+        var values = stackalloc AtkValue[4];
+        values[0] = new AtkValue { Type = AtkValueType.Int, Int = request.Command };
+        values[1] = new AtkValue { Type = AtkValueType.UInt, UInt = request.RowIndex };
+        values[2] = default;
+        values[3] = default;
+        if (!addon->FireCallback(4, values, true))
+            return Fail("RenderedRetainerActivationRejected", "The retainer list rejected activation of the rendered row.", addonName, selected.TargetNodePath);
+
+        return new(true, "RenderedRetainerActivationDispatched",
+            $"Activated the unique rendered retainer row at index {row->ListItemIndex} through the RetainerList callback contract.",
+            addonName, selected.TargetNodePath);
     }
 
     public unsafe RenderedUiTextActionResult TryRollOverUniqueText(string addonName, string visibleText)
