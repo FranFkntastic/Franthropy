@@ -81,6 +81,12 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         this.gameGui = gameGui ?? throw new ArgumentNullException(nameof(gameGui));
 
     public unsafe RenderedUiTextActionResult TryClickUniqueText(string addonName, string visibleText)
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false);
+
+    public unsafe RenderedUiTextActionResult TryRollOverUniqueText(string addonName, string visibleText)
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true);
+
+    private unsafe RenderedUiTextActionResult TryDispatchUniqueText(string addonName, string visibleText, bool rolloverOnly)
     {
         if (string.IsNullOrWhiteSpace(addonName) || addonName.Length > 64 ||
             string.IsNullOrWhiteSpace(visibleText) || visibleText.Length > 256)
@@ -94,18 +100,23 @@ public sealed class DalamudRenderedUiTextActionDispatcher
 
         var matches = new List<RenderedUiTextMatch>();
         var targets = new List<RenderedUiHitTarget>();
-        CaptureManager(&addon->UldManager, addonName, visibleText.Trim(), matches, targets, new HashSet<nint>());
+        CaptureManager(&addon->UldManager, addonName, visibleText.Trim(), rolloverOnly, matches, targets, new HashSet<nint>());
         var selection = RenderedUiTextActionSelector.Select(matches, targets);
         if (!selection.Success || selection.TargetNodePath == null || selection.DispatchMode == null)
             return new(false, selection.Code, selection.Message, addonName, null);
 
         var node = FindNodeByPath(addon, addonName, selection.TargetNodePath);
-        if (node == null || !IsEffectivelyVisible(node) || !Supports(node, selection.DispatchMode.Value))
+        if (node == null || !IsEffectivelyVisible(node) ||
+            (rolloverOnly
+                ? !node->IsEventRegistered(AtkEventType.MouseOver)
+                : !Supports(node, selection.DispatchMode.Value)))
             return Fail("RenderedHitTargetStale", "The selected registered click target changed before dispatch.", addonName);
 
         FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds;
         node->GetBounds(&bounds);
-        var dispatched = selection.DispatchMode.Value switch
+        var dispatched = rolloverOnly
+            ? Dispatch(node, AtkEventType.MouseOver, bounds)
+            : selection.DispatchMode.Value switch
         {
             RenderedUiClickDispatchMode.MouseClick => Dispatch(node, AtkEventType.MouseClick, bounds),
             RenderedUiClickDispatchMode.MouseDownUp =>
@@ -114,8 +125,20 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             _ => false,
         };
         return dispatched
-            ? new(true, "RenderedTextClickDispatched", "The registered click event was dispatched to the rendered text component.", addonName, selection.TargetNodePath)
-            : Fail("RenderedTextClickRejected", "The rendered text component rejected its registered click event.", addonName, selection.TargetNodePath);
+            ? new(true,
+                rolloverOnly ? "RenderedTextRollOverDispatched" : "RenderedTextClickDispatched",
+                rolloverOnly
+                    ? "The registered rollover event was dispatched to the rendered text component."
+                    : "The registered click event was dispatched to the rendered text component.",
+                addonName,
+                selection.TargetNodePath)
+            : Fail(
+                rolloverOnly ? "RenderedTextRollOverRejected" : "RenderedTextClickRejected",
+                rolloverOnly
+                    ? "The rendered text component rejected its registered rollover event."
+                    : "The rendered text component rejected its registered click event.",
+                addonName,
+                selection.TargetNodePath);
     }
 
     private static unsafe bool Dispatch(AtkResNode* node, AtkEventType eventType, FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds)
@@ -156,6 +179,7 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         AtkUldManager* manager,
         string path,
         string visibleText,
+        bool rolloverOnly,
         ICollection<RenderedUiTextMatch> matches,
         ICollection<RenderedUiHitTarget> targets,
         ISet<nint> visited)
@@ -171,7 +195,9 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             var parentPath = path;
             FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds;
             node->GetBounds(&bounds);
-            var dispatchMode = ResolveDispatchMode(node);
+            var dispatchMode = rolloverOnly && node->IsEventRegistered(AtkEventType.MouseOver)
+                ? RenderedUiClickDispatchMode.MouseDown
+                : ResolveDispatchMode(node);
             if (dispatchMode != null)
                 targets.Add(new(nodePath, parentPath, bounds.Pos1.X, bounds.Pos1.Y, bounds.Pos2.X, bounds.Pos2.Y, dispatchMode.Value));
 
@@ -181,7 +207,7 @@ public sealed class DalamudRenderedUiTextActionDispatcher
 
             var componentNode = node->GetAsAtkComponentNode();
             if (componentNode != null && componentNode->Component != null)
-                CaptureManager(&componentNode->Component->UldManager, nodePath, visibleText, matches, targets, visited);
+                CaptureManager(&componentNode->Component->UldManager, nodePath, visibleText, rolloverOnly, matches, targets, visited);
         }
     }
 
