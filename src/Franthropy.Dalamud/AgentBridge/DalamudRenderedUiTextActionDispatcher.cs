@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Dalamud.Plugin.Services;
 using Dalamud.Utility;
 using FFXIVClientStructs.FFXIV.Component.GUI;
@@ -132,18 +134,14 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             _ => false,
         };
         if (dispatched && activateFromRollover)
-        {
-            dispatched = DispatchDerived(node, AtkEventType.MouseOver, AtkEventType.MouseDown, bounds) &&
-                         DispatchDerived(node, AtkEventType.MouseOver, AtkEventType.MouseClick, bounds) &&
-                         DispatchDerived(node, AtkEventType.MouseOver, AtkEventType.MouseUp, bounds);
-        }
+            dispatched = PostPointerActivation(bounds);
         return dispatched
             ? new(true,
                 activateFromRollover
                     ? "RenderedTextActivationDispatched"
                     : rolloverOnly ? "RenderedTextRollOverDispatched" : "RenderedTextClickDispatched",
                 activateFromRollover
-                    ? "The standard activation sequence was dispatched through the rendered text component's registered rollover identity."
+                    ? "A client-area pointer activation was posted at the rendered text component without moving the physical cursor or activating the game window."
                     : rolloverOnly
                     ? "The registered rollover event was dispatched to the rendered text component."
                     : "The registered click event was dispatched to the rendered text component.",
@@ -186,29 +184,20 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         return true;
     }
 
-    private static unsafe bool DispatchDerived(
-        AtkResNode* node,
-        AtkEventType registeredEventType,
-        AtkEventType deliveredEventType,
-        FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds)
+    private static bool PostPointerActivation(FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds)
     {
-        var registered = (AtkEvent*)node->AtkEventManager.Event;
-        while (registered != null && registered->State.EventType != registeredEventType)
-            registered = registered->NextEvent;
-        if (registered == null)
+        using var process = Process.GetCurrentProcess();
+        process.Refresh();
+        var window = process.MainWindowHandle;
+        if (window == nint.Zero)
             return false;
-        var data = new AtkEventData
-        {
-            MouseData = new AtkEventData.AtkMouseData
-            {
-                PosX = (short)Math.Clamp((bounds.Pos1.X + bounds.Pos2.X) / 2, short.MinValue, short.MaxValue),
-                PosY = (short)Math.Clamp((bounds.Pos1.Y + bounds.Pos2.Y) / 2, short.MinValue, short.MaxValue),
-            },
-        };
-        if (registered->Listener == null)
-            return false;
-        registered->Listener->ReceiveEvent(deliveredEventType, (int)registered->Param, registered, &data);
-        return true;
+
+        var x = Math.Clamp((int)MathF.Round((bounds.Pos1.X + bounds.Pos2.X) / 2), 0, ushort.MaxValue);
+        var y = Math.Clamp((int)MathF.Round((bounds.Pos1.Y + bounds.Pos2.Y) / 2), 0, ushort.MaxValue);
+        var position = (nint)((y << 16) | (x & 0xffff));
+        return NativeMethods.PostMessage(window, NativeMethods.WmMouseMove, nint.Zero, position) &&
+               NativeMethods.PostMessage(window, NativeMethods.WmLeftButtonDown, (nint)NativeMethods.MkLeftButton, position) &&
+               NativeMethods.PostMessage(window, NativeMethods.WmLeftButtonUp, nint.Zero, position);
     }
 
     private static unsafe AtkUnitBase* FindVisibleLoadedAddon(string addonName)
@@ -330,4 +319,16 @@ public sealed class DalamudRenderedUiTextActionDispatcher
 
     private static RenderedUiTextActionResult Fail(string code, string message, string? addonName, string? nodePath = null) =>
         new(false, code, message, addonName, nodePath);
+
+    private static class NativeMethods
+    {
+        internal const uint WmMouseMove = 0x0200;
+        internal const uint WmLeftButtonDown = 0x0201;
+        internal const uint WmLeftButtonUp = 0x0202;
+        internal const uint MkLeftButton = 0x0001;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool PostMessage(nint window, uint message, nint wParam, nint lParam);
+    }
 }
