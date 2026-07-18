@@ -122,20 +122,20 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds;
         node->GetBounds(&bounds);
         var dispatched = rolloverOnly
-            ? Dispatch(addon, node, AtkEventType.MouseOver, bounds)
+            ? Dispatch(node, AtkEventType.MouseOver, bounds)
             : selection.DispatchMode.Value switch
         {
-            RenderedUiClickDispatchMode.MouseClick => Dispatch(addon, node, AtkEventType.MouseClick, bounds),
+            RenderedUiClickDispatchMode.MouseClick => Dispatch(node, AtkEventType.MouseClick, bounds),
             RenderedUiClickDispatchMode.MouseDownUp =>
-                Dispatch(addon, node, AtkEventType.MouseDown, bounds) && Dispatch(addon, node, AtkEventType.MouseUp, bounds),
-            RenderedUiClickDispatchMode.MouseDown => Dispatch(addon, node, AtkEventType.MouseDown, bounds),
+                Dispatch(node, AtkEventType.MouseDown, bounds) && Dispatch(node, AtkEventType.MouseUp, bounds),
+            RenderedUiClickDispatchMode.MouseDown => Dispatch(node, AtkEventType.MouseDown, bounds),
             _ => false,
         };
         if (dispatched && activateFromRollover)
         {
-            dispatched = DispatchDerived(addon, node, AtkEventType.MouseOver, AtkEventType.MouseDown, bounds) &&
-                         DispatchDerived(addon, node, AtkEventType.MouseOver, AtkEventType.MouseClick, bounds) &&
-                         DispatchDerived(addon, node, AtkEventType.MouseOver, AtkEventType.MouseUp, bounds);
+            dispatched = DispatchDerived(node, AtkEventType.MouseOver, AtkEventType.MouseDown, bounds) &&
+                         DispatchDerived(node, AtkEventType.MouseOver, AtkEventType.MouseClick, bounds) &&
+                         DispatchDerived(node, AtkEventType.MouseOver, AtkEventType.MouseUp, bounds);
         }
         return dispatched
             ? new(true,
@@ -163,7 +163,6 @@ public sealed class DalamudRenderedUiTextActionDispatcher
     }
 
     private static unsafe bool Dispatch(
-        AtkUnitBase* addon,
         AtkResNode* node,
         AtkEventType eventType,
         FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds)
@@ -181,12 +180,13 @@ public sealed class DalamudRenderedUiTextActionDispatcher
                 PosY = (short)Math.Clamp((bounds.Pos1.Y + bounds.Pos2.Y) / 2, short.MinValue, short.MaxValue),
             },
         };
-        addon->ReceiveEvent(eventType, (int)registered->Param, registered, &data);
+        if (registered->Listener == null)
+            return false;
+        registered->Listener->ReceiveEvent(eventType, (int)registered->Param, registered, &data);
         return true;
     }
 
     private static unsafe bool DispatchDerived(
-        AtkUnitBase* addon,
         AtkResNode* node,
         AtkEventType registeredEventType,
         AtkEventType deliveredEventType,
@@ -205,7 +205,9 @@ public sealed class DalamudRenderedUiTextActionDispatcher
                 PosY = (short)Math.Clamp((bounds.Pos1.Y + bounds.Pos2.Y) / 2, short.MinValue, short.MaxValue),
             },
         };
-        addon->ReceiveEvent(deliveredEventType, (int)registered->Param, registered, &data);
+        if (registered->Listener == null)
+            return false;
+        registered->Listener->ReceiveEvent(deliveredEventType, (int)registered->Param, registered, &data);
         return true;
     }
 
