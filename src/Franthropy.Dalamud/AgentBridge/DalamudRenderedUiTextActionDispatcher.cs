@@ -172,8 +172,11 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         var row = (AtkComponentListItemRenderer*)rowNode->Component;
         if (row->ListItemIndex < 0)
             return Fail("RenderedListRowUnavailable", "The rendered list row has no selectable index.", addonName, selection.TargetNodePath);
-        ((AtkComponentList*)listNode->Component)->SelectItem(row->ListItemIndex, true);
-        return new(true, "RenderedListRowSelected", "The unique rendered list row was selected through its owning UI list.", addonName, selection.TargetNodePath);
+        var list = (AtkComponentList*)listNode->Component;
+        list->SelectItem(row->ListItemIndex, false);
+        if (list->SelectedItemIndex != row->ListItemIndex)
+            return Fail("RenderedListSelectionRejected", "The rendered list rejected the requested row selection.", addonName, selection.TargetNodePath);
+        return new(true, "RenderedListRowSelected", $"The unique rendered list row at index {row->ListItemIndex} was selected through its owning UI list.", addonName, selection.TargetNodePath);
     }
 
     public unsafe RenderedUiTextActionResult TryRollOverUniqueText(string addonName, string visibleText)
