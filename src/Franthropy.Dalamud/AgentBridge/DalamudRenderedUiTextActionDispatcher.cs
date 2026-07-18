@@ -68,6 +68,13 @@ public static class RenderedRetainerListActivationPolicy
         : new(false, 0, 0, "RenderedRetainerRowOutOfRange", "The rendered retainer row is outside the supported callback contract.");
 }
 
+public static class RenderedSelectStringActivationPolicy
+{
+    public static RenderedRetainerListActivationRequest Create(int rowIndex) => rowIndex is >= 0 and < 64
+        ? new(true, rowIndex, (uint)rowIndex, "RenderedSelectionActivationAuthorized", "The rendered selection row is within the supported callback contract.")
+        : new(false, 0, 0, "RenderedSelectionRowOutOfRange", "The rendered selection row is outside the supported callback contract.");
+}
+
 /// <summary>
 /// Pure selection policy for resolving one rendered text component to its registered hit target.
 /// Ambiguous text components fail closed instead of choosing by traversal order.
@@ -284,6 +291,44 @@ public sealed class DalamudRenderedUiTextActionDispatcher
 
         return new(true, "RenderedRetainerActivationDispatched",
             $"Activated the unique rendered retainer row at index {row->ListItemIndex} through the RetainerList callback contract.",
+            addonName, selected.TargetNodePath);
+    }
+
+    /// <summary>
+    /// Activates one uniquely rendered SelectString entry through the addon's index callback. This
+    /// avoids synthetic list-item events while retaining the visible label as the sole authority
+    /// for which semantic option is selected.
+    /// </summary>
+    public unsafe RenderedUiTextActionResult TryActivateUniqueSelectStringText(string visibleText)
+    {
+        const string addonName = "SelectString";
+        var selected = TrySelectUniqueListRowText(addonName, visibleText);
+        if (!selected.Success || selected.TargetNodePath == null)
+            return selected;
+
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
+        if (addon == null)
+            addon = FindVisibleLoadedAddon(addonName);
+        if (addon == null || addon->RootNode == null || !addon->RootNode->IsVisible() || !addon->IsReady)
+            return Fail("RenderedAddonUnavailable", "The rendered selection menu changed before activation.", addonName, selected.TargetNodePath);
+
+        var rowSeparator = selected.TargetNodePath.LastIndexOf('/');
+        if (rowSeparator <= addonName.Length)
+            return Fail("RenderedListRowNotFound", "The rendered selection label is no longer inside a list row.", addonName, selected.TargetNodePath);
+        var rowNode = FindNodeByPath(addon, addonName, selected.TargetNodePath[..rowSeparator]);
+        var componentNode = rowNode == null ? null : rowNode->GetAsAtkComponentNode();
+        if (componentNode == null || componentNode->Component == null ||
+            componentNode->Component->GetComponentType() != ComponentType.ListItemRenderer)
+            return Fail("RenderedListStructureChanged", "The rendered selection label no longer resolves to a standard list row.", addonName, selected.TargetNodePath);
+
+        var row = (AtkComponentListItemRenderer*)componentNode->Component;
+        var request = RenderedSelectStringActivationPolicy.Create(row->ListItemIndex);
+        if (!request.Success)
+            return Fail(request.Code, request.Message, addonName, selected.TargetNodePath);
+
+        addon->FireCallbackInt(request.Command);
+        return new(true, "RenderedSelectionActivationDispatched",
+            $"Activated the unique rendered selection row at index {request.Command} through the SelectString callback contract.",
             addonName, selected.TargetNodePath);
     }
 

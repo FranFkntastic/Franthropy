@@ -27,6 +27,28 @@ public sealed class RenderedUiTextActionSelectorTests
         Assert.Equal("RenderedRetainerRowOutOfRange", result.Code);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(63)]
+    public void Selection_activation_policy_preserves_the_rendered_row_index(int rowIndex)
+    {
+        var result = RenderedSelectStringActivationPolicy.Create(rowIndex);
+
+        Assert.True(result.Success);
+        Assert.Equal(rowIndex, result.Command);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(64)]
+    public void Selection_activation_policy_rejects_implausible_row_indices(int rowIndex)
+    {
+        var result = RenderedSelectStringActivationPolicy.Create(rowIndex);
+
+        Assert.False(result.Success);
+        Assert.Equal("RenderedSelectionRowOutOfRange", result.Code);
+    }
+
     [Fact]
     public void Selects_smallest_registered_hit_target_covering_unique_text()
     {
