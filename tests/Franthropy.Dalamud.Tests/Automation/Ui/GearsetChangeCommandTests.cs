@@ -23,10 +23,10 @@ public sealed class GearsetChangeCommandTests
         Assert.False(GearsetChangeCommand.TryCreateSlot(target, out _));
 
     [Theory]
-    [InlineData("Miner", "Miner", "MIN", "/gearset change \"MIN\"")]
-    [InlineData("MIN", "Miner", "MIN", "/gearset change \"MIN\"")]
-    [InlineData(" Botanist ", "Botanist", "BTN", "/gearset change \"BTN\"")]
-    [InlineData("Blacksmith", "Blacksmith", "BSM", "/gearset change \"BSM\"")]
+    [InlineData("Miner", "Miner", "Miner", "/gearset change \"Miner\"")]
+    [InlineData("MIN", "Miner", "Miner", "/gearset change \"Miner\"")]
+    [InlineData(" Botanist ", "Botanist", "Botanist", "/gearset change \"Botanist\"")]
+    [InlineData("Blacksmith", "Blacksmith", "Blacksmith", "/gearset change \"Blacksmith\"")]
     public void TryCreate_UsesConventionalJobAbbreviationGearsetName(
         string target,
         string expectedJob,

@@ -29,9 +29,9 @@ public sealed record GearsetChangeCommand(
     {
         command = NormalizeTarget(target) switch
         {
-            "MIN" => Create(target!, "Miner", "MIN"),
-            "BTN" => Create(target!, "Botanist", "BTN"),
-            "BSM" => Create(target!, "Blacksmith", "BSM"),
+            "MIN" => Create(target!, "Miner", "Miner"),
+            "BTN" => Create(target!, "Botanist", "Botanist"),
+            "BSM" => Create(target!, "Blacksmith", "Blacksmith"),
             _ => null,
         };
         return command is not null;
