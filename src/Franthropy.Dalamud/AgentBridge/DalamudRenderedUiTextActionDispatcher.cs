@@ -256,6 +256,21 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             (*(AtkComponentButton*)componentNode->Component).ClickAddonButton(addon);
             return true;
         }
+        if (componentNode != null && componentNode->Component != null &&
+            componentNode->Component->GetComponentType() == ComponentType.ListItemRenderer)
+        {
+            var listEvent = (AtkEvent*)componentNode->AtkResNode.AtkEventManager.Event;
+            while (listEvent != null && listEvent->State.EventType != AtkEventType.ListItemClick)
+                listEvent = listEvent->NextEvent;
+            if (listEvent == null)
+                return false;
+            ClickHelper.ClickAddonComponent(
+                componentNode->Component,
+                componentNode,
+                listEvent->Param,
+                ECommons.Automation.UIInput.EventType.LIST_ITEM_CLICK);
+            return true;
+        }
         if (componentNode != null && componentNode->Component != null)
         {
             ClickHelper.ClickAddonComponent(
