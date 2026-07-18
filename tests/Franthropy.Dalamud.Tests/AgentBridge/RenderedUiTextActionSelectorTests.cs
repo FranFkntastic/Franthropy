@@ -43,4 +43,19 @@ public sealed class RenderedUiTextActionSelectorTests
         Assert.False(result.Success);
         Assert.Equal("RenderedHitTargetNotFound", result.Code);
     }
+
+    [Fact]
+    public void Selects_registered_ancestor_component_for_nested_button_text()
+    {
+        var result = RenderedUiTextActionSelector.Select(
+            [new("Character/40/2", "Character/40", 100, 100, 140, 120)],
+            [
+                new("Character/41", "Character", 100, 100, 140, 120, RenderedUiClickDispatchMode.MouseDown),
+                new("Character/40", "Character", 90, 90, 150, 130, RenderedUiClickDispatchMode.MouseClick),
+            ]);
+
+        Assert.True(result.Success);
+        Assert.Equal("Character/40", result.TargetNodePath);
+        Assert.Equal(RenderedUiClickDispatchMode.MouseClick, result.DispatchMode);
+    }
 }

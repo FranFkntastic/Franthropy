@@ -58,7 +58,7 @@ public static class RenderedUiTextActionSelector
         var centerX = (text.Left + text.Right) / 2;
         var centerY = (text.Top + text.Bottom) / 2;
         var target = hitTargets
-            .Where(value => string.Equals(value.ParentPath, parents[0], StringComparison.Ordinal) &&
+            .Where(value => BelongsToTextComponent(value, text) &&
                             value.Left <= centerX && centerX <= value.Right &&
                             value.Top <= centerY && centerY <= value.Bottom)
             .OrderBy(value => Math.Max(0, value.Right - value.Left) * Math.Max(0, value.Bottom - value.Top))
@@ -68,6 +68,11 @@ public static class RenderedUiTextActionSelector
             ? RenderedUiTextActionSelection.Fail("RenderedHitTargetNotFound", "The rendered text has no registered click target covering it.")
             : new(true, "RenderedHitTargetSelected", "A unique registered click target covers the rendered text.", target.NodePath, target.DispatchMode);
     }
+
+    private static bool BelongsToTextComponent(RenderedUiHitTarget target, RenderedUiTextMatch text) =>
+        string.Equals(target.ParentPath, text.ParentPath, StringComparison.Ordinal) ||
+        string.Equals(target.NodePath, text.ParentPath, StringComparison.Ordinal) ||
+        text.ParentPath.StartsWith($"{target.NodePath}/", StringComparison.Ordinal);
 }
 
 /// <summary>
