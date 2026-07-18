@@ -9,6 +9,22 @@ namespace Franthropy.Dalamud.AgentBridge;
 
 public sealed record RenderedUiTextMatch(string NodePath, string ParentPath, int Left, int Top, int Right, int Bottom);
 
+public sealed record RenderedUiTextNode(
+    string Text,
+    string NodePath,
+    string ParentPath,
+    int Left,
+    int Top,
+    int Right,
+    int Bottom);
+
+public sealed record RenderedUiTextCaptureResult(
+    bool Available,
+    string Code,
+    string Message,
+    string AddonName,
+    IReadOnlyList<RenderedUiTextNode> TextNodes);
+
 public enum RenderedUiClickDispatchMode
 {
     MouseClick,
@@ -124,6 +140,33 @@ public sealed class DalamudRenderedUiTextActionDispatcher
 
     public DalamudRenderedUiTextActionDispatcher(IGameGui gameGui) =>
         this.gameGui = gameGui ?? throw new ArgumentNullException(nameof(gameGui));
+
+    /// <summary>
+    /// Captures only text that is currently rendered by one named addon. This is deliberately
+    /// usable before a local player exists so launcher, title, lobby, and queue workflows can use
+    /// visible UI as their authority instead of lobby agents, packets, or cached character data.
+    /// </summary>
+    public unsafe RenderedUiTextCaptureResult CaptureVisibleText(string addonName)
+    {
+        if (string.IsNullOrWhiteSpace(addonName) || addonName.Length > 64)
+            return new(false, "InvalidRenderedAddon", "A valid addon name is required.", addonName ?? string.Empty, []);
+
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
+        if (addon == null)
+            addon = FindVisibleLoadedAddon(addonName);
+        if (addon == null || addon->RootNode == null || !addon->RootNode->IsVisible() || !addon->IsReady)
+            return new(false, "RenderedAddonUnavailable", $"The rendered {addonName} addon is unavailable.", addonName, []);
+
+        var nodes = new List<RenderedUiTextNode>();
+        CaptureAllText(&addon->UldManager, addonName, nodes, new HashSet<nint>());
+        var ordered = nodes
+            .OrderBy(value => value.Top)
+            .ThenBy(value => value.Left)
+            .ThenBy(value => value.NodePath, StringComparer.Ordinal)
+            .Take(512)
+            .ToArray();
+        return new(true, "RenderedAddonCaptured", $"Captured {ordered.Length} rendered text node(s) from {addonName}.", addonName, ordered);
+    }
 
     public unsafe RenderedUiTextActionResult TryClickUniqueText(string addonName, string visibleText)
         => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false, activateFromRollover: false, selectNearestLeft: false, doubleClickOnly: false);
@@ -463,6 +506,42 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             var componentNode = node->GetAsAtkComponentNode();
             if (componentNode != null && componentNode->Component != null)
                 CaptureManager(&componentNode->Component->UldManager, nodePath, visibleText, rolloverOnly, doubleClickOnly, matches, targets, visited);
+        }
+    }
+
+    private static unsafe void CaptureAllText(
+        AtkUldManager* manager,
+        string path,
+        ICollection<RenderedUiTextNode> nodes,
+        ISet<nint> visited)
+    {
+        if (manager == null || manager->NodeList == null || nodes.Count >= 512 || !visited.Add((nint)manager))
+            return;
+        for (var index = 0u; index < manager->NodeListCount && nodes.Count < 512; index++)
+        {
+            var node = manager->NodeList[index];
+            if (node == null || !IsEffectivelyVisible(node))
+                continue;
+            var nodePath = $"{path}/{node->NodeId}";
+            FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds;
+            node->GetBounds(&bounds);
+            var textNode = node->GetAsAtkTextNode();
+            var text = textNode == null ? string.Empty : textNode->NodeText.ExtractText().Trim();
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                nodes.Add(new(
+                    text.Length <= 512 ? text : text[..512],
+                    nodePath,
+                    path,
+                    bounds.Pos1.X,
+                    bounds.Pos1.Y,
+                    bounds.Pos2.X,
+                    bounds.Pos2.Y));
+            }
+
+            var componentNode = node->GetAsAtkComponentNode();
+            if (componentNode != null && componentNode->Component != null)
+                CaptureAllText(&componentNode->Component->UldManager, nodePath, nodes, visited);
         }
     }
 

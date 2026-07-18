@@ -85,6 +85,7 @@
     <Compile Remove="AgentBridge\DalamudRenderedUiTextActionDispatcher.cs" />
     <Compile Remove="UI\Plots\DalamudPlotRenderer.cs" />
     <Compile Remove="Travel\DalamudLifestreamObjectInteractor.cs" />
+    <Compile Remove="Travel\DalamudLifestreamLogin.cs" />
   </ItemGroup>
 
 </Project>
