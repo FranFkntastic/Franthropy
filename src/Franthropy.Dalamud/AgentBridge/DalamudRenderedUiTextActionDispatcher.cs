@@ -81,12 +81,19 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         this.gameGui = gameGui ?? throw new ArgumentNullException(nameof(gameGui));
 
     public unsafe RenderedUiTextActionResult TryClickUniqueText(string addonName, string visibleText)
-        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false);
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false, activateFromRollover: false);
 
     public unsafe RenderedUiTextActionResult TryRollOverUniqueText(string addonName, string visibleText)
-        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true);
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: false);
 
-    private unsafe RenderedUiTextActionResult TryDispatchUniqueText(string addonName, string visibleText, bool rolloverOnly)
+    public unsafe RenderedUiTextActionResult TryActivateUniqueText(string addonName, string visibleText)
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: true);
+
+    private unsafe RenderedUiTextActionResult TryDispatchUniqueText(
+        string addonName,
+        string visibleText,
+        bool rolloverOnly,
+        bool activateFromRollover)
     {
         if (string.IsNullOrWhiteSpace(addonName) || addonName.Length > 64 ||
             string.IsNullOrWhiteSpace(visibleText) || visibleText.Length > 256)
@@ -124,17 +131,31 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             RenderedUiClickDispatchMode.MouseDown => Dispatch(addon, node, AtkEventType.MouseDown, bounds),
             _ => false,
         };
+        if (dispatched && activateFromRollover)
+        {
+            dispatched = DispatchDerived(addon, node, AtkEventType.MouseOver, AtkEventType.MouseDown, bounds) &&
+                         DispatchDerived(addon, node, AtkEventType.MouseOver, AtkEventType.MouseClick, bounds) &&
+                         DispatchDerived(addon, node, AtkEventType.MouseOver, AtkEventType.MouseUp, bounds);
+        }
         return dispatched
             ? new(true,
-                rolloverOnly ? "RenderedTextRollOverDispatched" : "RenderedTextClickDispatched",
-                rolloverOnly
+                activateFromRollover
+                    ? "RenderedTextActivationDispatched"
+                    : rolloverOnly ? "RenderedTextRollOverDispatched" : "RenderedTextClickDispatched",
+                activateFromRollover
+                    ? "The standard activation sequence was dispatched through the rendered text component's registered rollover identity."
+                    : rolloverOnly
                     ? "The registered rollover event was dispatched to the rendered text component."
                     : "The registered click event was dispatched to the rendered text component.",
                 addonName,
                 selection.TargetNodePath)
             : Fail(
-                rolloverOnly ? "RenderedTextRollOverRejected" : "RenderedTextClickRejected",
-                rolloverOnly
+                activateFromRollover
+                    ? "RenderedTextActivationRejected"
+                    : rolloverOnly ? "RenderedTextRollOverRejected" : "RenderedTextClickRejected",
+                activateFromRollover
+                    ? "The rendered text component rejected its standard activation sequence."
+                    : rolloverOnly
                     ? "The rendered text component rejected its registered rollover event."
                     : "The rendered text component rejected its registered click event.",
                 addonName,
@@ -161,6 +182,30 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             },
         };
         addon->ReceiveEvent(eventType, (int)registered->Param, registered, &data);
+        return true;
+    }
+
+    private static unsafe bool DispatchDerived(
+        AtkUnitBase* addon,
+        AtkResNode* node,
+        AtkEventType registeredEventType,
+        AtkEventType deliveredEventType,
+        FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds)
+    {
+        var registered = (AtkEvent*)node->AtkEventManager.Event;
+        while (registered != null && registered->State.EventType != registeredEventType)
+            registered = registered->NextEvent;
+        if (registered == null)
+            return false;
+        var data = new AtkEventData
+        {
+            MouseData = new AtkEventData.AtkMouseData
+            {
+                PosX = (short)Math.Clamp((bounds.Pos1.X + bounds.Pos2.X) / 2, short.MinValue, short.MaxValue),
+                PosY = (short)Math.Clamp((bounds.Pos1.Y + bounds.Pos2.Y) / 2, short.MinValue, short.MaxValue),
+            },
+        };
+        addon->ReceiveEvent(deliveredEventType, (int)registered->Param, registered, &data);
         return true;
     }
 
