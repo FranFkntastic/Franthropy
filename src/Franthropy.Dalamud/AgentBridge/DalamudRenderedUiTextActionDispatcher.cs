@@ -342,6 +342,12 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         if (componentNode != null && componentNode->Component != null &&
             componentNode->Component->GetComponentType() == ComponentType.ListItemRenderer)
         {
+            // ECommons' synthetic LIST_ITEM_DOUBLE_CLICK does not carry the opaque list event
+            // payload expected by every native AtkComponentList implementation. Sending it can
+            // dereference invalid event data and terminate the game. Select the row through its
+            // owning list and submit ordinary Confirm input instead.
+            if (eventType == AtkEventType.MouseDoubleClick)
+                return false;
             var listEventType = eventType == AtkEventType.MouseDoubleClick ? AtkEventType.ListItemDoubleClick : AtkEventType.ListItemClick;
             var listEvent = (AtkEvent*)componentNode->AtkResNode.AtkEventManager.Event;
             while (listEvent != null && listEvent->State.EventType != listEventType)
