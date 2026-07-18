@@ -90,7 +90,7 @@ public static class RenderedUiTextActionSelector
 
         var text = matches.First(value => string.Equals(value.ParentPath, parents[0], StringComparison.Ordinal));
         var target = hitTargets
-            .Where(value => string.Equals(value.ParentPath, text.ParentPath, StringComparison.Ordinal) &&
+            .Where(value => SharesImmediateComponentScope(value, text) &&
                             value.Right <= text.Left && text.Left - value.Right <= maximumGap &&
                             value.Top < text.Bottom && text.Top < value.Bottom)
             .OrderBy(value => text.Left - value.Right)
@@ -100,6 +100,14 @@ public static class RenderedUiTextActionSelector
         return target == null
             ? RenderedUiTextActionSelection.Fail("RenderedAdjacentTargetNotFound", "The rendered text has no unique registered control immediately to its left.")
             : new(true, "RenderedAdjacentTargetSelected", "A unique registered control is immediately left of the rendered text.", target.NodePath, target.DispatchMode);
+    }
+
+    private static bool SharesImmediateComponentScope(RenderedUiHitTarget target, RenderedUiTextMatch text)
+    {
+        if (string.Equals(target.ParentPath, text.ParentPath, StringComparison.Ordinal))
+            return true;
+        var separator = target.ParentPath.LastIndexOf('/');
+        return separator > 0 && string.Equals(target.ParentPath[..separator], text.ParentPath, StringComparison.Ordinal);
     }
 }
 

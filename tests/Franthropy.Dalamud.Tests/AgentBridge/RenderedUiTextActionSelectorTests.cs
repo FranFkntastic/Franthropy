@@ -65,8 +65,8 @@ public sealed class RenderedUiTextActionSelectorTests
         var result = RenderedUiTextActionSelector.SelectNearestLeft(
             [new("Character/15", "Character", 1452, 247, 1642, 262)],
             [
-                new("Character/13/3", "Character", 1392, 251, 1420, 279, RenderedUiClickDispatchMode.MouseClick),
-                new("Character/14/3", "Character", 1422, 251, 1450, 279, RenderedUiClickDispatchMode.MouseDownUp),
+                new("Character/13/3", "Character/13", 1392, 251, 1420, 279, RenderedUiClickDispatchMode.MouseClick),
+                new("Character/14/3", "Character/14", 1422, 251, 1450, 279, RenderedUiClickDispatchMode.MouseDownUp),
             ]);
 
         Assert.True(result.Success);
@@ -79,7 +79,7 @@ public sealed class RenderedUiTextActionSelectorTests
     {
         var result = RenderedUiTextActionSelector.SelectNearestLeft(
             [new("Character/15", "Character", 1452, 247, 1642, 262)],
-            [new("Character/13/3", "Character", 1392, 251, 1420, 279, RenderedUiClickDispatchMode.MouseClick)]);
+            [new("Character/13/3", "Character/13", 1392, 251, 1420, 279, RenderedUiClickDispatchMode.MouseClick)]);
 
         Assert.False(result.Success);
         Assert.Equal("RenderedAdjacentTargetNotFound", result.Code);
