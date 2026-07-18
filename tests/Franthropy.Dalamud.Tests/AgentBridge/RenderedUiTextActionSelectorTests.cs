@@ -10,12 +10,13 @@ public sealed class RenderedUiTextActionSelectorTests
         var result = RenderedUiTextActionSelector.Select(
             [new("NamePlate/20014/3", "NamePlate/20014", 272, 528, 411, 544)],
             [
-                new("NamePlate/20014/11", "NamePlate/20014", 267, 520, 415, 544),
-                new("NamePlate/20014/12", "NamePlate/20014", 200, 400, 500, 600),
+                new("NamePlate/20014/11", "NamePlate/20014", 267, 520, 415, 544, RenderedUiClickDispatchMode.MouseDownUp),
+                new("NamePlate/20014/12", "NamePlate/20014", 200, 400, 500, 600, RenderedUiClickDispatchMode.MouseClick),
             ]);
 
         Assert.True(result.Success);
         Assert.Equal("NamePlate/20014/11", result.TargetNodePath);
+        Assert.Equal(RenderedUiClickDispatchMode.MouseDownUp, result.DispatchMode);
     }
 
     [Fact]
@@ -37,7 +38,7 @@ public sealed class RenderedUiTextActionSelectorTests
     {
         var result = RenderedUiTextActionSelector.Select(
             [new("NamePlate/100/3", "NamePlate/100", 0, 0, 20, 10)],
-            [new("NamePlate/100/11", "NamePlate/100", 30, 30, 40, 40)]);
+            [new("NamePlate/100/11", "NamePlate/100", 30, 30, 40, 40, RenderedUiClickDispatchMode.MouseDown)]);
 
         Assert.False(result.Success);
         Assert.Equal("RenderedHitTargetNotFound", result.Code);

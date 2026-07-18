@@ -6,11 +6,30 @@ namespace Franthropy.Dalamud.AgentBridge;
 
 public sealed record RenderedUiTextMatch(string NodePath, string ParentPath, int Left, int Top, int Right, int Bottom);
 
-public sealed record RenderedUiHitTarget(string NodePath, string ParentPath, int Left, int Top, int Right, int Bottom);
-
-public sealed record RenderedUiTextActionSelection(bool Success, string Code, string Message, string? TargetNodePath)
+public enum RenderedUiClickDispatchMode
 {
-    public static RenderedUiTextActionSelection Fail(string code, string message) => new(false, code, message, null);
+    MouseClick,
+    MouseDownUp,
+    MouseDown,
+}
+
+public sealed record RenderedUiHitTarget(
+    string NodePath,
+    string ParentPath,
+    int Left,
+    int Top,
+    int Right,
+    int Bottom,
+    RenderedUiClickDispatchMode DispatchMode);
+
+public sealed record RenderedUiTextActionSelection(
+    bool Success,
+    string Code,
+    string Message,
+    string? TargetNodePath,
+    RenderedUiClickDispatchMode? DispatchMode)
+{
+    public static RenderedUiTextActionSelection Fail(string code, string message) => new(false, code, message, null, null);
 }
 
 public sealed record RenderedUiTextActionResult(bool Success, string Code, string Message, string? AddonName, string? TargetNodePath);
@@ -45,7 +64,7 @@ public static class RenderedUiTextActionSelector
             .FirstOrDefault();
         return target == null
             ? RenderedUiTextActionSelection.Fail("RenderedHitTargetNotFound", "The rendered text has no registered click target covering it.")
-            : new(true, "RenderedHitTargetSelected", "A unique registered click target covers the rendered text.", target.NodePath);
+            : new(true, "RenderedHitTargetSelected", "A unique registered click target covers the rendered text.", target.NodePath, target.DispatchMode);
     }
 }
 
@@ -77,18 +96,33 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         var targets = new List<RenderedUiHitTarget>();
         CaptureManager(&addon->UldManager, addonName, visibleText.Trim(), matches, targets, new HashSet<nint>());
         var selection = RenderedUiTextActionSelector.Select(matches, targets);
-        if (!selection.Success || selection.TargetNodePath == null)
+        if (!selection.Success || selection.TargetNodePath == null || selection.DispatchMode == null)
             return new(false, selection.Code, selection.Message, addonName, null);
 
         var node = FindNodeByPath(addon, addonName, selection.TargetNodePath);
-        if (node == null || !IsEffectivelyVisible(node) || !node->IsEventRegistered(AtkEventType.MouseClick))
+        if (node == null || !IsEffectivelyVisible(node) || !Supports(node, selection.DispatchMode.Value))
             return Fail("RenderedHitTargetStale", "The selected registered click target changed before dispatch.", addonName);
 
         FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds;
         node->GetBounds(&bounds);
+        var dispatched = selection.DispatchMode.Value switch
+        {
+            RenderedUiClickDispatchMode.MouseClick => Dispatch(node, AtkEventType.MouseClick, bounds),
+            RenderedUiClickDispatchMode.MouseDownUp =>
+                Dispatch(node, AtkEventType.MouseDown, bounds) && Dispatch(node, AtkEventType.MouseUp, bounds),
+            RenderedUiClickDispatchMode.MouseDown => Dispatch(node, AtkEventType.MouseDown, bounds),
+            _ => false,
+        };
+        return dispatched
+            ? new(true, "RenderedTextClickDispatched", "The registered click event was dispatched to the rendered text component.", addonName, selection.TargetNodePath)
+            : Fail("RenderedTextClickRejected", "The rendered text component rejected its registered click event.", addonName, selection.TargetNodePath);
+    }
+
+    private static unsafe bool Dispatch(AtkResNode* node, AtkEventType eventType, FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds)
+    {
         var evt = new AtkEventDispatcher.Event
         {
-            State = new AtkEventState { EventType = AtkEventType.MouseClick },
+            State = new AtkEventState { EventType = eventType },
             EventData = new AtkEventData
             {
                 MouseData = new AtkEventData.AtkMouseData
@@ -98,9 +132,7 @@ public sealed class DalamudRenderedUiTextActionDispatcher
                 },
             },
         };
-        return node->DispatchEvent(&evt)
-            ? new(true, "RenderedTextClickDispatched", "The registered click event was dispatched to the rendered text component.", addonName, selection.TargetNodePath)
-            : Fail("RenderedTextClickRejected", "The rendered text component rejected its registered click event.", addonName, selection.TargetNodePath);
+        return node->DispatchEvent(&evt);
     }
 
     private static unsafe AtkUnitBase* FindVisibleLoadedAddon(string addonName)
@@ -139,8 +171,9 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             var parentPath = path;
             FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds;
             node->GetBounds(&bounds);
-            if (node->IsEventRegistered(AtkEventType.MouseClick))
-                targets.Add(new(nodePath, parentPath, bounds.Pos1.X, bounds.Pos1.Y, bounds.Pos2.X, bounds.Pos2.Y));
+            var dispatchMode = ResolveDispatchMode(node);
+            if (dispatchMode != null)
+                targets.Add(new(nodePath, parentPath, bounds.Pos1.X, bounds.Pos1.Y, bounds.Pos2.X, bounds.Pos2.Y, dispatchMode.Value));
 
             var textNode = node->GetAsAtkTextNode();
             if (textNode != null && string.Equals(textNode->NodeText.ExtractText().Trim(), visibleText, StringComparison.OrdinalIgnoreCase))
@@ -151,6 +184,26 @@ public sealed class DalamudRenderedUiTextActionDispatcher
                 CaptureManager(&componentNode->Component->UldManager, nodePath, visibleText, matches, targets, visited);
         }
     }
+
+    private static unsafe RenderedUiClickDispatchMode? ResolveDispatchMode(AtkResNode* node)
+    {
+        if (node->IsEventRegistered(AtkEventType.MouseClick))
+            return RenderedUiClickDispatchMode.MouseClick;
+        if (node->IsEventRegistered(AtkEventType.MouseDown) && node->IsEventRegistered(AtkEventType.MouseUp))
+            return RenderedUiClickDispatchMode.MouseDownUp;
+        if (node->IsEventRegistered(AtkEventType.MouseDown))
+            return RenderedUiClickDispatchMode.MouseDown;
+        return null;
+    }
+
+    private static unsafe bool Supports(AtkResNode* node, RenderedUiClickDispatchMode mode) => mode switch
+    {
+        RenderedUiClickDispatchMode.MouseClick => node->IsEventRegistered(AtkEventType.MouseClick),
+        RenderedUiClickDispatchMode.MouseDownUp =>
+            node->IsEventRegistered(AtkEventType.MouseDown) && node->IsEventRegistered(AtkEventType.MouseUp),
+        RenderedUiClickDispatchMode.MouseDown => node->IsEventRegistered(AtkEventType.MouseDown),
+        _ => false,
+    };
 
     private static unsafe AtkResNode* FindNodeByPath(AtkUnitBase* addon, string addonName, string nodePath)
     {
