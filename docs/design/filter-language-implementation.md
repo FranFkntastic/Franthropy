@@ -44,7 +44,8 @@ The program finishes when:
 | Phase 3: canonical FFXIV catalog | Complete | 29 documented fields, name-first resolver contracts, generated reference writers, and 8 catalog tests pass |
 | Phase 4: MMF contracts and normalization | Complete locally | Shared browser DTOs, typed evidence normalization, and legacy condition behavior covered by server tests |
 | Phase 5: Inventory Viewer contexts | Complete locally | Separate Items, Stacks, and Listings contexts with name-first filtering and contextual metrics; 167 server and 926 plugin tests pass |
-| Phase 6: completion and help | Complete locally | Shared caret-aware completion, predicates, generated active-context help, operator algebra, source-spelling preservation, semantic normalization, and inline browser popup are covered by focused suites |
+| Phase 6: completion and help | Complete locally | Shared caret-aware completion, predicates, generated active-context help, operator algebra, source-spelling preservation, semantic normalization, and browser plus ImGui editors are covered by focused suites |
+| Phase 6A: first in-game consumer | Complete locally | Squire candidate filtering binds a read-only product context to the shared compiler and reusable ImGui editor; invalid typing retains the last valid view |
 | Phase 7: capture schema vNext | In progress | Schema 2 preserves physical stacks, HQ, location, container, slot, equipped, item category, and applicable condition percent; completeness and a deduplicated item catalog remain |
 | Later phases | Not started | Changes mode and automation review remain gated |
 
@@ -836,6 +837,8 @@ Land Franthropy primitives and their independent verification before the MMF com
 | 2026-07-16 | Return active-context completion and reference metadata with the cancellable browser response for the pilot. | One snapshot-specific context build powers results and editor metadata; a separate endpoint remains optional if measured payload cost warrants it. |
 | 2026-07-16 | Limit the first schema-2 expansion to evidence already proven useful by Stacks mode. | Completeness, spiritbond, materia, glamour, and the deduplicated item catalog remain explicit follow-up slices rather than speculative payload growth. |
 | 2026-07-16 | Treat condition as applicable item-definition evidence, not a universal numeric slot value. | Non-repairable items expose unknown condition instead of masquerading as broken at zero percent. |
+| 2026-07-18 | Use Squire candidate search as the first in-game consumer. | The language filters an already-computed read-only review table; it does not select, authorize, route, or execute cleanup actions. |
+| 2026-07-18 | Put ImGui completion editing in `Franthropy.Dalamud.UI.Filtering`. | Browser and Dalamud surfaces share core replacement spans, completion semantics, diagnostics, and generated context metadata rather than maintaining UI-local parsers. |
 
 ## Open implementation questions
 

@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Franthropy.Dalamud\Franthropy.Dalamud.csproj" />
+    <ProjectReference Include="..\..\src\Franthropy.Filtering\Franthropy.Filtering.csproj" />
   </ItemGroup>
 
   <ItemGroup>
