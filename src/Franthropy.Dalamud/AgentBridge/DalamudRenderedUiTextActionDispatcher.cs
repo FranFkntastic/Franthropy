@@ -276,8 +276,11 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         values[1] = new AtkValue { Type = AtkValueType.UInt, UInt = request.RowIndex };
         values[2] = default;
         values[3] = default;
-        if (!addon->FireCallback(4, values, true))
-            return Fail("RenderedRetainerActivationRejected", "The retainer list rejected activation of the rendered row.", addonName, selected.TargetNodePath);
+        // AtkUnitBase.FireCallback returns the callback handler's game-defined result, not a
+        // transport acknowledgement. RetainerList returns false even when it synchronously opens
+        // the requested retainer menu, so only the caller's rendered postcondition can authorize
+        // completion.
+        addon->FireCallback(4, values, true);
 
         return new(true, "RenderedRetainerActivationDispatched",
             $"Activated the unique rendered retainer row at index {row->ListItemIndex} through the RetainerList callback contract.",
