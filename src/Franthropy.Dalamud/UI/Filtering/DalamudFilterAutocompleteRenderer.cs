@@ -51,12 +51,14 @@ public static class DalamudFilterAutocompleteRenderer
             state.SetExpression(expression, state.CaretPosition);
 
         var inputActive = ImGui.IsItemActive();
+        var suggestionAnchor = new Vector2(ImGui.GetItemRectMin().X, ImGui.GetItemRectMax().Y);
         var completion = FilterCompletionService.Complete(
             context,
             new FilterCompletionRequest(context.ContextId, state.Expression, state.CaretPosition));
         var items = completion.Items.Take(Math.Max(1, maximumItems)).ToArray();
+        state.IsEditingWithSuggestions = inputActive && items.Length > 0;
 
-        if (inputActive && items.Length > 0)
+        if (state.IsEditingWithSuggestions)
         {
             if (ImGui.IsKeyPressed(ImGuiKey.DownArrow))
                 state.MoveSelection(1, items.Length);
@@ -67,6 +69,7 @@ public static class DalamudFilterAutocompleteRenderer
             ImGui.OpenPopup($"##{id}FilterSuggestions");
         }
 
+        ImGui.SetNextWindowPos(suggestionAnchor, ImGuiCond.Always);
         ImGui.SetNextWindowSizeConstraints(new Vector2(Math.Max(280, width), 0), new Vector2(620, 300));
         if (ImGui.BeginPopup($"##{id}FilterSuggestions"))
         {

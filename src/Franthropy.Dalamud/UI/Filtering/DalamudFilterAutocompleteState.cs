@@ -7,6 +7,7 @@ public sealed class DalamudFilterAutocompleteState
     public string Expression { get; private set; } = string.Empty;
     public int CaretPosition { get; internal set; }
     public int SelectedIndex { get; private set; }
+    public bool IsEditingWithSuggestions { get; internal set; }
     internal int? PendingCaretPosition { get; private set; }
     internal bool FocusRequested { get; private set; }
 
