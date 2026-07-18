@@ -185,6 +185,26 @@ public sealed class DalamudRenderedUiTextActionDispatcher
     public unsafe RenderedUiTextActionResult TryActivateUniqueText(string addonName, string visibleText)
         => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: true, selectNearestLeft: false, doubleClickOnly: false);
 
+    /// <summary>
+    /// Proves a unique rendered target label, rolls over its registered UI target, and submits the
+    /// standard keyboard Confirm gesture to the game window. This does not move the physical cursor
+    /// or activate the window, and it never discovers or interacts with a game object directly.
+    /// </summary>
+    public unsafe RenderedUiTextActionResult TryConfirmUniqueText(string addonName, string visibleText)
+    {
+        var selected = TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true,
+            activateFromRollover: false, selectNearestLeft: false, doubleClickOnly: false);
+        if (!selected.Success)
+            return selected;
+        return PostConfirmKey()
+            ? new(true, "RenderedTextConfirmDispatched",
+                "The standard Confirm key was posted after proving the unique rendered target; the physical keyboard and window focus were unchanged.",
+                addonName, selected.TargetNodePath)
+            : Fail("RenderedTextConfirmRejected",
+                "The game window rejected the standard Confirm key after the rendered target was proven.",
+                addonName, selected.TargetNodePath);
+    }
+
     public unsafe RenderedUiTextActionResult TryClickUniqueControlImmediatelyLeftOfText(string addonName, string visibleText)
         => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false, activateFromRollover: false, selectNearestLeft: true, doubleClickOnly: false);
 
@@ -374,6 +394,16 @@ public sealed class DalamudRenderedUiTextActionDispatcher
                NativeMethods.PostMessage(window, NativeMethods.WmLeftButtonUp, nint.Zero, position);
     }
 
+    private static bool PostConfirmKey()
+    {
+        using var process = Process.GetCurrentProcess();
+        process.Refresh();
+        var window = process.MainWindowHandle;
+        return window != nint.Zero &&
+               NativeMethods.PostMessage(window, NativeMethods.WmKeyDown, (nint)NativeMethods.VkNumpad0, (nint)1) &&
+               NativeMethods.PostMessage(window, NativeMethods.WmKeyUp, (nint)NativeMethods.VkNumpad0, unchecked((nint)(int)0xC0000001));
+    }
+
     private static unsafe AtkUnitBase* FindVisibleLoadedAddon(string addonName)
     {
         var stage = AtkStage.Instance();
@@ -503,7 +533,10 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         internal const uint WmMouseMove = 0x0200;
         internal const uint WmLeftButtonDown = 0x0201;
         internal const uint WmLeftButtonUp = 0x0202;
+        internal const uint WmKeyDown = 0x0100;
+        internal const uint WmKeyUp = 0x0101;
         internal const uint MkLeftButton = 0x0001;
+        internal const uint VkNumpad0 = 0x60;
 
         [StructLayout(LayoutKind.Sequential)]
         internal struct Point
