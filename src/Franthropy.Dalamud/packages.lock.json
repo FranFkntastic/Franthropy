@@ -13,6 +13,9 @@
         "requested": "[9.0.0, )",
         "resolved": "9.0.0",
         "contentHash": "CJW+x/F6fmRQ7N6K8paasTw9PDZp4t7G76UjGNlSDgoHPF0h08vTzLYbLZpOLEJSg35d5wy2jCXGo84EN05DpQ=="
+      },
+      "franthropy.filtering": {
+        "type": "Project"
       }
     },
     "net8.0-windows7.0": {
@@ -21,6 +24,9 @@
         "requested": "[9.0.0, )",
         "resolved": "9.0.0",
         "contentHash": "CJW+x/F6fmRQ7N6K8paasTw9PDZp4t7G76UjGNlSDgoHPF0h08vTzLYbLZpOLEJSg35d5wy2jCXGo84EN05DpQ=="
+      },
+      "franthropy.filtering": {
+        "type": "Project"
       }
     }
   }
