@@ -68,6 +68,8 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             return Fail("InvalidRenderedTextAction", "Addon name and visible text are required.", addonName);
 
         var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
+        if (addon == null)
+            addon = FindVisibleLoadedAddon(addonName);
         if (addon == null || addon->RootNode == null || !addon->RootNode->IsVisible() || !addon->IsReady)
             return Fail("RenderedAddonUnavailable", $"The rendered {addonName} addon is unavailable.", addonName);
 
@@ -99,6 +101,23 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         return node->DispatchEvent(&evt)
             ? new(true, "RenderedTextClickDispatched", "The registered click event was dispatched to the rendered text component.", addonName, selection.TargetNodePath)
             : Fail("RenderedTextClickRejected", "The rendered text component rejected its registered click event.", addonName, selection.TargetNodePath);
+    }
+
+    private static unsafe AtkUnitBase* FindVisibleLoadedAddon(string addonName)
+    {
+        var stage = AtkStage.Instance();
+        var unitManager = stage == null ? null : (AtkUnitManager*)stage->RaptureAtkUnitManager;
+        if (unitManager == null)
+            return null;
+        var loaded = &unitManager->AllLoadedUnitsList;
+        for (var index = 0; index < loaded->Count; index++)
+        {
+            AtkUnitBase* candidate = loaded->Entries[index];
+            if (candidate != null && candidate->RootNode != null && candidate->RootNode->IsVisible() &&
+                string.Equals(candidate->NameString, addonName, StringComparison.Ordinal))
+                return candidate;
+        }
+        return null;
     }
 
     private static unsafe void CaptureManager(
