@@ -242,8 +242,15 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         if (window == nint.Zero)
             return false;
 
-        var x = Math.Clamp((int)MathF.Round((bounds.Pos1.X + bounds.Pos2.X) / 2), 0, ushort.MaxValue);
-        var y = Math.Clamp((int)MathF.Round((bounds.Pos1.Y + bounds.Pos2.Y) / 2), 0, ushort.MaxValue);
+        var point = new NativeMethods.Point
+        {
+            X = (int)MathF.Round((bounds.Pos1.X + bounds.Pos2.X) / 2),
+            Y = (int)MathF.Round((bounds.Pos1.Y + bounds.Pos2.Y) / 2),
+        };
+        if (!NativeMethods.ScreenToClient(window, ref point))
+            return false;
+        var x = Math.Clamp(point.X, 0, ushort.MaxValue);
+        var y = Math.Clamp(point.Y, 0, ushort.MaxValue);
         var position = (nint)((y << 16) | (x & 0xffff));
         return NativeMethods.PostMessage(window, NativeMethods.WmMouseMove, nint.Zero, position) &&
                NativeMethods.PostMessage(window, NativeMethods.WmLeftButtonDown, (nint)NativeMethods.MkLeftButton, position) &&
@@ -376,6 +383,17 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         internal const uint WmLeftButtonDown = 0x0201;
         internal const uint WmLeftButtonUp = 0x0202;
         internal const uint MkLeftButton = 0x0001;
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct Point
+        {
+            public int X;
+            public int Y;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool ScreenToClient(nint window, ref Point point);
 
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
