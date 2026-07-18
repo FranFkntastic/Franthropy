@@ -173,7 +173,7 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         if (row->ListItemIndex < 0)
             return Fail("RenderedListRowUnavailable", "The rendered list row has no selectable index.", addonName, selection.TargetNodePath);
         var list = (AtkComponentList*)listNode->Component;
-        list->SelectItem(row->ListItemIndex, false);
+        list->SelectItem(row->ListItemIndex, true);
         if (list->SelectedItemIndex != row->ListItemIndex)
             return Fail("RenderedListSelectionRejected", "The rendered list rejected the requested row selection.", addonName, selection.TargetNodePath);
         return new(true, "RenderedListRowSelected", $"The unique rendered list row at index {row->ListItemIndex} was selected through its owning UI list.", addonName, selection.TargetNodePath);
