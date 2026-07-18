@@ -12,6 +12,7 @@ public sealed record RenderedUiTextMatch(string NodePath, string ParentPath, int
 public enum RenderedUiClickDispatchMode
 {
     MouseClick,
+    MouseDoubleClick,
     MouseDownUp,
     MouseDown,
 }
@@ -125,26 +126,30 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         this.gameGui = gameGui ?? throw new ArgumentNullException(nameof(gameGui));
 
     public unsafe RenderedUiTextActionResult TryClickUniqueText(string addonName, string visibleText)
-        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false, activateFromRollover: false, selectNearestLeft: false);
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false, activateFromRollover: false, selectNearestLeft: false, doubleClickOnly: false);
+
+    public unsafe RenderedUiTextActionResult TryDoubleClickUniqueText(string addonName, string visibleText)
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false, activateFromRollover: false, selectNearestLeft: false, doubleClickOnly: true);
 
     public unsafe RenderedUiTextActionResult TryRollOverUniqueText(string addonName, string visibleText)
-        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: false, selectNearestLeft: false);
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: false, selectNearestLeft: false, doubleClickOnly: false);
 
     public unsafe RenderedUiTextActionResult TryActivateUniqueText(string addonName, string visibleText)
-        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: true, selectNearestLeft: false);
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: true, selectNearestLeft: false, doubleClickOnly: false);
 
     public unsafe RenderedUiTextActionResult TryClickUniqueControlImmediatelyLeftOfText(string addonName, string visibleText)
-        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false, activateFromRollover: false, selectNearestLeft: true);
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false, activateFromRollover: false, selectNearestLeft: true, doubleClickOnly: false);
 
     public unsafe RenderedUiTextActionResult TryActivateUniqueControlImmediatelyLeftOfText(string addonName, string visibleText)
-        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: true, selectNearestLeft: true);
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: true, selectNearestLeft: true, doubleClickOnly: false);
 
     private unsafe RenderedUiTextActionResult TryDispatchUniqueText(
         string addonName,
         string visibleText,
         bool rolloverOnly,
         bool activateFromRollover,
-        bool selectNearestLeft)
+        bool selectNearestLeft,
+        bool doubleClickOnly)
     {
         if (string.IsNullOrWhiteSpace(addonName) || addonName.Length > 64 ||
             string.IsNullOrWhiteSpace(visibleText) || visibleText.Length > 256)
@@ -158,7 +163,7 @@ public sealed class DalamudRenderedUiTextActionDispatcher
 
         var matches = new List<RenderedUiTextMatch>();
         var targets = new List<RenderedUiHitTarget>();
-        CaptureManager(&addon->UldManager, addonName, visibleText.Trim(), rolloverOnly, matches, targets, new HashSet<nint>());
+        CaptureManager(&addon->UldManager, addonName, visibleText.Trim(), rolloverOnly, doubleClickOnly, matches, targets, new HashSet<nint>());
         var selection = selectNearestLeft
             ? RenderedUiTextActionSelector.SelectNearestLeft(matches, targets)
             : RenderedUiTextActionSelector.Select(matches, targets);
@@ -187,6 +192,7 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             : selection.DispatchMode.Value switch
         {
             RenderedUiClickDispatchMode.MouseClick => Dispatch(addon, componentNode, node, AtkEventType.MouseClick),
+            RenderedUiClickDispatchMode.MouseDoubleClick => Dispatch(addon, componentNode, node, AtkEventType.MouseDoubleClick),
             RenderedUiClickDispatchMode.MouseDownUp =>
                 Dispatch(addon, componentNode, node, AtkEventType.MouseDown) && Dispatch(addon, componentNode, node, AtkEventType.MouseUp),
             RenderedUiClickDispatchMode.MouseDown => Dispatch(addon, componentNode, node, AtkEventType.MouseDown),
@@ -259,14 +265,17 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         if (componentNode != null && componentNode->Component != null &&
             componentNode->Component->GetComponentType() == ComponentType.ListItemRenderer)
         {
+            var listEventType = eventType == AtkEventType.MouseDoubleClick ? AtkEventType.ListItemDoubleClick : AtkEventType.ListItemClick;
             var listEvent = (AtkEvent*)componentNode->AtkResNode.AtkEventManager.Event;
-            while (listEvent != null && listEvent->State.EventType != AtkEventType.ListItemClick)
+            while (listEvent != null && listEvent->State.EventType != listEventType)
                 listEvent = listEvent->NextEvent;
             ClickHelper.ClickAddonComponent(
                 componentNode->Component,
                 componentNode,
                 listEvent != null ? listEvent->Param : registered->Param,
-                ECommons.Automation.UIInput.EventType.LIST_ITEM_CLICK);
+                eventType == AtkEventType.MouseDoubleClick
+                    ? ECommons.Automation.UIInput.EventType.LIST_ITEM_DOUBLE_CLICK
+                    : ECommons.Automation.UIInput.EventType.LIST_ITEM_CLICK);
             return true;
         }
         if (componentNode != null && componentNode->Component != null)
@@ -327,6 +336,7 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         string path,
         string visibleText,
         bool rolloverOnly,
+        bool doubleClickOnly,
         ICollection<RenderedUiTextMatch> matches,
         ICollection<RenderedUiHitTarget> targets,
         ISet<nint> visited)
@@ -342,9 +352,11 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             var parentPath = path;
             FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds;
             node->GetBounds(&bounds);
-            var dispatchMode = rolloverOnly && node->IsEventRegistered(AtkEventType.MouseOver)
+            var dispatchMode = doubleClickOnly && node->IsEventRegistered(AtkEventType.MouseDoubleClick)
+                ? RenderedUiClickDispatchMode.MouseDoubleClick
+                : rolloverOnly && node->IsEventRegistered(AtkEventType.MouseOver)
                 ? RenderedUiClickDispatchMode.MouseDown
-                : ResolveDispatchMode(node);
+                : doubleClickOnly ? null : ResolveDispatchMode(node);
             if (dispatchMode != null)
                 targets.Add(new(nodePath, parentPath, bounds.Pos1.X, bounds.Pos1.Y, bounds.Pos2.X, bounds.Pos2.Y, dispatchMode.Value));
 
@@ -354,7 +366,7 @@ public sealed class DalamudRenderedUiTextActionDispatcher
 
             var componentNode = node->GetAsAtkComponentNode();
             if (componentNode != null && componentNode->Component != null)
-                CaptureManager(&componentNode->Component->UldManager, nodePath, visibleText, rolloverOnly, matches, targets, visited);
+                CaptureManager(&componentNode->Component->UldManager, nodePath, visibleText, rolloverOnly, doubleClickOnly, matches, targets, visited);
         }
     }
 
@@ -372,6 +384,7 @@ public sealed class DalamudRenderedUiTextActionDispatcher
     private static unsafe bool Supports(AtkResNode* node, RenderedUiClickDispatchMode mode) => mode switch
     {
         RenderedUiClickDispatchMode.MouseClick => node->IsEventRegistered(AtkEventType.MouseClick),
+        RenderedUiClickDispatchMode.MouseDoubleClick => node->IsEventRegistered(AtkEventType.MouseDoubleClick),
         RenderedUiClickDispatchMode.MouseDownUp =>
             node->IsEventRegistered(AtkEventType.MouseDown) && node->IsEventRegistered(AtkEventType.MouseUp),
         RenderedUiClickDispatchMode.MouseDown => node->IsEventRegistered(AtkEventType.MouseDown),
