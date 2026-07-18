@@ -400,8 +400,8 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         process.Refresh();
         var window = process.MainWindowHandle;
         return window != nint.Zero &&
-               NativeMethods.PostMessage(window, NativeMethods.WmKeyDown, (nint)NativeMethods.VkNumpad0, (nint)1) &&
-               NativeMethods.PostMessage(window, NativeMethods.WmKeyUp, (nint)NativeMethods.VkNumpad0, unchecked((nint)(int)0xC0000001));
+               NativeMethods.PostMessage(window, NativeMethods.WmKeyDown, (nint)NativeMethods.VkNumpad0, (nint)0x00520001) &&
+               NativeMethods.PostMessage(window, NativeMethods.WmKeyUp, (nint)NativeMethods.VkNumpad0, unchecked((nint)(int)0xC0520001));
     }
 
     private static unsafe AtkUnitBase* FindVisibleLoadedAddon(string addonName)
