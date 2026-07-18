@@ -262,12 +262,10 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             var listEvent = (AtkEvent*)componentNode->AtkResNode.AtkEventManager.Event;
             while (listEvent != null && listEvent->State.EventType != AtkEventType.ListItemClick)
                 listEvent = listEvent->NextEvent;
-            if (listEvent == null)
-                return false;
             ClickHelper.ClickAddonComponent(
                 componentNode->Component,
                 componentNode,
-                listEvent->Param,
+                listEvent != null ? listEvent->Param : registered->Param,
                 ECommons.Automation.UIInput.EventType.LIST_ITEM_CLICK);
             return true;
         }
