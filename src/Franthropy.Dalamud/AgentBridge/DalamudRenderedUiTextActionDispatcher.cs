@@ -135,6 +135,9 @@ public sealed class DalamudRenderedUiTextActionDispatcher
     public unsafe RenderedUiTextActionResult TryClickUniqueControlImmediatelyLeftOfText(string addonName, string visibleText)
         => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false, activateFromRollover: false, selectNearestLeft: true);
 
+    public unsafe RenderedUiTextActionResult TryActivateUniqueControlImmediatelyLeftOfText(string addonName, string visibleText)
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: true, selectNearestLeft: true);
+
     private unsafe RenderedUiTextActionResult TryDispatchUniqueText(
         string addonName,
         string visibleText,
