@@ -177,10 +177,10 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             ? Dispatch(node, AtkEventType.MouseOver, bounds)
             : selection.DispatchMode.Value switch
         {
-            RenderedUiClickDispatchMode.MouseClick => Dispatch(node, AtkEventType.MouseClick, bounds),
+            RenderedUiClickDispatchMode.MouseClick => Dispatch(addon, node, AtkEventType.MouseClick),
             RenderedUiClickDispatchMode.MouseDownUp =>
-                Dispatch(node, AtkEventType.MouseDown, bounds) && Dispatch(node, AtkEventType.MouseUp, bounds),
-            RenderedUiClickDispatchMode.MouseDown => Dispatch(node, AtkEventType.MouseDown, bounds),
+                Dispatch(addon, node, AtkEventType.MouseDown) && Dispatch(addon, node, AtkEventType.MouseUp),
+            RenderedUiClickDispatchMode.MouseDown => Dispatch(addon, node, AtkEventType.MouseDown),
             _ => false,
         };
         if (dispatched && activateFromRollover)
@@ -231,6 +231,17 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         if (registered->Listener == null)
             return false;
         registered->Listener->ReceiveEvent(eventType, (int)registered->Param, registered, &data);
+        return true;
+    }
+
+    private static unsafe bool Dispatch(AtkUnitBase* addon, AtkResNode* node, AtkEventType eventType)
+    {
+        var registered = (AtkEvent*)node->AtkEventManager.Event;
+        while (registered != null && registered->State.EventType != eventType)
+            registered = registered->NextEvent;
+        if (registered == null)
+            return false;
+        addon->ReceiveEvent(eventType, (int)registered->Param, registered, null);
         return true;
     }
 
