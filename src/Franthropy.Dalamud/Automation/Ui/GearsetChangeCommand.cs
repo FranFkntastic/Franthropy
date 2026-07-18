@@ -13,6 +13,16 @@ public sealed record GearsetChangeCommand(
     string GearsetName,
     string Command)
 {
+    public static bool TryCreateSlot(
+        string? target,
+        [NotNullWhen(true)] out GearsetChangeCommand? command)
+    {
+        command = int.TryParse(target?.Trim(), out var slot) && slot is >= 1 and <= 100
+            ? new(target!, $"Gearset slot {slot}", slot.ToString(), $"/gearset change {slot}")
+            : null;
+        return command is not null;
+    }
+
     public static bool TryCreate(
         string? target,
         [NotNullWhen(true)] out GearsetChangeCommand? command)
