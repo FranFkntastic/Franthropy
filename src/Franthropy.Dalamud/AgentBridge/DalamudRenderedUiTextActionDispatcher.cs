@@ -173,11 +173,20 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         var node = FindNodeByPath(addon, addonName, selection.TargetNodePath);
         var componentSeparator = selection.TargetNodePath.LastIndexOf('/');
         AtkComponentNode* componentNode = null;
+        AtkComponentNode* parentComponentNode = null;
         if (componentSeparator > addonName.Length)
         {
-            var componentResNode = FindNodeByPath(addon, addonName, selection.TargetNodePath[..componentSeparator]);
+            var componentPath = selection.TargetNodePath[..componentSeparator];
+            var componentResNode = FindNodeByPath(addon, addonName, componentPath);
             if (componentResNode != null)
                 componentNode = componentResNode->GetAsAtkComponentNode();
+            var parentSeparator = componentPath.LastIndexOf('/');
+            if (parentSeparator > addonName.Length)
+            {
+                var parentResNode = FindNodeByPath(addon, addonName, componentPath[..parentSeparator]);
+                if (parentResNode != null)
+                    parentComponentNode = parentResNode->GetAsAtkComponentNode();
+            }
         }
         if (node == null || !IsEffectivelyVisible(node) ||
             (rolloverOnly
@@ -191,11 +200,11 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             ? Dispatch(node, AtkEventType.MouseOver, bounds)
             : selection.DispatchMode.Value switch
         {
-            RenderedUiClickDispatchMode.MouseClick => Dispatch(addon, componentNode, node, AtkEventType.MouseClick),
-            RenderedUiClickDispatchMode.MouseDoubleClick => Dispatch(addon, componentNode, node, AtkEventType.MouseDoubleClick),
+            RenderedUiClickDispatchMode.MouseClick => Dispatch(addon, componentNode, parentComponentNode, node, AtkEventType.MouseClick),
+            RenderedUiClickDispatchMode.MouseDoubleClick => Dispatch(addon, componentNode, parentComponentNode, node, AtkEventType.MouseDoubleClick),
             RenderedUiClickDispatchMode.MouseDownUp =>
-                Dispatch(addon, componentNode, node, AtkEventType.MouseDown) && Dispatch(addon, componentNode, node, AtkEventType.MouseUp),
-            RenderedUiClickDispatchMode.MouseDown => Dispatch(addon, componentNode, node, AtkEventType.MouseDown),
+                Dispatch(addon, componentNode, parentComponentNode, node, AtkEventType.MouseDown) && Dispatch(addon, componentNode, parentComponentNode, node, AtkEventType.MouseUp),
+            RenderedUiClickDispatchMode.MouseDown => Dispatch(addon, componentNode, parentComponentNode, node, AtkEventType.MouseDown),
             _ => false,
         };
         if (dispatched && activateFromRollover)
@@ -249,7 +258,7 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         return true;
     }
 
-    private static unsafe bool Dispatch(AtkUnitBase* addon, AtkComponentNode* componentNode, AtkResNode* node, AtkEventType eventType)
+    private static unsafe bool Dispatch(AtkUnitBase* addon, AtkComponentNode* componentNode, AtkComponentNode* parentComponentNode, AtkResNode* node, AtkEventType eventType)
     {
         var registered = (AtkEvent*)node->AtkEventManager.Event;
         while (registered != null && registered->State.EventType != eventType)
@@ -270,7 +279,10 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             while (listEvent != null && listEvent->State.EventType != listEventType)
                 listEvent = listEvent->NextEvent;
             ClickHelper.ClickAddonComponent(
-                componentNode->Component,
+                parentComponentNode != null && parentComponentNode->Component != null &&
+                parentComponentNode->Component->GetComponentType() == ComponentType.List
+                    ? parentComponentNode->Component
+                    : componentNode->Component,
                 componentNode,
                 listEvent != null ? listEvent->Param : registered->Param,
                 eventType == AtkEventType.MouseDoubleClick
