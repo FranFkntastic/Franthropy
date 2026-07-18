@@ -33,4 +33,15 @@ public sealed class DalamudFilterAutocompleteStateTests
         state.MoveSelection(1, 3);
         Assert.Equal(0, state.SelectedIndex);
     }
+
+    [Fact]
+    public void FocusRequestPreservesTheCurrentCaret()
+    {
+        var state = new DalamudFilterAutocompleteState();
+        state.SetExpression("is:h", 4);
+
+        state.RequestFocus();
+
+        Assert.Equal(4, state.CaretPosition);
+    }
 }

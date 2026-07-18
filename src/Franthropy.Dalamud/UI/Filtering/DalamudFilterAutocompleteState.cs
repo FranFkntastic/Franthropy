@@ -30,6 +30,12 @@ public sealed class DalamudFilterAutocompleteState
             SelectedIndex += itemCount;
     }
 
+    public void RequestFocus()
+    {
+        PendingCaretPosition = CaretPosition;
+        FocusRequested = true;
+    }
+
     public bool TryApply(IReadOnlyList<FilterCompletionItem> items)
     {
         ArgumentNullException.ThrowIfNull(items);
