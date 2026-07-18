@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Dalamud.Plugin.Services;
 using Dalamud.Utility;
+using ECommons.Automation.UIInput;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 
 namespace Franthropy.Dalamud.AgentBridge;
@@ -165,6 +166,14 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             return new(false, selection.Code, selection.Message, addonName, null);
 
         var node = FindNodeByPath(addon, addonName, selection.TargetNodePath);
+        var componentSeparator = selection.TargetNodePath.LastIndexOf('/');
+        AtkComponentNode* componentNode = null;
+        if (componentSeparator > addonName.Length)
+        {
+            var componentResNode = FindNodeByPath(addon, addonName, selection.TargetNodePath[..componentSeparator]);
+            if (componentResNode != null)
+                componentNode = componentResNode->GetAsAtkComponentNode();
+        }
         if (node == null || !IsEffectivelyVisible(node) ||
             (rolloverOnly
                 ? !node->IsEventRegistered(AtkEventType.MouseOver)
@@ -177,10 +186,10 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             ? Dispatch(node, AtkEventType.MouseOver, bounds)
             : selection.DispatchMode.Value switch
         {
-            RenderedUiClickDispatchMode.MouseClick => Dispatch(addon, node, AtkEventType.MouseClick),
+            RenderedUiClickDispatchMode.MouseClick => Dispatch(addon, componentNode, node, AtkEventType.MouseClick),
             RenderedUiClickDispatchMode.MouseDownUp =>
-                Dispatch(addon, node, AtkEventType.MouseDown) && Dispatch(addon, node, AtkEventType.MouseUp),
-            RenderedUiClickDispatchMode.MouseDown => Dispatch(addon, node, AtkEventType.MouseDown),
+                Dispatch(addon, componentNode, node, AtkEventType.MouseDown) && Dispatch(addon, componentNode, node, AtkEventType.MouseUp),
+            RenderedUiClickDispatchMode.MouseDown => Dispatch(addon, componentNode, node, AtkEventType.MouseDown),
             _ => false,
         };
         if (dispatched && activateFromRollover)
@@ -234,13 +243,19 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         return true;
     }
 
-    private static unsafe bool Dispatch(AtkUnitBase* addon, AtkResNode* node, AtkEventType eventType)
+    private static unsafe bool Dispatch(AtkUnitBase* addon, AtkComponentNode* componentNode, AtkResNode* node, AtkEventType eventType)
     {
         var registered = (AtkEvent*)node->AtkEventManager.Event;
         while (registered != null && registered->State.EventType != eventType)
             registered = registered->NextEvent;
         if (registered == null)
             return false;
+        if (componentNode != null && componentNode->Component != null &&
+            componentNode->Component->GetComponentType() == ComponentType.Button)
+        {
+            (*(AtkComponentButton*)componentNode->Component).ClickAddonButton(addon);
+            return true;
+        }
         addon->ReceiveEvent(eventType, (int)registered->Param, registered, null);
         return true;
     }
