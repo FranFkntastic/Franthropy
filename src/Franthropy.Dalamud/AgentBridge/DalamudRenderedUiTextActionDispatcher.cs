@@ -73,6 +73,34 @@ public static class RenderedUiTextActionSelector
         string.Equals(target.ParentPath, text.ParentPath, StringComparison.Ordinal) ||
         string.Equals(target.NodePath, text.ParentPath, StringComparison.Ordinal) ||
         text.ParentPath.StartsWith($"{target.NodePath}/", StringComparison.Ordinal);
+
+    public static RenderedUiTextActionSelection SelectNearestLeft(
+        IReadOnlyList<RenderedUiTextMatch> matches,
+        IReadOnlyList<RenderedUiHitTarget> hitTargets,
+        int maximumGap = 16)
+    {
+        ArgumentNullException.ThrowIfNull(matches);
+        ArgumentNullException.ThrowIfNull(hitTargets);
+        ArgumentOutOfRangeException.ThrowIfNegative(maximumGap);
+        var parents = matches.Select(value => value.ParentPath).Distinct(StringComparer.Ordinal).ToArray();
+        if (parents.Length == 0)
+            return RenderedUiTextActionSelection.Fail("RenderedTextNotFound", "The requested text is not currently rendered.");
+        if (parents.Length != 1)
+            return RenderedUiTextActionSelection.Fail("RenderedTextAmbiguous", "The requested text is rendered by more than one component.");
+
+        var text = matches.First(value => string.Equals(value.ParentPath, parents[0], StringComparison.Ordinal));
+        var target = hitTargets
+            .Where(value => string.Equals(value.ParentPath, text.ParentPath, StringComparison.Ordinal) &&
+                            value.Right <= text.Left && text.Left - value.Right <= maximumGap &&
+                            value.Top < text.Bottom && text.Top < value.Bottom)
+            .OrderBy(value => text.Left - value.Right)
+            .ThenBy(value => Math.Max(0, value.Right - value.Left) * Math.Max(0, value.Bottom - value.Top))
+            .ThenBy(value => value.NodePath, StringComparer.Ordinal)
+            .FirstOrDefault();
+        return target == null
+            ? RenderedUiTextActionSelection.Fail("RenderedAdjacentTargetNotFound", "The rendered text has no unique registered control immediately to its left.")
+            : new(true, "RenderedAdjacentTargetSelected", "A unique registered control is immediately left of the rendered text.", target.NodePath, target.DispatchMode);
+    }
 }
 
 /// <summary>
@@ -88,19 +116,23 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         this.gameGui = gameGui ?? throw new ArgumentNullException(nameof(gameGui));
 
     public unsafe RenderedUiTextActionResult TryClickUniqueText(string addonName, string visibleText)
-        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false, activateFromRollover: false);
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false, activateFromRollover: false, selectNearestLeft: false);
 
     public unsafe RenderedUiTextActionResult TryRollOverUniqueText(string addonName, string visibleText)
-        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: false);
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: false, selectNearestLeft: false);
 
     public unsafe RenderedUiTextActionResult TryActivateUniqueText(string addonName, string visibleText)
-        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: true);
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: true, selectNearestLeft: false);
+
+    public unsafe RenderedUiTextActionResult TryClickUniqueControlImmediatelyLeftOfText(string addonName, string visibleText)
+        => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false, activateFromRollover: false, selectNearestLeft: true);
 
     private unsafe RenderedUiTextActionResult TryDispatchUniqueText(
         string addonName,
         string visibleText,
         bool rolloverOnly,
-        bool activateFromRollover)
+        bool activateFromRollover,
+        bool selectNearestLeft)
     {
         if (string.IsNullOrWhiteSpace(addonName) || addonName.Length > 64 ||
             string.IsNullOrWhiteSpace(visibleText) || visibleText.Length > 256)
@@ -115,7 +147,9 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         var matches = new List<RenderedUiTextMatch>();
         var targets = new List<RenderedUiHitTarget>();
         CaptureManager(&addon->UldManager, addonName, visibleText.Trim(), rolloverOnly, matches, targets, new HashSet<nint>());
-        var selection = RenderedUiTextActionSelector.Select(matches, targets);
+        var selection = selectNearestLeft
+            ? RenderedUiTextActionSelector.SelectNearestLeft(matches, targets)
+            : RenderedUiTextActionSelector.Select(matches, targets);
         if (!selection.Success || selection.TargetNodePath == null || selection.DispatchMode == null)
             return new(false, selection.Code, selection.Message, addonName, null);
 

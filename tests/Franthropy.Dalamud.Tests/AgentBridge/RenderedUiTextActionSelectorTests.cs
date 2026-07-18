@@ -58,4 +58,30 @@ public sealed class RenderedUiTextActionSelectorTests
         Assert.Equal("Character/40", result.TargetNodePath);
         Assert.Equal(RenderedUiClickDispatchMode.MouseClick, result.DispatchMode);
     }
+
+    [Fact]
+    public void SelectNearestLeft_uses_bounded_adjacent_control_and_excludes_farther_icons()
+    {
+        var result = RenderedUiTextActionSelector.SelectNearestLeft(
+            [new("Character/15", "Character", 1452, 247, 1642, 262)],
+            [
+                new("Character/13/3", "Character", 1392, 251, 1420, 279, RenderedUiClickDispatchMode.MouseClick),
+                new("Character/14/3", "Character", 1422, 251, 1450, 279, RenderedUiClickDispatchMode.MouseDownUp),
+            ]);
+
+        Assert.True(result.Success);
+        Assert.Equal("Character/14/3", result.TargetNodePath);
+        Assert.Equal(RenderedUiClickDispatchMode.MouseDownUp, result.DispatchMode);
+    }
+
+    [Fact]
+    public void SelectNearestLeft_fails_closed_when_only_distant_controls_exist()
+    {
+        var result = RenderedUiTextActionSelector.SelectNearestLeft(
+            [new("Character/15", "Character", 1452, 247, 1642, 262)],
+            [new("Character/13/3", "Character", 1392, 251, 1420, 279, RenderedUiClickDispatchMode.MouseClick)]);
+
+        Assert.False(result.Success);
+        Assert.Equal("RenderedAdjacentTargetNotFound", result.Code);
+    }
 }
