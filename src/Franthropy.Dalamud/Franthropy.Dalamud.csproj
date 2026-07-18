@@ -82,7 +82,9 @@
     <Compile Remove="UI\Items\DalamudItemAutocompleteRenderer.cs" />
     <Compile Remove="UI\Filtering\DalamudFilterAutocompleteRenderer.cs" />
     <Compile Remove="AgentBridge\AgentBridgeUiReviewRegistryImGuiExtensions.cs" />
+    <Compile Remove="AgentBridge\DalamudRenderedUiTextActionDispatcher.cs" />
     <Compile Remove="UI\Plots\DalamudPlotRenderer.cs" />
+    <Compile Remove="Travel\DalamudLifestreamObjectInteractor.cs" />
   </ItemGroup>
 
 </Project>
