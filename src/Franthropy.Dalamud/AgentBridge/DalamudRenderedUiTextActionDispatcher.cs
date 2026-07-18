@@ -131,6 +131,51 @@ public sealed class DalamudRenderedUiTextActionDispatcher
     public unsafe RenderedUiTextActionResult TryDoubleClickUniqueText(string addonName, string visibleText)
         => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: false, activateFromRollover: false, selectNearestLeft: false, doubleClickOnly: true);
 
+    public unsafe RenderedUiTextActionResult TrySelectUniqueListRowText(string addonName, string visibleText)
+    {
+        if (string.IsNullOrWhiteSpace(addonName) || string.IsNullOrWhiteSpace(visibleText))
+            return Fail("InvalidRenderedTextAction", "Addon name and visible text are required.", addonName);
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
+        if (addon == null)
+            addon = FindVisibleLoadedAddon(addonName);
+        if (addon == null || addon->RootNode == null || !addon->RootNode->IsVisible() || !addon->IsReady)
+            return Fail("RenderedAddonUnavailable", $"The rendered {addonName} addon is unavailable.", addonName);
+
+        var matches = new List<RenderedUiTextMatch>();
+        var targets = new List<RenderedUiHitTarget>();
+        CaptureManager(&addon->UldManager, addonName, visibleText.Trim(), false, false, matches, targets, new HashSet<nint>());
+        var selection = RenderedUiTextActionSelector.Select(matches, targets);
+        if (!selection.Success || selection.TargetNodePath == null)
+            return new(false, selection.Code, selection.Message, addonName, null);
+
+        var rowSeparator = selection.TargetNodePath.LastIndexOf('/');
+        if (rowSeparator <= addonName.Length)
+            return Fail("RenderedListRowNotFound", "The rendered text is not inside a list row.", addonName, selection.TargetNodePath);
+        var rowPath = selection.TargetNodePath[..rowSeparator];
+        var listSeparator = rowPath.LastIndexOf('/');
+        if (listSeparator <= addonName.Length)
+            return Fail("RenderedListNotFound", "The rendered row has no owning list.", addonName, selection.TargetNodePath);
+
+        AtkComponentNode* rowNode = null;
+        AtkComponentNode* listNode = null;
+        var rowResNode = FindNodeByPath(addon, addonName, rowPath);
+        if (rowResNode != null)
+            rowNode = rowResNode->GetAsAtkComponentNode();
+        var listResNode = FindNodeByPath(addon, addonName, rowPath[..listSeparator]);
+        if (listResNode != null)
+            listNode = listResNode->GetAsAtkComponentNode();
+        if (rowNode == null || rowNode->Component == null ||
+            rowNode->Component->GetComponentType() != ComponentType.ListItemRenderer ||
+            listNode == null || listNode->Component == null || listNode->Component->GetComponentType() != ComponentType.List)
+            return Fail("RenderedListStructureChanged", "The rendered text no longer resolves to a standard list row.", addonName, selection.TargetNodePath);
+
+        var row = (AtkComponentListItemRenderer*)rowNode->Component;
+        if (row->ListItemIndex < 0)
+            return Fail("RenderedListRowUnavailable", "The rendered list row has no selectable index.", addonName, selection.TargetNodePath);
+        ((AtkComponentList*)listNode->Component)->SelectItem(row->ListItemIndex, true);
+        return new(true, "RenderedListRowSelected", "The unique rendered list row was selected through its owning UI list.", addonName, selection.TargetNodePath);
+    }
+
     public unsafe RenderedUiTextActionResult TryRollOverUniqueText(string addonName, string visibleText)
         => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: false, selectNearestLeft: false, doubleClickOnly: false);
 
