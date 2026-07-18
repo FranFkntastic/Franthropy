@@ -256,6 +256,15 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             (*(AtkComponentButton*)componentNode->Component).ClickAddonButton(addon);
             return true;
         }
+        if (componentNode != null && componentNode->Component != null)
+        {
+            ClickHelper.ClickAddonComponent(
+                componentNode->Component,
+                componentNode,
+                registered->Param,
+                ECommons.Automation.UIInput.EventType.CHANGE);
+            return true;
+        }
         addon->ReceiveEvent(eventType, (int)registered->Param, registered, null);
         return true;
     }
