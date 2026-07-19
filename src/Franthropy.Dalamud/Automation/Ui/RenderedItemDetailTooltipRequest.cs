@@ -22,9 +22,19 @@ public static unsafe class RenderedItemDetailTooltipRequest
     /// Returns false when the stage or node is unavailable; true only means the
     /// request was dispatched to the game's tooltip manager.
     /// </summary>
-    public static bool TryShowEquippedItemTooltip(ushort parentAddonId, AtkResNode* targetNode, short equippedContainerIndex)
+    public static bool TryShowEquippedItemTooltip(ushort parentAddonId, AtkResNode* targetNode, short equippedContainerIndex) =>
+        TryShowInventoryItemTooltip(parentAddonId, targetNode, InventoryType.EquippedItems, equippedContainerIndex);
+
+    /// <summary>
+    /// Asks the game to render its ItemDetail tooltip for the item in
+    /// <paramref name="inventoryType"/> slot <paramref name="slotIndex"/>, attached to
+    /// <paramref name="targetNode"/>. Returns false when the stage or node is unavailable
+    /// or the arguments are out of range; true only means the request was dispatched
+    /// to the game's tooltip manager.
+    /// </summary>
+    public static bool TryShowInventoryItemTooltip(ushort parentAddonId, AtkResNode* targetNode, InventoryType inventoryType, short slotIndex)
     {
-        if (targetNode == null || equippedContainerIndex is < 0 or > 13)
+        if (targetNode == null || slotIndex < 0)
             return false;
         var stage = AtkStage.Instance();
         if (stage == null)
@@ -32,10 +42,10 @@ public static unsafe class RenderedItemDetailTooltipRequest
 
         var args = stackalloc AtkTooltipManager.AtkTooltipArgs[1];
         args->Ctor();
-        args->ItemArgs.InventoryType = InventoryType.EquippedItems;
+        args->ItemArgs.InventoryType = inventoryType;
         args->ItemArgs.Flag1 = 0;
         args->ItemArgs.BuyQuantity = -1;
-        args->ItemArgs.Slot = equippedContainerIndex;
+        args->ItemArgs.Slot = slotIndex;
         args->ItemArgs.Kind = DetailKind.InventoryItem;
         stage->TooltipManager.ShowTooltip(AtkTooltipType.Item, parentAddonId, targetNode, args);
         return true;
