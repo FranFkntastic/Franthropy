@@ -3,6 +3,8 @@ using System.Runtime.InteropServices;
 using Dalamud.Plugin.Services;
 using Dalamud.Utility;
 using ECommons.Automation.UIInput;
+using FFXIVClientStructs.FFXIV.Client.System.Input;
+using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 
 namespace Franthropy.Dalamud.AgentBridge;
@@ -158,6 +160,7 @@ public static class RenderedUiTextActionSelector
 public sealed class DalamudRenderedUiTextActionDispatcher
 {
     private readonly IGameGui gameGui;
+    private string? virtualPointerTargetAddonName;
 
     public DalamudRenderedUiTextActionDispatcher(IGameGui gameGui) =>
         this.gameGui = gameGui ?? throw new ArgumentNullException(nameof(gameGui));
@@ -334,6 +337,118 @@ public sealed class DalamudRenderedUiTextActionDispatcher
 
     public unsafe RenderedUiTextActionResult TryRollOverUniqueText(string addonName, string visibleText)
         => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: false, selectNearestLeft: false, doubleClickOnly: false);
+
+    /// <summary>
+    /// Drives the game's ordinary UI collision pass to one exact rendered node without moving the
+    /// operating-system cursor. All touched cursor fields are restored before this method returns,
+    /// and every click, button, and wheel field is zero for the temporary collision pass.
+    /// </summary>
+    public unsafe RenderedUiTextActionResult TryDriveVirtualPointerNodePath(string addonName, string nodePath)
+    {
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
+        if (addon == null)
+            addon = FindVisibleLoadedAddon(addonName);
+        if (addon == null || addon->RootNode == null || !addon->RootNode->IsVisible() || !addon->IsReady)
+            return Fail("RenderedAddonUnavailable", $"The rendered {addonName} addon is unavailable.", addonName, nodePath);
+
+        var node = FindNodeByPath(addon, addonName, nodePath);
+        if (node == null || !IsEffectivelyVisible(node))
+            return Fail("RenderedNodePathChanged", "The exact rendered node path is no longer visible.", addonName, nodePath);
+
+        FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds;
+        node->GetBounds(&bounds);
+        if (!RenderedUiVirtualPointerPolicy.IsValidTarget(
+                addonName,
+                nodePath,
+                bounds.Pos1.X,
+                bounds.Pos1.Y,
+                bounds.Pos2.X,
+                bounds.Pos2.Y))
+            return Fail("RenderedNodeLayoutMismatch", "The rendered node has an invalid or changed collision layout.", addonName, nodePath);
+
+        var renderedX = (bounds.Pos1.X + bounds.Pos2.X) / 2;
+        var renderedY = (bounds.Pos1.Y + bounds.Pos2.Y) / 2;
+        var targetCollision = FindCollisionNode(node, renderedX, renderedY);
+        if (targetCollision == null)
+            return Fail("RenderedNodeCollisionLayoutMismatch", "The exact rendered node no longer contains a visible pointer collision target.", addonName, nodePath);
+
+        var stage = AtkStage.Instance();
+        var input = UIInputData.Instance();
+        var collisionFailure = ValidateCollisionPath(stage, input);
+        if (collisionFailure is not null)
+            return Fail(collisionFailure.Value.Code, collisionFailure.Value.Message, addonName, nodePath);
+
+        if (!RenderedUiVirtualPointerPolicy.TryConvertRenderedCoordinate(
+                renderedX,
+                stage->IsScreenSizeScaled,
+                stage->ScreenSizeScale,
+                out var x) ||
+            !RenderedUiVirtualPointerPolicy.TryConvertRenderedCoordinate(
+                renderedY,
+                stage->IsScreenSizeScaled,
+                stage->ScreenSizeScale,
+                out var y))
+            return Fail("RenderedUiScaleMismatch", "The game UI screen-scale layout is invalid or changed.", addonName, nodePath);
+        bool collided;
+        try
+        {
+            collided = DriveCollisionPass(stage, input, x, y, addon, targetCollision);
+        }
+        catch (Exception ex)
+        {
+            virtualPointerTargetAddonName = null;
+            return Fail("RenderedUiCollisionRejected", $"The game UI collision pass rejected the rendered node: {ex.Message}", addonName, nodePath);
+        }
+
+        if (!collided)
+        {
+            virtualPointerTargetAddonName = null;
+            var intersectingAddon = stage->AtkCollisionManager->IntersectingAddon;
+            var intersectingNode = stage->AtkCollisionManager->IntersectingCollisionNode;
+            var observed = intersectingAddon == null
+                ? "no addon"
+                : $"{intersectingAddon->NameString}/{(intersectingNode == null ? 0 : intersectingNode->AtkResNode.NodeId)}";
+            var unitScale = ((AtkUnitManager*)stage->RaptureAtkUnitManager)->LastScreenSizeScale;
+            return Fail("RenderedNodeNotIntersected",
+                $"The game UI collision pass resolved {observed}, not the exact rendered {addonName} node (stage scaled={stage->IsScreenSizeScaled}, stage scale={stage->ScreenSizeScale:0.###}, unit scale={unitScale:0.###}).",
+                addonName,
+                nodePath);
+        }
+
+        virtualPointerTargetAddonName = addonName;
+        return new(true, "RenderedNodeCollisionDriven",
+            "The game UI collision pass reached the exact rendered node with neutral pointer input; rendered output must still prove the result.",
+            addonName,
+            nodePath);
+    }
+
+    /// <summary>Clears an active virtual collision target without moving or clicking the OS cursor.</summary>
+    public unsafe RenderedUiTextActionResult TryReleaseVirtualPointer()
+    {
+        if (virtualPointerTargetAddonName is not { } addonName)
+            return Fail("RenderedVirtualPointerInactive", "No virtual rendered-node collision is active.", string.Empty);
+
+        var stage = AtkStage.Instance();
+        var input = UIInputData.Instance();
+        var collisionFailure = ValidateCollisionPath(stage, input);
+        if (collisionFailure is not null)
+            return Fail(collisionFailure.Value.Code, collisionFailure.Value.Message, addonName);
+
+        try
+        {
+            DriveCollisionPass(stage, input, -1, -1, null, null);
+            return new(true, "RenderedNodeCollisionReleased",
+                "The virtual rendered-node collision was released with neutral pointer input; all touched fields were restored.", addonName, null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("RenderedUiCollisionReleaseRejected", $"The game UI collision pass could not release the rendered node: {ex.Message}", addonName);
+        }
+        finally
+        {
+            virtualPointerTargetAddonName = null;
+        }
+    }
 
     public unsafe RenderedUiTextActionResult TryActivateUniqueText(string addonName, string visibleText)
         => TryDispatchUniqueText(addonName, visibleText, rolloverOnly: true, activateFromRollover: true, selectNearestLeft: false, doubleClickOnly: false);
@@ -532,9 +647,28 @@ public sealed class DalamudRenderedUiTextActionDispatcher
 
     private static bool PostPointerActivation(FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds)
     {
+        if (!TryGetPointerMessageTarget(bounds, out var window, out var position))
+            return false;
+        return NativeMethods.PostMessage(window, NativeMethods.WmMouseMove, nint.Zero, position) &&
+               NativeMethods.PostMessage(window, NativeMethods.WmLeftButtonDown, (nint)NativeMethods.MkLeftButton, position) &&
+               NativeMethods.PostMessage(window, NativeMethods.WmLeftButtonUp, nint.Zero, position);
+    }
+
+    private static bool PostPointerMove(FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds)
+    {
+        return TryGetPointerMessageTarget(bounds, out var window, out var position) &&
+               NativeMethods.PostMessage(window, NativeMethods.WmMouseMove, nint.Zero, position);
+    }
+
+    private static bool TryGetPointerMessageTarget(
+        FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds,
+        out nint window,
+        out nint position)
+    {
         using var process = Process.GetCurrentProcess();
         process.Refresh();
-        var window = process.MainWindowHandle;
+        window = process.MainWindowHandle;
+        position = nint.Zero;
         if (window == nint.Zero)
             return false;
 
@@ -547,10 +681,8 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             return false;
         var x = Math.Clamp(point.X, 0, ushort.MaxValue);
         var y = Math.Clamp(point.Y, 0, ushort.MaxValue);
-        var position = (nint)((y << 16) | (x & 0xffff));
-        return NativeMethods.PostMessage(window, NativeMethods.WmMouseMove, nint.Zero, position) &&
-               NativeMethods.PostMessage(window, NativeMethods.WmLeftButtonDown, (nint)NativeMethods.MkLeftButton, position) &&
-               NativeMethods.PostMessage(window, NativeMethods.WmLeftButtonUp, nint.Zero, position);
+        position = (nint)((y << 16) | (x & 0xffff));
+        return true;
     }
 
     private static bool PostConfirmKey()
@@ -708,6 +840,168 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             }
         }
         return node;
+    }
+
+    private static RenderedUiVirtualPointerInputState Capture(CursorInputData cursor) =>
+        new(
+            cursor.PositionX,
+            cursor.PositionY,
+            cursor.MouseWheel,
+            (int)cursor.MouseButtonHeldFlags,
+            (int)cursor.MouseButtonPressedFlags,
+            (int)cursor.MouseButtonReleasedFlags,
+            (int)cursor.MouseButtonHeldThrottledFlags,
+            cursor.DeltaX,
+            cursor.DeltaY,
+            cursor.IsGameWindowFocused);
+
+    private static unsafe bool DriveCollisionPass(
+        AtkStage* stage,
+        UIInputData* input,
+        int x,
+        int y,
+        AtkUnitBase* expectedAddon,
+        AtkCollisionNode* targetCollision)
+    {
+        var raptureAtkModule = RaptureAtkModule.Instance();
+        if (raptureAtkModule == null)
+            throw new InvalidOperationException("The RaptureAtkModule signature is unavailable.");
+
+        var snapshot = *input;
+        var temporary = snapshot;
+        Apply(&temporary.CursorInputs, RenderedUiVirtualPointerPolicy.CreateMove(Capture(snapshot.CursorInputs), x, y));
+        Apply(&temporary.UIFilteredCursorInputs, RenderedUiVirtualPointerPolicy.CreateMove(Capture(snapshot.UIFilteredCursorInputs), x, y));
+        temporary.GamepadInputs = default;
+        temporary.GamepadInputs2 = default;
+        temporary.KeyboardInputs = default;
+        temporary.CurrentGamepadModifier = default;
+        temporary.CurrentKeyModifier = default;
+        temporary.CurrentMouseDragButtons = 0;
+        temporary.GamepadInputs2ButtonsChanged = false;
+        temporary.CursorPositionsChanged = true;
+        temporary.KeyboardInputsChanged = false;
+        temporary.UIFilteredCursorInputsButtonsChanged = false;
+        temporary.GamepadInputsButtonsChanged = false;
+        var virtualCursor = temporary.CursorInputs;
+        var virtualFilteredCursor = temporary.UIFilteredCursorInputs;
+
+        return RenderedUiVirtualPointerPolicy.ExecuteValueRestored(
+            snapshot,
+            temporary,
+            state => *input = state,
+            () => RenderedUiVirtualPointerPolicy.ExecutePointerRestored(
+                (nint)stage->AtkCollisionManager->UIInputData,
+                (nint)stage->AtkCollisionManager->UIInputData,
+                pointer => stage->AtkCollisionManager->UIInputData = (UIInputData*)pointer,
+                () =>
+                {
+                    ((AtkModule*)raptureAtkModule)->HandleInput(input, false);
+                    if (expectedAddon == null)
+                        return true;
+                    if (stage->AtkCollisionManager->IntersectingAddon == expectedAddon &&
+                        stage->AtkCollisionManager->IntersectingCollisionNode == targetCollision)
+                        return true;
+
+                    var originalAddon = stage->AtkCollisionManager->IntersectingAddon;
+                    var originalNode = stage->AtkCollisionManager->IntersectingCollisionNode;
+                    var originalInput = stage->AtkCollisionManager->UIInputData;
+                    try
+                    {
+                        input->CursorInputs = virtualCursor;
+                        input->UIFilteredCursorInputs = virtualFilteredCursor;
+                        input->CursorPositionsChanged = true;
+                        input->UIFilteredCursorInputsButtonsChanged = false;
+                        stage->AtkCollisionManager->IntersectingAddon = expectedAddon;
+                        stage->AtkCollisionManager->IntersectingCollisionNode = targetCollision;
+                        stage->AtkCollisionManager->UIInputData = input;
+                        stage->AtkInputManager->HandleInput(
+                            (AtkUnitManager*)stage->RaptureAtkUnitManager,
+                            stage->AtkCollisionManager);
+                        return expectedAddon->CursorTarget == (AtkResNode*)targetCollision;
+                    }
+                    finally
+                    {
+                        stage->AtkCollisionManager->IntersectingAddon = originalAddon;
+                        stage->AtkCollisionManager->IntersectingCollisionNode = originalNode;
+                        stage->AtkCollisionManager->UIInputData = originalInput;
+                    }
+                }));
+    }
+
+    private static unsafe AtkCollisionNode* FindCollisionNode(AtkResNode* target, float x, float y)
+    {
+        AtkCollisionNode* best = null;
+        var bestArea = float.MaxValue;
+        FindCollisionNode(target, x, y, ref best, ref bestArea, 0);
+        return best;
+    }
+
+    private static unsafe void FindCollisionNode(
+        AtkResNode* node,
+        float x,
+        float y,
+        ref AtkCollisionNode* best,
+        ref float bestArea,
+        int depth)
+    {
+        if (node == null || depth > 8 || !IsEffectivelyVisible(node))
+            return;
+        var collision = node->GetAsAtkCollisionNode();
+        if (collision != null && (node->NodeFlags & NodeFlags.RespondToMouse) != 0)
+        {
+            FFXIVClientStructs.FFXIV.Common.Math.Bounds bounds;
+            node->GetBounds(&bounds);
+            if (RenderedUiVirtualPointerPolicy.ContainsPoint(
+                    bounds.Pos1.X, bounds.Pos1.Y, bounds.Pos2.X, bounds.Pos2.Y, x, y))
+            {
+                var area = (bounds.Pos2.X - bounds.Pos1.X) * (bounds.Pos2.Y - bounds.Pos1.Y);
+                if (area < bestArea)
+                {
+                    best = collision;
+                    bestArea = area;
+                }
+            }
+        }
+
+        var componentNode = node->GetAsAtkComponentNode();
+        if (componentNode == null || componentNode->Component == null)
+            return;
+        var manager = &componentNode->Component->UldManager;
+        if (manager->NodeList == null)
+            return;
+        for (var index = 0u; index < manager->NodeListCount; index++)
+            FindCollisionNode(manager->NodeList[index], x, y, ref best, ref bestArea, depth + 1);
+    }
+
+    private static unsafe (string Code, string Message)? ValidateCollisionPath(AtkStage* stage, UIInputData* input)
+    {
+        if (stage == null)
+            return ("RenderedUiStageUnavailable", "The game UI stage signature is unavailable.");
+        if (stage->AtkInputManager == null)
+            return ("RenderedUiInputManagerUnavailable", "The game UI input-manager layout is unavailable.");
+        if (stage->RaptureAtkUnitManager == null)
+            return ("RenderedUiUnitManagerUnavailable", "The game UI unit-manager layout is unavailable.");
+        if (stage->AtkCollisionManager == null)
+            return ("RenderedUiCollisionManagerUnavailable", "The game UI collision-manager layout is unavailable.");
+        if (input == null)
+            return ("RenderedUiInputUnavailable", "The game UI input-data signature is unavailable.");
+        if (stage->AtkCollisionManager->UIInputData != null && stage->AtkCollisionManager->UIInputData != input)
+            return ("RenderedUiCollisionInputChanged", "The game UI collision input source does not match the current UI input instance.");
+        return null;
+    }
+
+    private static unsafe void Apply(CursorInputData* cursor, RenderedUiVirtualPointerInputState state)
+    {
+        cursor->PositionX = state.PositionX;
+        cursor->PositionY = state.PositionY;
+        cursor->MouseWheel = state.MouseWheel;
+        cursor->MouseButtonHeldFlags = (MouseButtonFlags)state.MouseButtonHeldFlags;
+        cursor->MouseButtonPressedFlags = (MouseButtonFlags)state.MouseButtonPressedFlags;
+        cursor->MouseButtonReleasedFlags = (MouseButtonFlags)state.MouseButtonReleasedFlags;
+        cursor->MouseButtonHeldThrottledFlags = (MouseButtonFlags)state.MouseButtonHeldThrottledFlags;
+        cursor->DeltaX = state.DeltaX;
+        cursor->DeltaY = state.DeltaY;
+        cursor->IsGameWindowFocused = state.IsGameWindowFocused;
     }
 
     private static unsafe bool IsEffectivelyVisible(AtkResNode* node)
