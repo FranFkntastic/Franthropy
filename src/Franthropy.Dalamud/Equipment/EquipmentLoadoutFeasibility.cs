@@ -49,24 +49,40 @@ public sealed class EquipmentLoadoutFeasibilityEvaluator : IEquipmentLoadoutFeas
     public EquipmentLoadoutFeasibilityResult Evaluate(EquipmentLoadoutFeasibilityRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var violations = new List<EquipmentFeasibilityViolation>();
         var offers = request.Offers
             .GroupBy(value => value.AllocationKey)
             .ToDictionary(group => group.Key, group => group.First());
-        foreach (var duplicate in request.Candidate.Selections.GroupBy(selection => selection.Position).Where(group => group.Count() > 1))
+        return Evaluate(request.Candidate, offers, request.RequiredPositions);
+    }
+
+    /// <summary>
+    /// Validates against an immutable allocation book that the caller has already indexed.
+    /// This is equivalent to <see cref="Evaluate(EquipmentLoadoutFeasibilityRequest)"/> and
+    /// avoids rebuilding the same offer dictionary when many candidates share one request.
+    /// </summary>
+    public EquipmentLoadoutFeasibilityResult Evaluate(
+        EquipmentLoadoutCandidate candidate,
+        IReadOnlyDictionary<EquipmentOfferAllocationKey, EquipmentFeasibilityOffer> offers,
+        IReadOnlySet<EquipmentLoadoutPosition> requiredPositions)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        ArgumentNullException.ThrowIfNull(offers);
+        ArgumentNullException.ThrowIfNull(requiredPositions);
+        var violations = new List<EquipmentFeasibilityViolation>();
+        foreach (var duplicate in candidate.Selections.GroupBy(selection => selection.Position).Where(group => group.Count() > 1))
             violations.Add(new(EquipmentFeasibilityViolationKind.DuplicatePosition, $"Position {duplicate.Key} is allocated more than once.", duplicate.Key));
 
-        var selectedMainHand = request.Candidate.Selections.FirstOrDefault(selection => selection.Position == EquipmentLoadoutPosition.MainHand);
+        var selectedMainHand = candidate.Selections.FirstOrDefault(selection => selection.Position == EquipmentLoadoutPosition.MainHand);
         EquipmentFeasibilityOffer? selectedMainHandOffer = null;
         var mainHandOccupiesOffHand = selectedMainHand is not null &&
             offers.TryGetValue(selectedMainHand.AllocationKey, out selectedMainHandOffer) &&
             selectedMainHandOffer.Offer.Definition.OffHandOccupancy == -1;
-        foreach (var required in request.RequiredPositions
+        foreach (var required in requiredPositions
             .Where(position => position != EquipmentLoadoutPosition.OffHand || !mainHandOccupiesOffHand)
-            .Except(request.Candidate.Selections.Select(selection => selection.Position)))
+            .Except(candidate.Selections.Select(selection => selection.Position)))
             violations.Add(new(EquipmentFeasibilityViolationKind.MissingRequiredPosition, $"Required position {required} is unfilled.", required));
 
-        foreach (var selection in request.Candidate.Selections)
+        foreach (var selection in candidate.Selections)
         {
             if (selection.Quantity != 1)
             {
@@ -95,7 +111,7 @@ public sealed class EquipmentLoadoutFeasibilityEvaluator : IEquipmentLoadoutFeas
             }
         }
 
-        foreach (var allocation in request.Candidate.Selections.GroupBy(selection => selection.AllocationKey))
+        foreach (var allocation in candidate.Selections.GroupBy(selection => selection.AllocationKey))
         {
             if (!offers.TryGetValue(allocation.Key, out var available))
                 continue;
@@ -107,7 +123,7 @@ public sealed class EquipmentLoadoutFeasibilityEvaluator : IEquipmentLoadoutFeas
                     OfferKey: allocation.Key.OfferKey));
         }
 
-        foreach (var unique in request.Candidate.Selections
+        foreach (var unique in candidate.Selections
             .Where(selection => offers.TryGetValue(selection.AllocationKey, out var value) && value.Offer.Definition.IsUnique)
             .GroupBy(selection => selection.OfferKey.ItemId)
             .Where(group => group.Sum(selection => selection.Quantity) > 1))
@@ -117,7 +133,7 @@ public sealed class EquipmentLoadoutFeasibilityEvaluator : IEquipmentLoadoutFeas
 
         if (selectedMainHand is not null &&
             mainHandOccupiesOffHand &&
-            request.Candidate.Selections.Any(selection => selection.Position == EquipmentLoadoutPosition.OffHand))
+            candidate.Selections.Any(selection => selection.Position == EquipmentLoadoutPosition.OffHand))
         {
             violations.Add(new(
                 EquipmentFeasibilityViolationKind.HandOccupancyConflict,

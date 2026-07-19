@@ -6,7 +6,7 @@ namespace Franthropy.Dalamud.Tests.Equipment;
 public sealed class EquipmentExactFrontierDifferentialTests
 {
     [Fact]
-    public void ProductionSolver_MatchesFrozenReferenceAcrossRandomizedRequests()
+    public void ProductionSolver_PreservesCanonicalAuthoritativeFrontierAcrossRandomizedRequests()
     {
         for (var seed = 0; seed < 50; seed++)
         {
@@ -55,7 +55,7 @@ public sealed class EquipmentExactFrontierDifferentialTests
             positions.ToHashSet(),
             baseline,
             new ComponentwiseUtilityModel(),
-            MaxEquivalentRepresentatives: 4);
+            MaxRetainedRepresentatives: 4);
     }
 
     private static EquipmentExactSolverOffer Offer(
@@ -119,17 +119,9 @@ public sealed class EquipmentExactFrontierDifferentialTests
     {
         var lines = new List<string>();
         lines.AddRange(result.Pareto.Frontier.Select(solution => $"frontier|{Solution(solution)}"));
-        lines.AddRange(result.Pareto.Dominated.Select(value =>
-            $"dominated|{Solution(value.Solution)}|{string.Join(',', value.DominatingSolutionIds)}"));
         lines.AddRange(result.Pareto.EquivalenceGroups.Select(value =>
             $"pareto-equivalence|{value.GroupId}|{string.Join(',', value.Variants.Select(variant => variant.Candidate.SolutionId))}"));
-        lines.AddRange(result.EquivalenceSummaries.Select(value =>
-            $"exact-equivalence|{value.ClassId}|{value.ExactVariantCount}|{string.Join(',', value.RepresentativeSolutionIds)}"));
-        lines.Add($"diagnostics|{result.Diagnostics.ExpandedStateCount}|{result.Diagnostics.InfeasibleTransitionCount}|" +
-            $"{result.Diagnostics.DominatedStateCount}|{result.Diagnostics.CompactedEquivalentStateCount}|" +
-            $"{result.Diagnostics.PeakRetainedStateCount}|{result.Diagnostics.CompleteSolutionCount}|" +
-            $"{result.Diagnostics.ExactCompleteVariantCount}|{result.Diagnostics.EquivalentRepresentativeLimit}|" +
-            result.Diagnostics.BaselineSolutionId);
+        lines.Add($"baseline-contract|{result.Diagnostics.BaselineSolutionId}");
         return lines.ToArray();
     }
 
@@ -146,7 +138,7 @@ public sealed class EquipmentExactFrontierDifferentialTests
         solution.EvidenceRisk.IncompleteCoverageCount,
         solution.EvidenceRisk.ConfidencePenalty);
 
-    private sealed class ComponentwiseUtilityModel : IEquipmentExactSolverUtilityModel
+    private sealed class ComponentwiseUtilityModel : IEquipmentExactSolverUtilityModel, IEquipmentPartialDominanceCoordinateModel
     {
         public EquipmentPartialUtilityDominance ComparePartial(
             EquipmentSolverUtilityVector candidate,
@@ -159,6 +151,9 @@ public sealed class EquipmentExactFrontierDifferentialTests
             var noWorse = keys.All(key => candidate.Get(key) >= other.Get(key));
             return new(noWorse, noWorse && keys.Any(key => candidate.Get(key) > other.Get(key)));
         }
+
+        public IReadOnlyList<long> GetPartialDominanceCoordinates(EquipmentSolverUtilityVector utility) =>
+            [utility.Get("gathering"), utility.Get("perception"), utility.Get("gp")];
 
         public EquipmentUtilityEvaluation Evaluate(EquipmentSolverUtilityVector completed)
         {

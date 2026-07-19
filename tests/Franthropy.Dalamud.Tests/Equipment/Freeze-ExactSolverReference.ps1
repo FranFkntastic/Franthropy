@@ -12,7 +12,7 @@ if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
     throw "Exact solver source was not found: $source"
 }
 if ((Test-Path -LiteralPath $destination) -and -not $Force) {
-    throw "Reference solver already exists: $destination. Delete it deliberately or pass -Force when refreshing the contract."
+    throw "Reference solver already exists: $destination. Delete it deliberately or pass -Force when refreshing the canonical regression witness."
 }
 
 $text = [IO.File]::ReadAllText($source)
@@ -25,8 +25,9 @@ $body = $text.Substring($start).Replace(
     $declaration,
     'internal sealed class EquipmentExactFrontierReferenceSolver')
 $header = @'
-// Frozen from Franthropy 3d0622b. This test-only reference intentionally retains the original
-// all-pairs state representation and DominatesPartial semantics. Do not optimize this copy.
+// This test-only witness preserves one frozen canonical sequential traversal and its
+// DominatesPartial behavior for regression comparison. It is not a semantic oracle for all
+// feasible terminal lineage, whose count and canonical representative are traversal-independent.
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;

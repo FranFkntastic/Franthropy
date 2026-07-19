@@ -38,12 +38,13 @@ public sealed record EquipmentThresholdUtilityModelDefinition(
 /// A deliberately small threshold-aware utility model. Capability steps and bounded monotonic
 /// progress remain separately explainable; recommendation authority stays with the consumer.
 /// </summary>
-public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilityModel
+public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilityModel, IEquipmentPartialDominanceCoordinateModel, IEquipmentSeparablePartialUtilityCanonicalizationModel
 {
     private readonly EquipmentThresholdUtilityModelDefinition definition;
     private readonly EquipmentSolverUtilityVector baseline;
     private readonly EquipmentSolverUtilityVector fixedComponents;
     private readonly IReadOnlyDictionary<string, EquipmentUtilityComponentDefinition> components;
+    private readonly IReadOnlyDictionary<string, long> partialUtilityCeilings;
     private readonly ConditionalWeakTable<EquipmentSolverUtilityVector, NormalizedPartialUtility> partialUtilities = new();
     private readonly double scoreScale;
 
@@ -55,6 +56,17 @@ public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilit
         baseline = definition.Baseline.Normalize();
         fixedComponents = (definition.FixedComponents ?? EquipmentSolverUtilityVector.Empty).Normalize();
         components = definition.Components.ToDictionary(component => component.ComponentKey, StringComparer.Ordinal);
+        partialUtilityCeilings = definition.Components.ToDictionary(
+            component => component.ComponentKey,
+            component => Math.Max(
+                checked((long)Math.Ceiling(component.Divisor * component.MaximumContribution)),
+                definition.Capabilities
+                    .SelectMany(capability => capability.Requirements)
+                    .Where(requirement => string.Equals(requirement.ComponentKey, component.ComponentKey, StringComparison.Ordinal))
+                    .Select(requirement => requirement.Minimum)
+                    .DefaultIfEmpty(0)
+                    .Max()) - fixedComponents.Get(component.ComponentKey),
+            StringComparer.Ordinal);
         scoreScale = definition.RawScoreMaximum is { } rawMaximum
             ? definition.NormalizedScoreMaximum / rawMaximum
             : 1d;
@@ -73,25 +85,65 @@ public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilit
         var candidateValues = PartialUtility(candidate);
         var otherValues = PartialUtility(other);
 
-        var noWorse = definition.Components.All(component =>
-            candidateValues.Get(component.ComponentKey) >= otherValues.Get(component.ComponentKey));
-        var strictlyBetter = noWorse && definition.Components.Any(component =>
-            candidateValues.Get(component.ComponentKey) > otherValues.Get(component.ComponentKey));
-        return new(noWorse, strictlyBetter);
+        var strictlyBetter = false;
+        for (var index = 0; index < definition.Components.Count; index++)
+        {
+            var key = definition.Components[index].ComponentKey;
+            var candidateValue = candidateValues.Get(key);
+            var otherValue = otherValues.Get(key);
+            if (candidateValue < otherValue)
+                return new(false, false);
+            strictlyBetter |= candidateValue > otherValue;
+        }
+        return new(true, strictlyBetter);
     }
 
-    private NormalizedPartialUtility PartialUtility(EquipmentSolverUtilityVector utility) =>
-        partialUtilities.GetValue(utility, value =>
-        {
-            var normalized = value.Normalize();
-            ValidateVector(normalized);
-            return new(normalized.Components.ToDictionary(
-                component => component.Key,
-                component => component.Units,
-                StringComparer.Ordinal));
-        });
+    public EquipmentSolverUtilityVector CanonicalizePartialUtility(EquipmentSolverUtilityVector utility)
+    {
+        ArgumentNullException.ThrowIfNull(utility);
+        var normalized = utility.Normalize();
+        ValidateVector(normalized);
+        return new(normalized.Components
+            .Select(component => new EquipmentSolverUtilityComponent(
+                component.Key,
+                CanonicalizePartialUtilityComponent(component.Key, component.Units)))
+            .Where(component => component.Units > 0)
+            .ToArray());
+    }
 
-    private sealed record NormalizedPartialUtility(IReadOnlyDictionary<string, long> Values)
+    public long CanonicalizePartialUtilityComponent(string componentKey, long units)
+    {
+        if (!partialUtilityCeilings.TryGetValue(componentKey, out var ceiling))
+            throw new ArgumentException($"Utility vector contains undeclared component '{componentKey}'.", nameof(componentKey));
+        return Math.Min(units, Math.Max(0, ceiling));
+    }
+
+    public IReadOnlyList<long> GetPartialDominanceCoordinates(EquipmentSolverUtilityVector utility)
+    {
+        ArgumentNullException.ThrowIfNull(utility);
+        return PartialUtility(utility).Coordinates;
+    }
+
+    private NormalizedPartialUtility PartialUtility(EquipmentSolverUtilityVector utility)
+    {
+        if (partialUtilities.TryGetValue(utility, out var cached))
+            return cached;
+        var normalized = CanonicalizePartialUtility(utility);
+        ValidateVector(normalized);
+        var values = normalized.Components.ToDictionary(
+            component => component.Key,
+            component => component.Units,
+            StringComparer.Ordinal);
+        var created = new NormalizedPartialUtility(
+            values,
+            definition.Components.Select(component => values.GetValueOrDefault(component.ComponentKey)).ToArray());
+        partialUtilities.Add(utility, created);
+        return created;
+    }
+
+    private sealed record NormalizedPartialUtility(
+        IReadOnlyDictionary<string, long> Values,
+        IReadOnlyList<long> Coordinates)
     {
         public long Get(string key) => Values.GetValueOrDefault(key);
     }
@@ -99,9 +151,9 @@ public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilit
     public EquipmentUtilityEvaluation Evaluate(EquipmentSolverUtilityVector completed)
     {
         ArgumentNullException.ThrowIfNull(completed);
-        completed = completed.Normalize();
-        ValidateVector(completed);
-        completed = completed.Add(fixedComponents);
+        var partialCompleted = completed.Normalize();
+        ValidateVector(partialCompleted);
+        completed = partialCompleted.Add(fixedComponents);
         var comparisonBaseline = baseline.Add(fixedComponents);
 
         var rawStats = definition.Components
@@ -155,7 +207,9 @@ public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilit
             }
         }
 
-        var assessment = Assess(completed, comparisonBaseline);
+        var assessment = Assess(
+            CanonicalizePartialUtility(partialCompleted),
+            CanonicalizePartialUtility(baseline));
         var changedCapabilities = definition.Capabilities.Count(capability =>
             capability.Requirements.All(requirement => completed.Get(requirement.ComponentKey) >= requirement.Minimum) !=
             capability.Requirements.All(requirement => comparisonBaseline.Get(requirement.ComponentKey) >= requirement.Minimum));

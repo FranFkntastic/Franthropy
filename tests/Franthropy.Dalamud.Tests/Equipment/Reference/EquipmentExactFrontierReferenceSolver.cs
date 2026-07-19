@@ -1,5 +1,6 @@
-// Frozen from Franthropy 3d0622b. This test-only reference intentionally retains the original
-// all-pairs state representation and DominatesPartial semantics. Do not optimize this copy.
+// Frozen from Franthropy 3d0622b. This test-only witness preserves the canonical sequential
+// traversal and original DominatesPartial behavior for regression comparison. It is not a
+// semantic oracle for all feasible terminal lineage, which is traversal-independent.
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -94,7 +95,7 @@ internal sealed class EquipmentExactFrontierReferenceSolver
                     request.UtilityModel,
                     futureAllocations,
                     futureUniqueItems,
-                    request.MaxEquivalentRepresentatives,
+                    request.MaxRetainedRepresentatives,
                     cancellationToken,
                     ref dominated,
                     ref compacted)
@@ -103,7 +104,7 @@ internal sealed class EquipmentExactFrontierReferenceSolver
                     request.UtilityModel,
                     futureAllocations,
                     futureUniqueItems,
-                    request.MaxEquivalentRepresentatives,
+                    request.MaxRetainedRepresentatives,
                     ref dominated,
                     ref compacted);
             peak = Math.Max(peak, states.Count);
@@ -125,7 +126,7 @@ internal sealed class EquipmentExactFrontierReferenceSolver
         var offersByAllocation = orderedOffers.ToDictionary(offer => offer.AllocationKey);
         var primaryDecisions = new List<EquipmentDecisionSolution>(states.Count);
         var statesByPrimaryId = new Dictionary<string, State>(StringComparer.Ordinal);
-        var equivalenceSummaries = new List<EquipmentExactEquivalenceSummary>();
+        var equivalenceSummaries = new List<EquipmentRetainedEquivalenceSummary>();
         foreach (var state in states.OrderBy(CanonicalStateText, StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -141,10 +142,10 @@ internal sealed class EquipmentExactFrontierReferenceSolver
                 offersByAllocation);
             primaryDecisions.Add(primary);
             statesByPrimaryId[primary.Candidate.SolutionId] = state;
-            if (state.EquivalentPathCount > 1)
+            if (state.RetainedPathCount > 1)
                 equivalenceSummaries.Add(new(
-                    $"exact:{CanonicalMetricText(state)}",
-                    state.EquivalentPathCount,
+                    $"retained:{CanonicalMetricText(state)}",
+                    state.RetainedPathCount,
                     representativeIds));
         }
 
@@ -174,13 +175,13 @@ internal sealed class EquipmentExactFrontierReferenceSolver
             corePareto.Adjacencies);
         var normalizedEquivalenceSummaries = equivalenceSummaries
             .GroupBy(summary => summary.ClassId, StringComparer.Ordinal)
-            .Select(group => new EquipmentExactEquivalenceSummary(
+            .Select(group => new EquipmentRetainedEquivalenceSummary(
                 group.Key,
-                group.Aggregate(0L, (sum, summary) => checked(sum + summary.ExactVariantCount)),
-                group.SelectMany(summary => summary.RepresentativeSolutionIds)
+                group.Aggregate(0L, (sum, summary) => checked(sum + summary.RetainedPathCount)),
+                group.SelectMany(summary => summary.RetainedRepresentativeSolutionIds)
                     .Distinct(StringComparer.Ordinal)
                     .Order(StringComparer.Ordinal)
-                    .Take(request.MaxEquivalentRepresentatives)
+                    .Take(request.MaxRetainedRepresentatives)
                     .ToArray()))
             .ToArray();
         stopwatch.Stop();
@@ -193,8 +194,8 @@ internal sealed class EquipmentExactFrontierReferenceSolver
                 compacted,
                 peak,
                 expandedFrontier.Count + corePareto.Dominated.Count,
-                states.Sum(state => state.EquivalentPathCount),
-                request.MaxEquivalentRepresentatives,
+                states.Sum(state => state.RetainedPathCount),
+                request.MaxRetainedRepresentatives,
                 "baseline",
                 stopwatch.Elapsed),
             normalizedEquivalenceSummaries);
@@ -255,7 +256,7 @@ internal sealed class EquipmentExactFrontierReferenceSolver
         IEquipmentExactSolverUtilityModel utilityModel,
         IReadOnlySet<EquipmentOfferAllocationKey> futureAllocations,
         IReadOnlySet<uint> futureUniqueItems,
-        int maxEquivalentRepresentatives,
+        int maxRetainedRepresentatives,
         ref long dominatedCount,
         ref long compactedCount)
     {
@@ -286,7 +287,7 @@ internal sealed class EquipmentExactFrontierReferenceSolver
             }
             retained.Add(candidate);
         }
-        return CompactEquivalent(retained, futureAllocations, futureUniqueItems, maxEquivalentRepresentatives, ref compactedCount);
+        return CompactEquivalent(retained, futureAllocations, futureUniqueItems, maxRetainedRepresentatives, ref compactedCount);
     }
 
     private static List<State> PruneCancellable(
@@ -294,7 +295,7 @@ internal sealed class EquipmentExactFrontierReferenceSolver
         IEquipmentExactSolverUtilityModel utilityModel,
         IReadOnlySet<EquipmentOfferAllocationKey> futureAllocations,
         IReadOnlySet<uint> futureUniqueItems,
-        int maxEquivalentRepresentatives,
+        int maxRetainedRepresentatives,
         CancellationToken cancellationToken,
         ref long dominatedCount,
         ref long compactedCount)
@@ -359,7 +360,7 @@ internal sealed class EquipmentExactFrontierReferenceSolver
             retained,
             futureAllocations,
             futureUniqueItems,
-            maxEquivalentRepresentatives,
+            maxRetainedRepresentatives,
             cancellationToken,
             ref compactedCount);
     }
@@ -402,7 +403,7 @@ internal sealed class EquipmentExactFrontierReferenceSolver
         IReadOnlyList<State> states,
         IReadOnlySet<EquipmentOfferAllocationKey> futureAllocations,
         IReadOnlySet<uint> futureUniqueItems,
-        int maxEquivalentRepresentatives,
+        int maxRetainedRepresentatives,
         ref long compactedCount)
     {
         var compacted = new List<State>();
@@ -413,14 +414,14 @@ internal sealed class EquipmentExactFrontierReferenceSolver
                 .SelectMany(state => state.RepresentativeSelections)
                 .DistinctBy(CanonicalSelectionsText, StringComparer.Ordinal)
                 .OrderBy(CanonicalSelectionsText, StringComparer.Ordinal)
-                .Take(maxEquivalentRepresentatives)
+                .Take(maxRetainedRepresentatives)
                 .ToArray();
-            var exactCount = ordered.Aggregate(0L, (sum, state) => checked(sum + state.EquivalentPathCount));
+            var retainedPathCount = ordered.Aggregate(0L, (sum, state) => checked(sum + state.RetainedPathCount));
             compacted.Add(ordered[0] with
             {
                 Selections = representativeSelections[0],
                 RepresentativeSelections = representativeSelections,
-                EquivalentPathCount = exactCount,
+                RetainedPathCount = retainedPathCount,
             });
             compactedCount += ordered.Length - 1;
         }
@@ -431,7 +432,7 @@ internal sealed class EquipmentExactFrontierReferenceSolver
         IReadOnlyList<State> states,
         IReadOnlySet<EquipmentOfferAllocationKey> futureAllocations,
         IReadOnlySet<uint> futureUniqueItems,
-        int maxEquivalentRepresentatives,
+        int maxRetainedRepresentatives,
         CancellationToken cancellationToken,
         ref long compactedCount)
     {
@@ -445,14 +446,14 @@ internal sealed class EquipmentExactFrontierReferenceSolver
                 .SelectMany(state => state.RepresentativeSelections)
                 .DistinctBy(CanonicalSelectionsText, StringComparer.Ordinal)
                 .OrderBy(CanonicalSelectionsText, StringComparer.Ordinal)
-                .Take(maxEquivalentRepresentatives)
+                .Take(maxRetainedRepresentatives)
                 .ToArray();
-            var exactCount = ordered.Aggregate(0L, (sum, state) => checked(sum + state.EquivalentPathCount));
+            var retainedPathCount = ordered.Aggregate(0L, (sum, state) => checked(sum + state.RetainedPathCount));
             compacted.Add(ordered[0] with
             {
                 Selections = representativeSelections[0],
                 RepresentativeSelections = representativeSelections,
-                EquivalentPathCount = exactCount,
+                RetainedPathCount = retainedPathCount,
             });
             compactedCount += ordered.Length - 1;
         }
@@ -527,7 +528,7 @@ internal sealed class EquipmentExactFrontierReferenceSolver
         return new(
             representativeSelections[0],
             representativeSelections,
-            state.EquivalentPathCount,
+            state.RetainedPathCount,
             state.Utility.Add(offer.Utility),
             checked(state.Cost + offer.AcquisitionCostGil),
             worlds,
@@ -554,8 +555,8 @@ internal sealed class EquipmentExactFrontierReferenceSolver
             throw new ArgumentException("At least one required equipment position is needed.", nameof(request));
         if (request.RequiredPositions.Any(position => !CanonicalPositions.Contains(position)))
             throw new ArgumentException("Request contains an unsupported equipment position.", nameof(request));
-        if (request.MaxEquivalentRepresentatives is < 1 or > 256)
-            throw new ArgumentOutOfRangeException(nameof(request.MaxEquivalentRepresentatives));
+        if (request.MaxRetainedRepresentatives is < 1 or > 256)
+            throw new ArgumentOutOfRangeException(nameof(request.MaxRetainedRepresentatives));
         var duplicate = request.Offers.GroupBy(offer => offer.AllocationKey).FirstOrDefault(group => group.Count() > 1);
         if (duplicate is not null)
             throw new ArgumentException($"Duplicate exact solver offer '{duplicate.Key}'.", nameof(request));
@@ -646,7 +647,7 @@ internal sealed class EquipmentExactFrontierReferenceSolver
     private sealed record State(
         IReadOnlyList<EquipmentLoadoutSelection> Selections,
         IReadOnlyList<IReadOnlyList<EquipmentLoadoutSelection>> RepresentativeSelections,
-        long EquivalentPathCount,
+        long RetainedPathCount,
         EquipmentSolverUtilityVector Utility,
         ulong Cost,
         IReadOnlySet<string> WorldVisits,

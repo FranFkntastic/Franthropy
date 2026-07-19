@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text.Json;
 
 namespace Franthropy.Dalamud.Equipment;
@@ -255,26 +256,41 @@ public sealed class EquipmentParetoFrontierBuilder : IEquipmentParetoAdvisor
             .ThenByDescending(solution => solution.Utility.UtilityScore)
             .ThenBy(solution => solution.Candidate.SolutionId, StringComparer.Ordinal)
             .ToArray();
-        var duplicateId = ordered
-            .GroupBy(solution => solution.Candidate.SolutionId, StringComparer.Ordinal)
-            .FirstOrDefault(group => group.Count() > 1);
-        if (duplicateId is not null)
-            throw new ArgumentException($"Duplicate solution id '{duplicateId.Key}'.", nameof(solutions));
+        var solutionIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var solution in ordered)
+        {
+            if (!solutionIds.Add(solution.Candidate.SolutionId))
+                throw new ArgumentException($"Duplicate solution id '{solution.Candidate.SolutionId}'.", nameof(solutions));
+        }
 
         var frontier = new List<EquipmentDecisionSolution>();
         var dominated = new List<EquipmentDominatedSolution>();
-        foreach (var solution in ordered)
+        var witnessBuffer = ArrayPool<string>.Shared.Rent(Math.Max(1, ordered.Length));
+        var witnessCount = 0;
+        try
         {
-            var witnesses = ordered
-                .Where(candidate => !ReferenceEquals(candidate, solution))
-                .Where(candidate => EquipmentDecisionDominance.Dominates(candidate, solution))
-                .Select(candidate => candidate.Candidate.SolutionId)
-                .Order(StringComparer.Ordinal)
-                .ToArray();
-            if (witnesses.Length == 0)
-                frontier.Add(solution);
-            else
-                dominated.Add(new(solution, witnesses));
+            foreach (var solution in ordered)
+            {
+                witnessCount = 0;
+                foreach (var candidate in ordered)
+                {
+                    if (!ReferenceEquals(candidate, solution) && EquipmentDecisionDominance.Dominates(candidate, solution))
+                        witnessBuffer[witnessCount++] = candidate.Candidate.SolutionId;
+                }
+                if (witnessCount == 0)
+                    frontier.Add(solution);
+                else
+                {
+                    var witnesses = new string[witnessCount];
+                    Array.Copy(witnessBuffer, witnesses, witnessCount);
+                    Array.Sort(witnesses, StringComparer.Ordinal);
+                    dominated.Add(new(solution, witnesses));
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<string>.Shared.Return(witnessBuffer, clearArray: true);
         }
 
         var equivalence = BuildEquivalenceGroups(frontier);

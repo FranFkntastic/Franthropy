@@ -90,6 +90,27 @@ public sealed class EquipmentExactFrontierSolverTests
     }
 
     [Fact]
+    public void Solve_MainHandOccupancyRemainsAFutureResourceDuringPartialDominance()
+    {
+        var baselineSword = Offer(EquipmentLoadoutPosition.MainHand, 300, 1, 0, source: EquipmentAcquisitionSourceKind.Owned);
+        var baselineShield = Offer(EquipmentLoadoutPosition.OffHand, 301, 1, 0, source: EquipmentAcquisitionSourceKind.Owned);
+        var oneHanded = Offer(EquipmentLoadoutPosition.MainHand, 302, 10, 100);
+        var twoHanded = Offer(EquipmentLoadoutPosition.MainHand, 303, 50, 100, twoHanded: true);
+        var powerfulShield = Offer(EquipmentLoadoutPosition.OffHand, 304, 100, 100);
+
+        var result = Solve(
+            [baselineSword, baselineShield, oneHanded, twoHanded, powerfulShield],
+            [EquipmentLoadoutPosition.MainHand, EquipmentLoadoutPosition.OffHand],
+            Baseline(
+                (EquipmentLoadoutPosition.MainHand, baselineSword),
+                (EquipmentLoadoutPosition.OffHand, baselineShield)));
+
+        Assert.Contains(All(result), solution =>
+            solution.Candidate.Selections.Any(selection => selection.OfferKey.ItemId == oneHanded.Offer.Definition.ItemId) &&
+            solution.Candidate.Selections.Any(selection => selection.OfferKey.ItemId == powerfulShield.Offer.Definition.ItemId));
+    }
+
+    [Fact]
     public void Solve_IsDeterministicAcrossOfferOrdering()
     {
         var baselineHead = Offer(EquipmentLoadoutPosition.Head, 100, 10, 0, source: EquipmentAcquisitionSourceKind.Owned);
@@ -113,7 +134,7 @@ public sealed class EquipmentExactFrontierSolverTests
     }
 
     [Fact]
-    public void Solve_ReportsExactRetainedStateProgressAfterEachPosition()
+    public void Solve_ReportsBoundedPruningAndRetainedStateProgressAfterEachPosition()
     {
         var head = Offer(EquipmentLoadoutPosition.Head, 100, 10, 0, source: EquipmentAcquisitionSourceKind.Owned);
         var body = Offer(EquipmentLoadoutPosition.Body, 200, 10, 0, source: EquipmentAcquisitionSourceKind.Owned);
@@ -129,10 +150,21 @@ public sealed class EquipmentExactFrontierSolverTests
 
         Assert.Collection(
             progress,
-            first => Assert.Equal((1, 2, EquipmentLoadoutPosition.Head),
-                (first.CompletedPositionCount, first.TotalPositionCount, first.Position)),
-            second => Assert.Equal((2, 2, EquipmentLoadoutPosition.Body),
-                (second.CompletedPositionCount, second.TotalPositionCount, second.Position)));
+            reduction => Assert.Equal(("OfferReduction", 2, 2, 2),
+                (reduction.Phase, reduction.InputOfferCount, reduction.RetainedOfferChoiceCount, reduction.RetainedOfferVariantCount)),
+            headPruning => Assert.Equal((0, 2, EquipmentLoadoutPosition.Head, "Pruning"),
+                (headPruning.CompletedPositionCount, headPruning.TotalPositionCount, headPruning.Position, headPruning.Phase)),
+            headComplete => Assert.Equal((1, 2, EquipmentLoadoutPosition.Head, "PositionComplete"),
+                (headComplete.CompletedPositionCount, headComplete.TotalPositionCount, headComplete.Position, headComplete.Phase)),
+            bodyPruning => Assert.Equal((1, 2, EquipmentLoadoutPosition.Body, "Pruning"),
+                (bodyPruning.CompletedPositionCount, bodyPruning.TotalPositionCount, bodyPruning.Position, bodyPruning.Phase)),
+            bodyComplete => Assert.Equal((2, 2, EquipmentLoadoutPosition.Body, "PositionComplete"),
+                (bodyComplete.CompletedPositionCount, bodyComplete.TotalPositionCount, bodyComplete.Position, bodyComplete.Phase)),
+            representatives => Assert.Equal("RepresentativesMaterialized", representatives.Phase),
+            primary => Assert.Equal("PrimaryMaterialized", primary.Phase),
+            pareto => Assert.Equal("ParetoBuilt", pareto.Phase),
+            frontier => Assert.Equal("FrontierMaterialized", frontier.Phase),
+            finalized => Assert.Equal("Finalized", finalized.Phase));
         Assert.Equal(result.Diagnostics.PeakRetainedStateCount, progress.Max(value => value.RetainedStateCount));
         Assert.Equal(result.Diagnostics.ExpandedStateCount, progress[^1].ExpandedStateCount);
     }
@@ -190,6 +222,111 @@ public sealed class EquipmentExactFrontierSolverTests
         Assert.Equal(
             without.Pareto.Frontier.Select(Metric).Order().ToArray(),
             with.Pareto.Frontier.Select(Metric).Order().ToArray());
+        Assert.Equal(3, with.Diagnostics.InputOfferCount);
+        Assert.Equal(2, with.Diagnostics.RetainedOfferChoiceCount);
+    }
+
+    [Fact]
+    public void Solve_BaseAndAcquisitionProofPrunesHigherLevelStatDominatedGearOnlyWhenEnvelopeIsNoWorse()
+    {
+        var baseline = Offer(EquipmentLoadoutPosition.Head, 100, 10, 0, source: EquipmentAcquisitionSourceKind.Owned, itemLevel: 10);
+        var lower = Offer(EquipmentLoadoutPosition.Head, 101, 20, 1_000, itemLevel: 30);
+        var higher = Offer(EquipmentLoadoutPosition.Head, 102, 30, 1_000, itemLevel: 40);
+
+        var result = Solve([lower, baseline, higher], [EquipmentLoadoutPosition.Head], Baseline((EquipmentLoadoutPosition.Head, baseline)));
+
+        Assert.Equal(2, result.Diagnostics.RetainedOfferChoiceCount);
+        Assert.DoesNotContain(All(result), solution => solution.Candidate.Selections.Any(selection => selection.OfferKey.ItemId == lower.Offer.Definition.ItemId));
+        Assert.Contains(All(result), solution => solution.Candidate.Selections.Any(selection => selection.OfferKey.ItemId == higher.Offer.Definition.ItemId));
+    }
+
+    [Fact]
+    public void Solve_CheaperLowerLevelGearRemainsACostUtilityParetoNeighbor()
+    {
+        var baseline = Offer(EquipmentLoadoutPosition.Head, 100, 10, 0, source: EquipmentAcquisitionSourceKind.Owned, itemLevel: 10);
+        var cheaperLower = Offer(EquipmentLoadoutPosition.Head, 101, 20, 500, itemLevel: 30);
+        var stronger = Offer(EquipmentLoadoutPosition.Head, 102, 30, 1_000, itemLevel: 40);
+
+        var result = Solve([baseline, stronger, cheaperLower], [EquipmentLoadoutPosition.Head], Baseline((EquipmentLoadoutPosition.Head, baseline)));
+
+        Assert.Equal(3, result.Diagnostics.RetainedOfferChoiceCount);
+        Assert.Contains(result.Pareto.Frontier, solution => solution.AcquisitionCostGil == 500 && solution.Utility.UtilityScore == 20);
+        Assert.Contains(result.Pareto.Frontier, solution => solution.AcquisitionCostGil == 1_000 && solution.Utility.UtilityScore == 30);
+    }
+
+    [Fact]
+    public void Solve_HybridStatTradeoffsRemainRegardlessOfItemLevelOrdering()
+    {
+        var baseline = OfferVector(EquipmentLoadoutPosition.Head, 100, 0, 10, ("gathering", 10), ("perception", 10));
+        var highItemLevelGathering = OfferVector(EquipmentLoadoutPosition.Head, 101, 1_000, 80, ("gathering", 30), ("perception", 10));
+        var lowerItemLevelHybrid = OfferVector(EquipmentLoadoutPosition.Head, 102, 1_000, 70, ("gathering", 20), ("perception", 20));
+        var request = new EquipmentExactFrontierRequest(
+            [baseline, highItemLevelGathering, lowerItemLevelHybrid],
+            new HashSet<EquipmentLoadoutPosition> { EquipmentLoadoutPosition.Head },
+            Baseline((EquipmentLoadoutPosition.Head, baseline)),
+            new VectorUtilityModel());
+
+        var result = new EquipmentExactFrontierSolver().Solve(request);
+
+        Assert.Equal(3, result.Diagnostics.RetainedOfferChoiceCount);
+        Assert.Contains(result.Pareto.Frontier, solution => solution.Candidate.Selections.Any(selection => selection.OfferKey.ItemId == 101));
+        Assert.Contains(result.Pareto.Frontier, solution => solution.Candidate.Selections.Any(selection => selection.OfferKey.ItemId == 102));
+    }
+
+    [Fact]
+    public void Solve_ZeroCostEquippedBaselineRemovesPaidPerSlotRegression()
+    {
+        var baseline = OfferVector(EquipmentLoadoutPosition.Head, 100, 0, 20, ("gathering", 20), ("perception", 20));
+        var paidRegression = OfferVector(EquipmentLoadoutPosition.Head, 101, 500, 90, ("gathering", 20), ("perception", 15));
+        var request = new EquipmentExactFrontierRequest(
+            [paidRegression, baseline],
+            new HashSet<EquipmentLoadoutPosition> { EquipmentLoadoutPosition.Head },
+            Baseline((EquipmentLoadoutPosition.Head, baseline)),
+            new VectorUtilityModel());
+
+        var result = new EquipmentExactFrontierSolver().Solve(request);
+
+        Assert.Equal(1, result.Diagnostics.RetainedOfferChoiceCount);
+        Assert.Equal("baseline", Assert.Single(result.Pareto.Frontier).Candidate.SolutionId);
+        Assert.DoesNotContain(All(result), solution => solution.Candidate.Selections.Any(selection => selection.OfferKey.ItemId == 101));
+    }
+
+    [Fact]
+    public void Solve_ProvenUtilitySaturationMatchesBruteForceAndRetainsEquivalentExactLineage()
+    {
+        var baseline = OfferVector(EquipmentLoadoutPosition.Head, 100, 0, 10, ("gathering", 50));
+        var firstOvershoot = OfferVector(EquipmentLoadoutPosition.Head, 101, 500, 50, ("gathering", 150));
+        var secondOvershoot = OfferVector(EquipmentLoadoutPosition.Head, 102, 500, 60, ("gathering", 250));
+        var expensiveOvershoot = OfferVector(EquipmentLoadoutPosition.Head, 103, 800, 70, ("gathering", 300));
+        var offers = new[] { expensiveOvershoot, secondOvershoot, baseline, firstOvershoot };
+        var model = SaturatingUtilityModel();
+        var result = new EquipmentExactFrontierSolver().Solve(new(
+            offers,
+            new HashSet<EquipmentLoadoutPosition> { EquipmentLoadoutPosition.Head },
+            Baseline((EquipmentLoadoutPosition.Head, baseline)),
+            model));
+        var brute = offers
+            .Select(offer => (offer.AcquisitionCostGil, model.Evaluate(offer.Utility).UtilityScore, offer.PurchaseTransactions))
+            .Where(candidate => !offers.Select(offer =>
+                (offer.AcquisitionCostGil, model.Evaluate(offer.Utility).UtilityScore, offer.PurchaseTransactions))
+                .Any(other => other.AcquisitionCostGil <= candidate.AcquisitionCostGil &&
+                    other.UtilityScore >= candidate.UtilityScore &&
+                    other.PurchaseTransactions <= candidate.PurchaseTransactions &&
+                    (other.AcquisitionCostGil < candidate.AcquisitionCostGil ||
+                     other.UtilityScore > candidate.UtilityScore ||
+                     other.PurchaseTransactions < candidate.PurchaseTransactions)))
+            .Distinct()
+            .Order()
+            .ToArray();
+
+        Assert.Equal(brute, result.Pareto.Frontier.Select(solution =>
+            (solution.AcquisitionCostGil, solution.Utility.UtilityScore, solution.Burden.PurchaseTransactions))
+            .Distinct()
+            .Order()
+            .ToArray());
+        Assert.Equal(2, result.Diagnostics.RetainedOfferChoiceCount);
+        Assert.Equal(3, result.Diagnostics.RetainedOfferVariantCount);
+        Assert.Equal(2, Assert.Single(result.Pareto.EquivalenceGroups).Variants.Count);
     }
 
     [Fact]
@@ -206,7 +343,7 @@ public sealed class EquipmentExactFrontierSolverTests
     }
 
     [Fact]
-    public void Solve_ReportsRepresentativeTruncationWithoutChangingExactVariantCount()
+    public void Solve_ReportsRepresentativeTruncationWithoutChangingRetainedPathCount()
     {
         var baseline = Offer(EquipmentLoadoutPosition.Head, 100, 10, 0, source: EquipmentAcquisitionSourceKind.Owned);
         var nq = Offer(EquipmentLoadoutPosition.Head, 101, 20, 1_000, EquipmentQuality.Normal, observationId: "nq");
@@ -216,12 +353,12 @@ public sealed class EquipmentExactFrontierSolverTests
             [baseline, nq, hq],
             [EquipmentLoadoutPosition.Head],
             Baseline((EquipmentLoadoutPosition.Head, baseline)),
-            maxEquivalentRepresentatives: 1);
+            maxRetainedRepresentatives: 1);
 
-        var summary = Assert.Single(result.EquivalenceSummaries, value => value.ExactVariantCount == 2);
-        Assert.True(summary.RepresentativesTruncated);
-        Assert.Single(summary.RepresentativeSolutionIds);
-        Assert.Equal(1, result.Diagnostics.EquivalentRepresentativeLimit);
+        var summary = Assert.Single(result.RetainedEquivalenceSummaries, value => value.RetainedPathCount == 2);
+        Assert.True(summary.RetainedRepresentativesTruncated);
+        Assert.Single(summary.RetainedRepresentativeSolutionIds);
+        Assert.Equal(1, result.Diagnostics.RetainedRepresentativeLimit);
     }
 
     [Fact]
@@ -291,29 +428,29 @@ public sealed class EquipmentExactFrontierSolverTests
         }
         var stopwatch = Stopwatch.StartNew();
 
-        var result = Solve(offers, positions, baseline, maxEquivalentRepresentatives: 4);
+        var result = Solve(offers, positions, baseline, maxRetainedRepresentatives: 4);
 
         stopwatch.Stop();
         Assert.True(
             stopwatch.Elapsed < TimeSpan.FromMilliseconds(budgetMilliseconds),
-            $"{scenario} took {stopwatch.Elapsed}; peak={result.Diagnostics.PeakRetainedStateCount}, representatives={result.Diagnostics.CompleteSolutionCount}, exact={result.Diagnostics.ExactCompleteVariantCount}, dominated={result.Diagnostics.DominatedStateCount}, compacted={result.Diagnostics.CompactedEquivalentStateCount}.");
+            $"{scenario} took {stopwatch.Elapsed}; peak={result.Diagnostics.PeakRetainedStateCount}, representatives={result.Diagnostics.CompleteSolutionCount}, retainedPaths={result.Diagnostics.RetainedCompletePathCount}, dominated={result.Diagnostics.DominatedStateCount}, compacted={result.Diagnostics.CompactedEquivalentStateCount}.");
         Assert.True(result.Diagnostics.PeakRetainedStateCount < 50_000);
         Assert.True(result.Diagnostics.DominatedStateCount > 0);
-        Assert.True(result.Diagnostics.ExactCompleteVariantCount >= result.Diagnostics.CompleteSolutionCount);
-        Assert.Contains(result.EquivalenceSummaries, summary => summary.RepresentativesTruncated);
+        Assert.True(result.Diagnostics.RetainedCompletePathCount >= result.Diagnostics.CompleteSolutionCount);
+        Assert.Contains(result.RetainedEquivalenceSummaries, summary => summary.RetainedRepresentativesTruncated);
     }
 
     private static EquipmentExactFrontierResult Solve(
         IReadOnlyList<EquipmentExactSolverOffer> offers,
         IEnumerable<EquipmentLoadoutPosition> positions,
         IReadOnlyDictionary<EquipmentLoadoutPosition, EquipmentOfferAllocationKey?> baseline,
-        int maxEquivalentRepresentatives = 16) =>
+        int maxRetainedRepresentatives = 16) =>
         new EquipmentExactFrontierSolver().Solve(new(
             offers,
             positions.ToHashSet(),
             baseline,
             UtilityModel,
-            maxEquivalentRepresentatives));
+            maxRetainedRepresentatives));
 
     private static EquipmentExactSolverOffer Offer(
         EquipmentLoadoutPosition position,
@@ -329,14 +466,15 @@ public sealed class EquipmentExactFrontierSolverTests
         bool twoHanded = false,
         EquipmentSlot? definitionSlot = null,
         string? world = null,
-        EquipmentEvidenceRisk? risk = null)
+        EquipmentEvidenceRisk? risk = null,
+        uint? itemLevel = null)
     {
         var slot = definitionSlot ?? Slot(position);
         var definition = new EquipmentItemDefinition(
             itemId,
             $"Item {itemId}",
             1,
-            (uint)Math.Max(1, utility),
+            itemLevel ?? (uint)Math.Max(1, utility),
             slot,
             new HashSet<uint> { 19 },
             1,
@@ -372,6 +510,41 @@ public sealed class EquipmentExactFrontierSolverTests
             risk ?? new(0, 0, 0),
             [quality.ToString(), source.ToString()]);
     }
+
+    private static EquipmentExactSolverOffer OfferVector(
+        EquipmentLoadoutPosition position,
+        uint itemId,
+        ulong cost,
+        uint itemLevel,
+        params (string Key, long Units)[] utility)
+    {
+        var offer = Offer(
+            position,
+            itemId,
+            utility.Sum(value => value.Units),
+            cost,
+            source: cost == 0 ? EquipmentAcquisitionSourceKind.Owned : EquipmentAcquisitionSourceKind.MarketBoard,
+            itemLevel: itemLevel);
+        return offer with
+        {
+            Utility = new(utility.Select(value => new EquipmentSolverUtilityComponent(value.Key, value.Units)).ToArray()),
+        };
+    }
+
+    private static EquipmentThresholdUtilityModel SaturatingUtilityModel() => new(new(
+        new(
+            new("saturating-test", "1"),
+            "Saturating test",
+            new HashSet<uint> { 19 },
+            new HashSet<string> { "solver" },
+            [],
+            "Synthetic saturation proof."),
+        new("solver", 19, 50, "Synthetic saturation proof", []),
+        new([new("gathering", 50)]),
+        [new("gathering", EquipmentStatSemantic.Gathering, 1, 100, "Bounded synthetic progress")],
+        [new("gathering-100", "Gathering 100", [new("gathering", 100)], 1_000, "Synthetic threshold")],
+        0,
+        []));
 
     private static IReadOnlyDictionary<EquipmentLoadoutPosition, EquipmentOfferAllocationKey?> Baseline(
         params (EquipmentLoadoutPosition Position, EquipmentExactSolverOffer Offer)[] values) =>
@@ -483,6 +656,43 @@ public sealed class EquipmentExactFrontierSolverTests
         public EquipmentUtilityEvaluation Evaluate(EquipmentSolverUtilityVector completed)
         {
             var score = completed.Components.Sum(component => component.Units) / 2d;
+            return new(
+                Profile,
+                Context,
+                score,
+                new(score, score, []),
+                UpgradeAssessment.ClearImprovement,
+                [],
+                [],
+                [],
+                EquipmentEvaluationConfidence.High,
+                []);
+        }
+    }
+
+    private sealed class VectorUtilityModel : IEquipmentExactSolverUtilityModel, IEquipmentPartialDominanceCoordinateModel
+    {
+        private static readonly EquipmentUtilityProfileKey Profile = new("synthetic-vector", "1");
+        private static readonly EquipmentUtilityContext Context = new("solver-vector-test", 19, 50, "Synthetic vector validation", []);
+
+        public EquipmentPartialUtilityDominance ComparePartial(
+            EquipmentSolverUtilityVector candidate,
+            EquipmentSolverUtilityVector other)
+        {
+            var keys = candidate.Components.Select(value => value.Key)
+                .Concat(other.Components.Select(value => value.Key))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            var noWorse = keys.All(key => candidate.Get(key) >= other.Get(key));
+            return new(noWorse, noWorse && keys.Any(key => candidate.Get(key) > other.Get(key)));
+        }
+
+        public IReadOnlyList<long> GetPartialDominanceCoordinates(EquipmentSolverUtilityVector utility) =>
+            new[] { utility.Get("gathering"), utility.Get("perception") };
+
+        public EquipmentUtilityEvaluation Evaluate(EquipmentSolverUtilityVector completed)
+        {
+            var score = completed.Components.Sum(value => value.Units);
             return new(
                 Profile,
                 Context,

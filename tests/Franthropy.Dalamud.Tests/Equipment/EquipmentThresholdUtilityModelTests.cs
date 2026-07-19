@@ -82,6 +82,35 @@ public sealed class EquipmentThresholdUtilityModelTests
     }
 
     [Fact]
+    public void ProvenOvershootSaturationCanonicalizesPartialDominanceButPreservesRenderedRawStats()
+    {
+        var model = CreateModel(Vector(100, 100), supported: true);
+
+        var lowerOvershoot = model.Evaluate(Vector(150, 100));
+        var higherOvershoot = model.Evaluate(Vector(250, 100));
+
+        Assert.Equal(lowerOvershoot.UtilityScore, higherOvershoot.UtilityScore);
+        Assert.Equal(UpgradeAssessment.Equivalent, lowerOvershoot.Assessment);
+        Assert.Equal(UpgradeAssessment.Equivalent, higherOvershoot.Assessment);
+        Assert.Equal(new(true, false), model.ComparePartial(Vector(250, 100), Vector(150, 100)));
+        Assert.Equal(250, higherOvershoot.RawStats.Single(value => value.Semantic == EquipmentStatSemantic.Gathering).Value);
+    }
+
+    [Fact]
+    public void FixedStatsReduceThePartialOvershootCeilingWithoutChangingTheTotalThreshold()
+    {
+        var definition = CreateDefinition(Vector(10, 0), supported: true) with
+        {
+            FixedComponents = Vector(90, 0),
+        };
+        var model = new EquipmentThresholdUtilityModel(definition);
+
+        Assert.Equal(new(true, false), model.ComparePartial(Vector(50, 0), Vector(10, 0)));
+        Assert.Equal(UpgradeAssessment.Equivalent, model.Evaluate(Vector(50, 0)).Assessment);
+        Assert.Contains(model.Evaluate(Vector(10, 0)).Thresholds, value => value.ThresholdId == "a-100" && value.Satisfied);
+    }
+
+    [Fact]
     public void ExplicitScoreEnvelopeNormalizesComponentsThresholdsAndUncertaintyTogether()
     {
         var definition = CreateDefinition(Vector(0, 0), supported: true) with
