@@ -113,6 +113,52 @@ public sealed class EquipmentExactFrontierSolverTests
     }
 
     [Fact]
+    public void Solve_ReportsExactRetainedStateProgressAfterEachPosition()
+    {
+        var head = Offer(EquipmentLoadoutPosition.Head, 100, 10, 0, source: EquipmentAcquisitionSourceKind.Owned);
+        var body = Offer(EquipmentLoadoutPosition.Body, 200, 10, 0, source: EquipmentAcquisitionSourceKind.Owned);
+        var progress = new List<EquipmentExactFrontierProgress>();
+
+        var result = new EquipmentExactFrontierSolver().Solve(
+            new(
+                [head, body],
+                new HashSet<EquipmentLoadoutPosition> { EquipmentLoadoutPosition.Head, EquipmentLoadoutPosition.Body },
+                Baseline((EquipmentLoadoutPosition.Head, head), (EquipmentLoadoutPosition.Body, body)),
+                UtilityModel),
+            reportProgress: progress.Add);
+
+        Assert.Collection(
+            progress,
+            first => Assert.Equal((1, 2, EquipmentLoadoutPosition.Head),
+                (first.CompletedPositionCount, first.TotalPositionCount, first.Position)),
+            second => Assert.Equal((2, 2, EquipmentLoadoutPosition.Body),
+                (second.CompletedPositionCount, second.TotalPositionCount, second.Position)));
+        Assert.Equal(result.Diagnostics.PeakRetainedStateCount, progress.Max(value => value.RetainedStateCount));
+        Assert.Equal(result.Diagnostics.ExpandedStateCount, progress[^1].ExpandedStateCount);
+    }
+
+    [Fact]
+    public void Solve_CancellationAfterProgressCannotPublishAPartialFrontier()
+    {
+        var head = Offer(EquipmentLoadoutPosition.Head, 100, 10, 0, source: EquipmentAcquisitionSourceKind.Owned);
+        var body = Offer(EquipmentLoadoutPosition.Body, 200, 10, 0, source: EquipmentAcquisitionSourceKind.Owned);
+        using var cancellation = new CancellationTokenSource();
+
+        Assert.Throws<OperationCanceledException>(() => new EquipmentExactFrontierSolver().Solve(
+            new(
+                [head, body],
+                new HashSet<EquipmentLoadoutPosition> { EquipmentLoadoutPosition.Head, EquipmentLoadoutPosition.Body },
+                Baseline((EquipmentLoadoutPosition.Head, head), (EquipmentLoadoutPosition.Body, body)),
+                UtilityModel),
+            cancellation.Token,
+            progress =>
+            {
+                if (progress.CompletedPositionCount == 1)
+                    cancellation.Cancel();
+            }));
+    }
+
+    [Fact]
     public void Solve_PreservesDeterministicFractionalUtilityScores()
     {
         var baseline = Offer(EquipmentLoadoutPosition.Head, 100, 1, 0, source: EquipmentAcquisitionSourceKind.Owned);

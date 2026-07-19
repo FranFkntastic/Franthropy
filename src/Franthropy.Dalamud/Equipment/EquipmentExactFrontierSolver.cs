@@ -90,6 +90,17 @@ public sealed record EquipmentExactFrontierDiagnostics(
     string BaselineSolutionId,
     TimeSpan Elapsed);
 
+public sealed record EquipmentExactFrontierProgress(
+    int CompletedPositionCount,
+    int TotalPositionCount,
+    EquipmentLoadoutPosition Position,
+    long ExpandedStateCount,
+    long DominatedStateCount,
+    long CompactedEquivalentStateCount,
+    int CandidateStateCount,
+    int RetainedStateCount,
+    TimeSpan Elapsed);
+
 public sealed record EquipmentExactEquivalenceSummary(
     string ClassId,
     long ExactVariantCount,
@@ -128,7 +139,8 @@ public sealed class EquipmentExactFrontierSolver
 
     public EquipmentExactFrontierResult Solve(
         EquipmentExactFrontierRequest request,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action<EquipmentExactFrontierProgress>? reportProgress = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(request.UtilityModel);
@@ -189,15 +201,35 @@ public sealed class EquipmentExactFrontierSolver
             var futureOffers = remainingPositions.SelectMany(remaining => offersByPosition[remaining]).ToArray();
             var futureAllocations = futureOffers.Select(offer => offer.AllocationKey).ToHashSet();
             var futureUniqueItems = futureOffers.Where(offer => offer.Offer.Definition.IsUnique).Select(offer => offer.Offer.Definition.ItemId).ToHashSet();
-            states = Prune(
-                next,
-                request.UtilityModel,
-                futureAllocations,
-                futureUniqueItems,
-                request.MaxEquivalentRepresentatives,
-                ref dominated,
-                ref compacted);
+            states = cancellationToken.CanBeCanceled
+                ? PruneCancellable(
+                    next,
+                    request.UtilityModel,
+                    futureAllocations,
+                    futureUniqueItems,
+                    request.MaxEquivalentRepresentatives,
+                    cancellationToken,
+                    ref dominated,
+                    ref compacted)
+                : Prune(
+                    next,
+                    request.UtilityModel,
+                    futureAllocations,
+                    futureUniqueItems,
+                    request.MaxEquivalentRepresentatives,
+                    ref dominated,
+                    ref compacted);
             peak = Math.Max(peak, states.Count);
+            reportProgress?.Invoke(new(
+                positionIndex + 1,
+                positions.Length,
+                position,
+                expanded,
+                dominated,
+                compacted,
+                next.Count,
+                states.Count,
+                stopwatch.Elapsed));
         }
 
         var feasibilityOffers = orderedOffers
@@ -370,6 +402,99 @@ public sealed class EquipmentExactFrontierSolver
         return CompactEquivalent(retained, futureAllocations, futureUniqueItems, maxEquivalentRepresentatives, ref compactedCount);
     }
 
+    private static List<State> PruneCancellable(
+        IReadOnlyList<State> candidates,
+        IEquipmentExactSolverUtilityModel utilityModel,
+        IReadOnlySet<EquipmentOfferAllocationKey> futureAllocations,
+        IReadOnlySet<uint> futureUniqueItems,
+        int maxEquivalentRepresentatives,
+        CancellationToken cancellationToken,
+        ref long dominatedCount,
+        ref long compactedCount)
+    {
+        var ordered = candidates.OrderBy(CanonicalStateText, StringComparer.Ordinal).ToArray();
+        var retained = new List<State>(ordered.Length);
+        foreach (var candidate in ordered)
+        {
+            if (cancellationToken.CanBeCanceled)
+                cancellationToken.ThrowIfCancellationRequested();
+            var isDominated = !candidate.IsBaselineSoFar && (cancellationToken.CanBeCanceled
+                ? AnyDominatesCancellable(
+                    retained,
+                    candidate,
+                    utilityModel,
+                    futureAllocations,
+                    futureUniqueItems,
+                    cancellationToken)
+                : retained.Any(other => DominatesPartial(
+                    other,
+                    candidate,
+                    utilityModel,
+                    futureAllocations,
+                    futureUniqueItems)));
+            if (isDominated)
+            {
+                dominatedCount++;
+                continue;
+            }
+
+            if (!cancellationToken.CanBeCanceled)
+            {
+                for (var index = retained.Count - 1; index >= 0; index--)
+                {
+                    if (retained[index].IsBaselineSoFar)
+                        continue;
+                    if (DominatesPartial(candidate, retained[index], utilityModel, futureAllocations, futureUniqueItems))
+                    {
+                        retained.RemoveAt(index);
+                        dominatedCount++;
+                    }
+                }
+            }
+            else
+            {
+                for (var index = retained.Count - 1; index >= 0; index--)
+                {
+                    if ((index & 255) == 0)
+                        cancellationToken.ThrowIfCancellationRequested();
+                    if (retained[index].IsBaselineSoFar)
+                        continue;
+                    if (DominatesPartial(candidate, retained[index], utilityModel, futureAllocations, futureUniqueItems))
+                    {
+                        retained.RemoveAt(index);
+                        dominatedCount++;
+                    }
+                }
+            }
+            retained.Add(candidate);
+        }
+        return CompactEquivalentCancellable(
+            retained,
+            futureAllocations,
+            futureUniqueItems,
+            maxEquivalentRepresentatives,
+            cancellationToken,
+            ref compactedCount);
+    }
+
+    private static bool AnyDominatesCancellable(
+        IReadOnlyList<State> retained,
+        State candidate,
+        IEquipmentExactSolverUtilityModel utilityModel,
+        IReadOnlySet<EquipmentOfferAllocationKey> futureAllocations,
+        IReadOnlySet<uint> futureUniqueItems,
+        CancellationToken cancellationToken)
+    {
+        for (var index = 0; index < retained.Count; index++)
+        {
+            if ((index & 255) == 0)
+                cancellationToken.ThrowIfCancellationRequested();
+            if (DominatesPartial(retained[index], candidate, utilityModel, futureAllocations, futureUniqueItems))
+                return true;
+        }
+        return false;
+    }
+
     private static List<State> CompactEquivalent(
         IReadOnlyList<State> states,
         IReadOnlySet<EquipmentOfferAllocationKey> futureAllocations,
@@ -380,6 +505,38 @@ public sealed class EquipmentExactFrontierSolver
         var compacted = new List<State>();
         foreach (var group in states.GroupBy(state => EquivalenceKey(state, futureAllocations, futureUniqueItems), StringComparer.Ordinal))
         {
+            var ordered = group.OrderBy(CanonicalStateText, StringComparer.Ordinal).ToArray();
+            var representativeSelections = ordered
+                .SelectMany(state => state.RepresentativeSelections)
+                .DistinctBy(CanonicalSelectionsText, StringComparer.Ordinal)
+                .OrderBy(CanonicalSelectionsText, StringComparer.Ordinal)
+                .Take(maxEquivalentRepresentatives)
+                .ToArray();
+            var exactCount = ordered.Aggregate(0L, (sum, state) => checked(sum + state.EquivalentPathCount));
+            compacted.Add(ordered[0] with
+            {
+                Selections = representativeSelections[0],
+                RepresentativeSelections = representativeSelections,
+                EquivalentPathCount = exactCount,
+            });
+            compactedCount += ordered.Length - 1;
+        }
+        return compacted.OrderBy(CanonicalStateText, StringComparer.Ordinal).ToList();
+    }
+
+    private static List<State> CompactEquivalentCancellable(
+        IReadOnlyList<State> states,
+        IReadOnlySet<EquipmentOfferAllocationKey> futureAllocations,
+        IReadOnlySet<uint> futureUniqueItems,
+        int maxEquivalentRepresentatives,
+        CancellationToken cancellationToken,
+        ref long compactedCount)
+    {
+        var compacted = new List<State>();
+        foreach (var group in states.GroupBy(state => EquivalenceKey(state, futureAllocations, futureUniqueItems), StringComparer.Ordinal))
+        {
+            if (cancellationToken.CanBeCanceled)
+                cancellationToken.ThrowIfCancellationRequested();
             var ordered = group.OrderBy(CanonicalStateText, StringComparer.Ordinal).ToArray();
             var representativeSelections = ordered
                 .SelectMany(state => state.RepresentativeSelections)
