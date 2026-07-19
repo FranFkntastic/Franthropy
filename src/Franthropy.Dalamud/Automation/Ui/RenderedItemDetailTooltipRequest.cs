@@ -32,7 +32,16 @@ public static unsafe class RenderedItemDetailTooltipRequest
     /// or the arguments are out of range; true only means the request was dispatched
     /// to the game's tooltip manager.
     /// </summary>
-    public static bool TryShowInventoryItemTooltip(ushort parentAddonId, AtkResNode* targetNode, InventoryType inventoryType, short slotIndex)
+    public static bool TryShowInventoryItemTooltip(ushort parentAddonId, AtkResNode* targetNode, InventoryType inventoryType, short slotIndex) =>
+        TryShowInventoryItemTooltip(parentAddonId, targetNode, (uint)inventoryType, slotIndex);
+
+    /// <summary>
+    /// Asks the game to render its ItemDetail tooltip for the item in the container
+    /// identified by the raw agent type/id value <paramref name="typeOrId"/> at slot
+    /// <paramref name="slotIndex"/>. The agent's container numbering does not always match
+    /// the InventoryType enum; callers pick the correct value for their container.
+    /// </summary>
+    public static bool TryShowInventoryItemTooltip(ushort parentAddonId, AtkResNode* targetNode, uint typeOrId, short slotIndex)
     {
         if (targetNode == null || slotIndex < 0)
             return false;
@@ -42,7 +51,7 @@ public static unsafe class RenderedItemDetailTooltipRequest
 
         var args = stackalloc AtkTooltipManager.AtkTooltipArgs[1];
         args->Ctor();
-        args->ItemArgs.InventoryType = inventoryType;
+        args->ItemArgs.InventoryType = (InventoryType)typeOrId;
         args->ItemArgs.Flag1 = 0;
         args->ItemArgs.BuyQuantity = -1;
         args->ItemArgs.Slot = slotIndex;
