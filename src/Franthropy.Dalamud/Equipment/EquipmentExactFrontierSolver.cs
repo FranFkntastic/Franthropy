@@ -372,7 +372,7 @@ public sealed class EquipmentExactFrontierSolver
         ref long dominatedCount,
         ref long compactedCount)
     {
-        var ordered = candidates.OrderBy(CanonicalStateText, StringComparer.Ordinal).ToArray();
+        var ordered = OrderForDominancePruning(candidates);
         var retained = new List<State>(ordered.Length);
         foreach (var candidate in ordered)
         {
@@ -412,7 +412,7 @@ public sealed class EquipmentExactFrontierSolver
         ref long dominatedCount,
         ref long compactedCount)
     {
-        var ordered = candidates.OrderBy(CanonicalStateText, StringComparer.Ordinal).ToArray();
+        var ordered = OrderForDominancePruning(candidates);
         var retained = new List<State>(ordered.Length);
         foreach (var candidate in ordered)
         {
@@ -494,6 +494,22 @@ public sealed class EquipmentExactFrontierSolver
         }
         return false;
     }
+
+    private static State[] OrderForDominancePruning(IReadOnlyList<State> candidates) => candidates
+        .OrderByDescending(UtilityMagnitude)
+        .ThenBy(state => state.Cost)
+        .ThenBy(state => state.EvidenceRisk.FreshnessBucket)
+        .ThenBy(state => state.EvidenceRisk.IncompleteCoverageCount)
+        .ThenBy(state => state.EvidenceRisk.ConfidencePenalty)
+        .ThenBy(state => state.PurchaseTransactions)
+        .ThenBy(state => state.WorldVisits.Count)
+        .ThenBy(state => state.VendorStops.Count)
+        .ThenBy(CanonicalStateText, StringComparer.Ordinal)
+        .ToArray();
+
+    private static long UtilityMagnitude(State state) => state.Utility.Components.Aggregate(
+        0L,
+        (sum, component) => checked(sum + component.Units));
 
     private static List<State> CompactEquivalent(
         IReadOnlyList<State> states,
