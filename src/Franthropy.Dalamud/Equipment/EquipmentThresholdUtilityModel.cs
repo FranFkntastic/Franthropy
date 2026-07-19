@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace Franthropy.Dalamud.Equipment;
 
 public sealed record EquipmentUtilityComponentDefinition(
@@ -42,6 +44,7 @@ public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilit
     private readonly EquipmentSolverUtilityVector baseline;
     private readonly EquipmentSolverUtilityVector fixedComponents;
     private readonly IReadOnlyDictionary<string, EquipmentUtilityComponentDefinition> components;
+    private readonly ConditionalWeakTable<EquipmentSolverUtilityVector, NormalizedPartialUtility> partialUtilities = new();
     private readonly double scoreScale;
 
     public EquipmentThresholdUtilityModel(EquipmentThresholdUtilityModelDefinition definition)
@@ -67,16 +70,30 @@ public sealed class EquipmentThresholdUtilityModel : IEquipmentExactSolverUtilit
     {
         ArgumentNullException.ThrowIfNull(candidate);
         ArgumentNullException.ThrowIfNull(other);
-        candidate = candidate.Normalize();
-        other = other.Normalize();
-        ValidateVector(candidate);
-        ValidateVector(other);
+        var candidateValues = PartialUtility(candidate);
+        var otherValues = PartialUtility(other);
 
         var noWorse = definition.Components.All(component =>
-            candidate.Get(component.ComponentKey) >= other.Get(component.ComponentKey));
+            candidateValues.Get(component.ComponentKey) >= otherValues.Get(component.ComponentKey));
         var strictlyBetter = noWorse && definition.Components.Any(component =>
-            candidate.Get(component.ComponentKey) > other.Get(component.ComponentKey));
+            candidateValues.Get(component.ComponentKey) > otherValues.Get(component.ComponentKey));
         return new(noWorse, strictlyBetter);
+    }
+
+    private NormalizedPartialUtility PartialUtility(EquipmentSolverUtilityVector utility) =>
+        partialUtilities.GetValue(utility, value =>
+        {
+            var normalized = value.Normalize();
+            ValidateVector(normalized);
+            return new(normalized.Components.ToDictionary(
+                component => component.Key,
+                component => component.Units,
+                StringComparer.Ordinal));
+        });
+
+    private sealed record NormalizedPartialUtility(IReadOnlyDictionary<string, long> Values)
+    {
+        public long Get(string key) => Values.GetValueOrDefault(key);
     }
 
     public EquipmentUtilityEvaluation Evaluate(EquipmentSolverUtilityVector completed)
