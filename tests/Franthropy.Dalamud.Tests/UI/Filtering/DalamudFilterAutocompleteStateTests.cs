@@ -35,6 +35,27 @@ public sealed class DalamudFilterAutocompleteStateTests
     }
 
     [Fact]
+    public void EditingPlainTextPreservesExpressionAndCaretUntilCompletionIsApplied()
+    {
+        var state = new DalamudFilterAutocompleteState();
+        state.SetExpression("darksteel or", 12);
+        var completion = new FilterCompletionItem(
+            "offer.price",
+            "offer.price",
+            FilterCompletionKind.Field,
+            new TextSpan(10, 2));
+
+        state.MoveSelection(1, 3);
+
+        Assert.Equal("darksteel or", state.Expression);
+        Assert.Equal(12, state.CaretPosition);
+
+        Assert.True(state.TryApply([completion]));
+        Assert.Equal("darksteel offer.price", state.Expression);
+        Assert.Equal(21, state.CaretPosition);
+    }
+
+    [Fact]
     public void FocusRequestPreservesTheCurrentCaret()
     {
         var state = new DalamudFilterAutocompleteState();

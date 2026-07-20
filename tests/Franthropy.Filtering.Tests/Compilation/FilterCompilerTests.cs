@@ -65,10 +65,13 @@ public sealed class FilterCompilerTests
         Assert.True(compilation.Matches(Sample));
     }
 
-    [Fact]
-    public void FreeText_SearchesConfiguredDefaultFields()
+    [Theory]
+    [InlineData("credendum")]
+    [InlineData("augmented credendum")]
+    [InlineData("augmented cuirass")]
+    public void FreeText_SearchesConfiguredDefaultFields(string expression)
     {
-        var compilation = FilterCompiler.Compile<Item>("credendum", Context);
+        var compilation = FilterCompiler.Compile<Item>(expression, Context);
 
         Assert.True(compilation.IsValid);
         Assert.True(compilation.Matches(Sample));

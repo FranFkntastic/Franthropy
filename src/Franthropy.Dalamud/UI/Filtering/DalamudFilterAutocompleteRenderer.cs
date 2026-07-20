@@ -51,6 +51,7 @@ public static class DalamudFilterAutocompleteRenderer
             state.SetExpression(expression, state.CaretPosition);
 
         var inputActive = ImGui.IsItemActive();
+        state.IsInputActive = inputActive;
         var suggestionAnchor = new Vector2(ImGui.GetItemRectMin().X, ImGui.GetItemRectMax().Y);
         var completion = FilterCompletionService.Complete(
             context,
@@ -58,6 +59,7 @@ public static class DalamudFilterAutocompleteRenderer
         var items = completion.Items.Take(Math.Max(1, maximumItems)).ToArray();
         state.IsEditingWithSuggestions = inputActive && items.Length > 0;
 
+        var popupId = $"##{id}FilterSuggestions";
         if (state.IsEditingWithSuggestions)
         {
             if (ImGui.IsKeyPressed(ImGuiKey.DownArrow))
@@ -66,12 +68,12 @@ public static class DalamudFilterAutocompleteRenderer
                 state.MoveSelection(-1, items.Length);
             if (ImGui.IsKeyPressed(ImGuiKey.Tab) && state.TryApply(items))
                 changed = true;
-            ImGui.OpenPopup($"##{id}FilterSuggestions");
+            ImGui.OpenPopup(popupId);
         }
 
         ImGui.SetNextWindowPos(suggestionAnchor, ImGuiCond.Always);
         ImGui.SetNextWindowSizeConstraints(new Vector2(Math.Max(280, width), 0), new Vector2(620, 300));
-        if (ImGui.BeginPopup($"##{id}FilterSuggestions"))
+        if (ImGui.BeginPopup(popupId, ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoNav))
         {
             for (var index = 0; index < items.Length; index++)
             {
