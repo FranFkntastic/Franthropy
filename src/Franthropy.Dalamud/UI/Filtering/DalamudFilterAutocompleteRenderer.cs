@@ -45,7 +45,7 @@ public static class DalamudFilterAutocompleteRenderer
             hint,
             ref expression,
             512,
-            ImGuiInputTextFlags.CallbackAlways,
+            ImGuiInputTextFlags.CallbackAlways | ImGuiInputTextFlags.CallbackCompletion,
             callback);
         if (changed)
             state.SetExpression(expression, state.CaretPosition);
