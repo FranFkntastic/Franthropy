@@ -21,10 +21,11 @@ public sealed class EquipmentLoadoutSolverTests
     {
         var owned = Offer(100, "Owned sword", EquipmentSlot.MainHand, 45, EquipmentAcquisitionSourceKind.Owned);
         var market = Offer(101, "Market sword", EquipmentSlot.MainHand, 90, EquipmentAcquisitionSourceKind.MarketBoard, 20_000);
+        var craft = Offer(102, "Crafted sword", EquipmentSlot.MainHand, 100, EquipmentAcquisitionSourceKind.Craft, 10_000);
 
         var plan = new EquipmentLoadoutSolver().Plan(Request(
             EquipmentLoadoutStrategy.BestOwned,
-            [owned, market]));
+            [owned, market, craft]));
 
         Assert.Equal(100u, plan.Entries.Single(entry => entry.Position == EquipmentLoadoutPosition.MainHand).Recommended?.Definition.ItemId);
         Assert.Equal(0, plan.AcquisitionCount);
@@ -72,6 +73,75 @@ public sealed class EquipmentLoadoutSolverTests
     }
 
     [Fact]
+    public void CraftOffers_AreIncludedByDefaultAndCanBeExcluded()
+    {
+        var current = Offer(100, "Current sword", EquipmentSlot.MainHand, 45, EquipmentAcquisitionSourceKind.Owned);
+        var craft = Offer(101, "Crafted sword", EquipmentSlot.MainHand, 80, EquipmentAcquisitionSourceKind.Craft, 5_000);
+        var currentItems = new Dictionary<EquipmentLoadoutPosition, EquipmentLoadoutOffer>
+        {
+            [EquipmentLoadoutPosition.MainHand] = current,
+        };
+
+        var included = new EquipmentLoadoutSolver().Plan(Request(
+            EquipmentLoadoutStrategy.HighestItemLevel,
+            [current, craft],
+            currentItems));
+        var excluded = new EquipmentLoadoutSolver().Plan(Request(
+            EquipmentLoadoutStrategy.HighestItemLevel,
+            [current, craft],
+            currentItems,
+            includeCraft: false));
+
+        Assert.Equal(EquipmentAcquisitionSourceKind.Craft, included.Entries[0].Recommended?.SourceKind);
+        Assert.Equal(5_000ul, included.EstimatedAcquisitionCost);
+        Assert.Equal(1, included.AcquisitionCount);
+        Assert.Equal(EquipmentAcquisitionSourceKind.Owned, excluded.Entries[0].Recommended?.SourceKind);
+    }
+
+    [Fact]
+    public void EquivalentOffers_HaveStableSourceOrdering()
+    {
+        var offers = new[]
+        {
+            Offer(103, "Same", EquipmentSlot.MainHand, 50, EquipmentAcquisitionSourceKind.Craft, 100),
+            Offer(102, "Same", EquipmentSlot.MainHand, 50, EquipmentAcquisitionSourceKind.MarketBoard, 100),
+            Offer(101, "Same", EquipmentSlot.MainHand, 50, EquipmentAcquisitionSourceKind.GilVendor, 100),
+            Offer(100, "Same", EquipmentSlot.MainHand, 50, EquipmentAcquisitionSourceKind.Owned),
+        };
+
+        var first = OrderedMainHandSources(new EquipmentLoadoutSolver().Plan(Request(
+            EquipmentLoadoutStrategy.HighestItemLevel,
+            offers)));
+        var second = OrderedMainHandSources(new EquipmentLoadoutSolver().Plan(Request(
+            EquipmentLoadoutStrategy.HighestItemLevel,
+            offers.Reverse().ToArray())));
+
+        Assert.Equal(
+            [
+                EquipmentAcquisitionSourceKind.Owned,
+                EquipmentAcquisitionSourceKind.GilVendor,
+                EquipmentAcquisitionSourceKind.MarketBoard,
+                EquipmentAcquisitionSourceKind.Craft,
+            ],
+            first);
+        Assert.Equal(first, second);
+    }
+
+    [Fact]
+    public void UndefinedCurrentItemSource_IsRejectedBeforePlanning()
+    {
+        var invalid = Offer(100, "Invalid current sword", EquipmentSlot.MainHand, 45, (EquipmentAcquisitionSourceKind)99);
+
+        Assert.Throws<ArgumentException>(() => new EquipmentLoadoutSolver().Plan(Request(
+            EquipmentLoadoutStrategy.HighestItemLevel,
+            [],
+            new Dictionary<EquipmentLoadoutPosition, EquipmentLoadoutOffer>
+            {
+                [EquipmentLoadoutPosition.MainHand] = invalid,
+            })));
+    }
+
+    [Fact]
     public void RingPositions_DoNotAllocateTheSameOwnedInstanceTwice()
     {
         var first = Offer(200, "First ring", EquipmentSlot.Ring, 70, EquipmentAcquisitionSourceKind.Owned, slotIndex: 1);
@@ -113,8 +183,23 @@ public sealed class EquipmentLoadoutSolverTests
     private static EquipmentLoadoutRequest Request(
         EquipmentLoadoutStrategy strategy,
         IReadOnlyList<EquipmentLoadoutOffer> offers,
-        IReadOnlyDictionary<EquipmentLoadoutPosition, EquipmentLoadoutOffer>? current = null) =>
-        new(Paladin, 50, strategy, offers, current ?? new Dictionary<EquipmentLoadoutPosition, EquipmentLoadoutOffer>());
+        IReadOnlyDictionary<EquipmentLoadoutPosition, EquipmentLoadoutOffer>? current = null,
+        bool includeCraft = true) =>
+        new(
+            Paladin,
+            50,
+            strategy,
+            offers,
+            current ?? new Dictionary<EquipmentLoadoutPosition, EquipmentLoadoutOffer>(),
+            IncludeCraft: includeCraft);
+
+    private static EquipmentAcquisitionSourceKind[] OrderedMainHandSources(EquipmentLoadoutPlan plan)
+    {
+        var entry = plan.Entries.Single(value => value.Position == EquipmentLoadoutPosition.MainHand);
+        return entry.Recommended is null
+            ? []
+            : entry.Alternatives.Prepend(entry.Recommended).Select(offer => offer.SourceKind).ToArray();
+    }
 
     private static EquipmentLoadoutOffer Offer(
         uint itemId,

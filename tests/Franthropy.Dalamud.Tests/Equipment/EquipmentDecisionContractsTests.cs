@@ -61,6 +61,18 @@ public sealed class EquipmentDecisionContractsTests
     }
 
     [Fact]
+    public void OfferObservation_RejectsUndefinedAcquisitionSource()
+    {
+        var observation = new EquipmentOfferObservation(
+            new(100, EquipmentQuality.Normal, (EquipmentAcquisitionSourceKind)99, "invalid"),
+            Guid.NewGuid(),
+            "invalid-source",
+            DateTimeOffset.UtcNow);
+
+        Assert.Throws<InvalidOperationException>(observation.Validate);
+    }
+
+    [Fact]
     public void Dominance_RequiresEveryDimensionAndCompatibleContext()
     {
         var strong = Solution("strong", 10_000, 80, new(0, 1, 1), new(0, 0, 0));
@@ -130,6 +142,42 @@ public sealed class EquipmentDecisionContractsTests
     }
 
     [Fact]
+    public void ReplaySerialization_RoundTripsStableCraftSourceKind()
+    {
+        Assert.Equal(3, (int)EquipmentAcquisitionSourceKind.Craft);
+        var replay = new EquipmentDecisionReplay(
+            Guid.Parse("11111111-2222-3333-4444-555555555555"),
+            DateTimeOffset.Parse("2026-07-16T12:00:00Z"),
+            [Solution("craft", 1_000, 50, new(0, 0, 0), new(0, 0, 0), source: EquipmentAcquisitionSourceKind.Craft)]);
+
+        var json = EquipmentDecisionReplayJson.Serialize(replay);
+        var roundTrip = EquipmentDecisionReplayJson.Deserialize(json);
+
+        Assert.Contains("\"sourceKind\": 3", json, StringComparison.Ordinal);
+        Assert.Equal(
+            EquipmentAcquisitionSourceKind.Craft,
+            Assert.Single(Assert.Single(roundTrip.Solutions).Candidate.Selections).OfferKey.SourceKind);
+    }
+
+    [Fact]
+    public void ReplaySerialization_RejectsUndefinedSourceKind()
+    {
+        var invalidReplay = new EquipmentDecisionReplay(
+            Guid.NewGuid(),
+            DateTimeOffset.UtcNow,
+            [Solution("invalid", 1_000, 50, new(0, 0, 0), new(0, 0, 0), source: (EquipmentAcquisitionSourceKind)99)]);
+        var validReplay = invalidReplay with
+        {
+            Solutions = [Solution("valid", 1_000, 50, new(0, 0, 0), new(0, 0, 0))],
+        };
+        var invalidJson = EquipmentDecisionReplayJson.Serialize(validReplay)
+            .Replace("\"sourceKind\": 2", "\"sourceKind\": 99", StringComparison.Ordinal);
+
+        Assert.Throws<ArgumentException>(() => EquipmentDecisionReplayJson.Serialize(invalidReplay));
+        Assert.Throws<System.Text.Json.JsonException>(() => EquipmentDecisionReplayJson.Deserialize(invalidJson));
+    }
+
+    [Fact]
     public void Feasibility_EnforcesExactQuantityAndUniqueRingAllocation()
     {
         var definition = Definition(200, EquipmentSlot.Ring, isUnique: true);
@@ -189,9 +237,10 @@ public sealed class EquipmentDecisionContractsTests
         EquipmentAcquisitionBurden burden,
         EquipmentEvidenceRisk risk,
         EquipmentQuality quality = EquipmentQuality.Normal,
-        uint itemId = 100)
+        uint itemId = 100,
+        EquipmentAcquisitionSourceKind source = EquipmentAcquisitionSourceKind.MarketBoard)
     {
-        var key = new EquipmentOfferKey(itemId, quality, EquipmentAcquisitionSourceKind.MarketBoard, $"catalog-{itemId}");
+        var key = new EquipmentOfferKey(itemId, quality, source, $"catalog-{itemId}");
         var candidate = new EquipmentLoadoutCandidate(id, [new(EquipmentLoadoutPosition.Head, key)]);
         var evaluation = new EquipmentUtilityEvaluation(
             new("leveling-combat", "1"),

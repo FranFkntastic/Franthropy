@@ -394,6 +394,8 @@ public static class EquipmentDecisionReplayJson
     public static string Serialize(EquipmentDecisionReplay replay)
     {
         ArgumentNullException.ThrowIfNull(replay);
+        if (FindUnsupportedSourceKind(replay) is { } unsupported)
+            throw new ArgumentException($"Equipment decision replay has unsupported acquisition source '{unsupported}'.", nameof(replay));
         return JsonSerializer.Serialize(Normalize(replay), Options);
     }
 
@@ -404,6 +406,8 @@ public static class EquipmentDecisionReplayJson
             ?? throw new JsonException("Equipment decision replay was empty.");
         if (!string.Equals(replay.SchemaVersion, "franthropy-equipment-decision/v1", StringComparison.Ordinal))
             throw new JsonException($"Unsupported equipment decision replay schema '{replay.SchemaVersion}'.");
+        if (FindUnsupportedSourceKind(replay) is { } unsupported)
+            throw new JsonException($"Equipment decision replay has unsupported acquisition source '{unsupported}'.");
         return Normalize(replay);
     }
 
@@ -459,4 +463,16 @@ public static class EquipmentDecisionReplayJson
                 Reasons = solution.AcquisitionCostEstimate.Reasons.Order(StringComparer.Ordinal).ToArray(),
             },
     };
+
+    private static EquipmentAcquisitionSourceKind? FindUnsupportedSourceKind(EquipmentDecisionReplay replay)
+    {
+        foreach (var sourceKind in replay.Solutions
+            .SelectMany(solution => solution.Candidate.Selections)
+            .Select(selection => selection.OfferKey.SourceKind))
+        {
+            if (!Enum.IsDefined(sourceKind))
+                return sourceKind;
+        }
+        return null;
+    }
 }

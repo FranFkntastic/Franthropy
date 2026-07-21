@@ -970,6 +970,8 @@ public sealed class EquipmentExactFrontierSolver
             throw new ArgumentException($"Duplicate exact solver offer '{duplicate.Key}'.", nameof(request));
         foreach (var offer in request.Offers)
         {
+            if (!Enum.IsDefined(offer.Offer.SourceKind))
+                throw new ArgumentException($"Offer '{offer.AllocationKey}' has an unsupported acquisition source.", nameof(request));
             if (offer.AvailableQuantity == 0)
                 throw new ArgumentException($"Offer '{offer.AllocationKey}' has zero available quantity.", nameof(request));
             if (offer.Positions.Count == 0)

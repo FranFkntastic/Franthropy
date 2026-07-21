@@ -134,6 +134,40 @@ public sealed class EquipmentExactFrontierSolverTests
     }
 
     [Fact]
+    public void Solve_CraftSourcePreservesCallerDefinedBurdenAndDeterminism()
+    {
+        var baseline = Offer(EquipmentLoadoutPosition.Head, 100, 10, 0, source: EquipmentAcquisitionSourceKind.Owned);
+        var craft = Offer(EquipmentLoadoutPosition.Head, 101, 20, 1_000, source: EquipmentAcquisitionSourceKind.Craft) with
+        {
+            WorldVisitKey = "Siren",
+            VendorStopKey = "Gridania",
+            PurchaseTransactions = 2,
+        };
+        var positions = new HashSet<EquipmentLoadoutPosition> { EquipmentLoadoutPosition.Head };
+        var requestBaseline = Baseline((EquipmentLoadoutPosition.Head, baseline));
+
+        var first = Solve([craft, baseline], positions, requestBaseline);
+        var second = Solve([baseline, craft], positions, requestBaseline);
+
+        var craftedSolution = Assert.Single(All(first), solution =>
+            Assert.Single(solution.Candidate.Selections).OfferKey.SourceKind == EquipmentAcquisitionSourceKind.Craft);
+        Assert.Equal(new EquipmentAcquisitionBurden(1, 1, 2), craftedSolution.Burden);
+        Assert.Equal(Replay(first), Replay(second));
+    }
+
+    [Fact]
+    public void Solve_RejectsUndefinedAcquisitionSource()
+    {
+        var baseline = Offer(EquipmentLoadoutPosition.Head, 100, 10, 0, source: EquipmentAcquisitionSourceKind.Owned);
+        var invalid = Offer(EquipmentLoadoutPosition.Head, 101, 20, 1_000, source: (EquipmentAcquisitionSourceKind)99);
+
+        Assert.Throws<ArgumentException>(() => Solve(
+            [baseline, invalid],
+            [EquipmentLoadoutPosition.Head],
+            Baseline((EquipmentLoadoutPosition.Head, baseline))));
+    }
+
+    [Fact]
     public void Solve_ReportsBoundedPruningAndRetainedStateProgressAfterEachPosition()
     {
         var head = Offer(EquipmentLoadoutPosition.Head, 100, 10, 0, source: EquipmentAcquisitionSourceKind.Owned);

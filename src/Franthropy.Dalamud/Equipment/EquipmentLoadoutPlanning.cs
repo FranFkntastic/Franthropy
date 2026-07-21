@@ -20,9 +20,10 @@ public enum EquipmentLoadoutPosition
 
 public enum EquipmentAcquisitionSourceKind
 {
-    Owned,
-    GilVendor,
-    MarketBoard,
+    Owned = 0,
+    GilVendor = 1,
+    MarketBoard = 2,
+    Craft = 3,
 }
 
 public enum EquipmentLoadoutStrategy
@@ -74,6 +75,8 @@ public sealed record EquipmentOfferObservation(
     public void Validate()
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(ObservationId);
+        if (!Enum.IsDefined(Key.SourceKind))
+            throw new InvalidOperationException($"Offer observation has unsupported acquisition source '{Key.SourceKind}'.");
         if (ReviewedAt == default)
             throw new InvalidOperationException("Offer observations require an explicit review time.");
         if (AvailableQuantity == 0)
@@ -145,7 +148,8 @@ public sealed record EquipmentLoadoutRequest(
     IReadOnlyDictionary<EquipmentLoadoutPosition, EquipmentLoadoutOffer> CurrentItems,
     bool IncludeOwned = true,
     bool IncludeGilVendors = true,
-    bool IncludeMarketBoard = true);
+    bool IncludeMarketBoard = true,
+    bool IncludeCraft = true);
 
 public sealed record EquipmentLoadoutPlanEntry(
     EquipmentLoadoutPosition Position,
@@ -195,6 +199,9 @@ public sealed class EquipmentLoadoutSolver
     public EquipmentLoadoutPlan Plan(EquipmentLoadoutRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (request.Offers.Any(offer => !Enum.IsDefined(offer.SourceKind)) ||
+            request.CurrentItems.Values.Any(offer => !Enum.IsDefined(offer.SourceKind)))
+            throw new ArgumentException("Request contains an unsupported equipment acquisition source.", nameof(request));
         var targetLevel = Math.Clamp(request.TargetLevel, 1u, Math.Max(1u, request.Job.Level));
         var compatible = request.Offers
             .Where(offer => IsCompatible(offer, request, targetLevel))
@@ -277,6 +284,7 @@ public sealed class EquipmentLoadoutSolver
             EquipmentAcquisitionSourceKind.Owned => request.IncludeOwned,
             EquipmentAcquisitionSourceKind.GilVendor => request.IncludeGilVendors && request.Strategy != EquipmentLoadoutStrategy.BestOwned,
             EquipmentAcquisitionSourceKind.MarketBoard => request.IncludeMarketBoard && request.Strategy != EquipmentLoadoutStrategy.BestOwned,
+            EquipmentAcquisitionSourceKind.Craft => request.IncludeCraft && request.Strategy != EquipmentLoadoutStrategy.BestOwned,
             _ => false,
         };
     }
@@ -322,6 +330,7 @@ public sealed class EquipmentLoadoutSolver
             EquipmentAcquisitionSourceKind.Owned => 0,
             EquipmentAcquisitionSourceKind.GilVendor => 1,
             EquipmentAcquisitionSourceKind.MarketBoard => 2,
+            EquipmentAcquisitionSourceKind.Craft => 3,
             _ => 10,
         },
         _ => offer.SourceKind switch
@@ -329,6 +338,7 @@ public sealed class EquipmentLoadoutSolver
             EquipmentAcquisitionSourceKind.Owned => 0,
             EquipmentAcquisitionSourceKind.GilVendor => 1,
             EquipmentAcquisitionSourceKind.MarketBoard => 2,
+            EquipmentAcquisitionSourceKind.Craft => 3,
             _ => 10,
         },
     };
