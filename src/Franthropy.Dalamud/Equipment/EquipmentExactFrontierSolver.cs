@@ -379,17 +379,17 @@ public sealed class EquipmentExactFrontierSolver
         var feasibilityEvaluator = new EquipmentLoadoutFeasibilityEvaluator();
         var offersByAllocation = orderedOffers.ToDictionary(offer => offer.AllocationKey);
         var primaryDecisions = new List<EquipmentDecisionSolution>(states.Count);
-        var statesByPrimaryId = new Dictionary<string, State>(StringComparer.Ordinal);
+        var materializationsByPrimaryId = new Dictionary<string, FinalStateMaterialization>(StringComparer.Ordinal);
         var equivalenceSummaries = new List<EquipmentRetainedEquivalenceSummary>();
         var materializations = new List<FinalStateMaterialization>(states.Count);
         foreach (var state in states)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var representatives = state.Paths.GetCanonicalRepresentatives(request.MaxRetainedRepresentatives);
-            var representativeIds = representatives
-                .Select(selections => state.IsBaselineSoFar ? "baseline" : SolutionId(selections))
+            var representativePaths = state.Paths.GetCanonicalRepresentativePaths(request.MaxRetainedRepresentatives);
+            var representativeIds = representativePaths
+                .Select(path => state.IsBaselineSoFar ? "baseline" : path.GetSolutionId())
                 .ToArray();
-            materializations.Add(new(state, representatives, representativeIds));
+            materializations.Add(new(state, representativePaths, representativeIds));
             if (state.Paths.RetainedPathCount > 1)
                 equivalenceSummaries.Add(new(
                     $"retained:{CanonicalMetricText(state)}",
@@ -403,14 +403,14 @@ public sealed class EquipmentExactFrontierSolver
             cancellationToken.ThrowIfCancellationRequested();
             var primary = Materialize(
                 materialization.State,
-                materialization.Representatives[0],
+                materialization.RepresentativePaths[0].Materialize(),
                 materialization.RepresentativeIds[0],
                 request,
                 feasibilityEvaluator,
                 feasibilityOffers,
                 offersByAllocation);
             primaryDecisions.Add(primary);
-            statesByPrimaryId[primary.Candidate.SolutionId] = materialization.State;
+            materializationsByPrimaryId[primary.Candidate.SolutionId] = materialization;
         }
         ReportFinalizationProgress("PrimaryMaterialized", primaryDecisions.Count);
 
@@ -421,10 +421,11 @@ public sealed class EquipmentExactFrontierSolver
         var expandedFrontier = new List<EquipmentDecisionSolution>();
         foreach (var core in corePareto.Frontier)
         {
-            var state = statesByPrimaryId[core.Candidate.SolutionId];
-            foreach (var selections in state.Paths.GetCanonicalRepresentatives(request.MaxRetainedRepresentatives))
+            var materialization = materializationsByPrimaryId[core.Candidate.SolutionId];
+            var state = materialization.State;
+            for (var index = 0; index < materialization.RepresentativePaths.Count; index++)
             {
-                var solutionId = state.IsBaselineSoFar ? "baseline" : SolutionId(selections);
+                var solutionId = materialization.RepresentativeIds[index];
                 if (string.Equals(solutionId, core.Candidate.SolutionId, StringComparison.Ordinal))
                 {
                     expandedFrontier.Add(core);
@@ -432,7 +433,7 @@ public sealed class EquipmentExactFrontierSolver
                 }
                 expandedFrontier.Add(Materialize(
                     state,
-                    selections,
+                    materialization.RepresentativePaths[index].Materialize(),
                     solutionId,
                     request,
                     feasibilityEvaluator,
@@ -1036,13 +1037,6 @@ public sealed class EquipmentExactFrontierSolver
             throw new ArgumentException($"No-purchase baseline is infeasible: {string.Join("; ", feasibility.Violations.Select(value => value.Message))}", nameof(request));
     }
 
-    private static string SolutionId(IReadOnlyList<EquipmentLoadoutSelection> selections)
-    {
-        var canonical = string.Join('|', selections.OrderBy(selection => selection.Position).Select(selection =>
-            $"{selection.Position}:{selection.OfferKey.ItemId}:{selection.OfferKey.Quality}:{selection.OfferKey.SourceKind}:{selection.OfferKey.SourceCatalogKey}:{selection.ObservationId}:{selection.Quantity}"));
-        return $"solution:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))[..16]}";
-    }
-
     private static StateEquivalenceKey BuildStateEquivalenceKey(State state) => new(
         state.Utility,
         state.Cost,
@@ -1125,12 +1119,7 @@ public sealed class EquipmentExactFrontierSolver
             }
         }
 
-        public IReadOnlyList<IReadOnlyList<EquipmentLoadoutSelection>> GetCanonicalRepresentatives(int limit) =>
-            GetCanonicalRepresentativePaths(limit)
-                .Select(path => (IReadOnlyList<EquipmentLoadoutSelection>)path.Materialize())
-                .ToArray();
-
-        private IReadOnlyList<RepresentativePath> GetCanonicalRepresentativePaths(int limit)
+        public IReadOnlyList<RepresentativePath> GetCanonicalRepresentativePaths(int limit)
         {
             if (limit < 1)
                 throw new ArgumentOutOfRangeException(nameof(limit));
@@ -1138,11 +1127,9 @@ public sealed class EquipmentExactFrontierSolver
                 return cachedLimit == limit
                     ? cachedRepresentativePaths
                     : cachedRepresentativePaths.Take(limit).ToArray();
-            var representatives = BuildCanonicalRepresentativePaths(limit)
-                .Distinct(RepresentativePathComparer.Instance)
-                .Order(RepresentativePathComparer.Instance)
-                .Take(limit)
-                .ToArray();
+            var representatives = TakeCanonicalRepresentatives(
+                BuildCanonicalRepresentativePaths(limit),
+                limit);
             cachedRepresentativePaths = representatives;
             cachedLimit = limit;
             return representatives;
@@ -1150,6 +1137,35 @@ public sealed class EquipmentExactFrontierSolver
 
         protected abstract IEnumerable<RepresentativePath> BuildCanonicalRepresentativePaths(int limit);
         protected abstract IEnumerable<RetainedPathNode> Children { get; }
+
+        private static IReadOnlyList<RepresentativePath> TakeCanonicalRepresentatives(
+            IEnumerable<RepresentativePath> candidates,
+            int limit)
+        {
+            var retained = new List<RepresentativePath>(limit);
+            foreach (var candidate in candidates)
+            {
+                var low = 0;
+                var high = retained.Count;
+                while (low < high)
+                {
+                    var middle = low + ((high - low) >> 1);
+                    var comparison = RepresentativePathComparer.Instance.Compare(retained[middle], candidate);
+                    if (comparison < 0)
+                        low = middle + 1;
+                    else
+                        high = middle;
+                }
+                if (low < retained.Count && RepresentativePathComparer.Instance.Equals(retained[low], candidate))
+                    continue;
+                if (low >= limit)
+                    continue;
+                retained.Insert(low, candidate);
+                if (retained.Count > limit)
+                    retained.RemoveAt(limit);
+            }
+            return retained.ToArray();
+        }
 
         private sealed class EmptyRetainedPathNode : RetainedPathNode
         {
@@ -1207,7 +1223,7 @@ public sealed class EquipmentExactFrontierSolver
                 children.SelectMany(child => child.GetCanonicalRepresentativePaths(limit));
         }
 
-        protected sealed class RepresentativePath
+        public sealed class RepresentativePath
         {
             private const uint HashOffset = 2166136261;
             private const uint HashPrime = 16777619;
@@ -1238,6 +1254,7 @@ public sealed class EquipmentExactFrontierSolver
             private string SelectionText { get; }
             private int Count { get; }
             private uint CanonicalHash { get; }
+            private string? solutionId;
 
             public RepresentativePath Append(EquipmentLoadoutSelection selection) =>
                 new(this, selection, checked(Count + 1));
@@ -1252,6 +1269,25 @@ public sealed class EquipmentExactFrontierSolver
                     current = current.Previous!;
                 }
                 return selections;
+            }
+
+            public string GetSolutionId()
+            {
+                if (solutionId is not null)
+                    return solutionId;
+                CanonicalSegmentBuffer segments = default;
+                var index = Count;
+                for (var current = this; current.Selection is not null; current = current.Previous!)
+                    segments[--index] = current.SelectionText;
+                var canonical = new StringBuilder();
+                for (index = 0; index < Count; index++)
+                {
+                    if (index != 0)
+                        canonical.Append('|');
+                    canonical.Append(segments[index]);
+                }
+                solutionId = $"solution:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())))[..16]}";
+                return solutionId;
             }
 
             public int GetCanonicalHashCode() => unchecked((int)CanonicalHash);
@@ -1918,7 +1954,7 @@ public sealed class EquipmentExactFrontierSolver
 
     private sealed record FinalStateMaterialization(
         State State,
-        IReadOnlyList<IReadOnlyList<EquipmentLoadoutSelection>> Representatives,
+        IReadOnlyList<RetainedPathNode.RepresentativePath> RepresentativePaths,
         IReadOnlyList<string> RepresentativeIds);
 
     private sealed record ResourceProjection(
