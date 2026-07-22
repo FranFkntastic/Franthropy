@@ -19,4 +19,18 @@ public static class DalamudRetainerInventory
 
     public static IReadOnlyList<DalamudInventoryStack> ScanLoadedStacks(IReadOnlySet<uint> itemIds) =>
         DalamudInventoryStackScanner.ScanLoadedStacks(ItemContainers, itemIds);
+
+    public static unsafe int CountAvailableRetainers()
+    {
+        var manager = RetainerManager.Instance();
+        if (manager is null)
+            return 0;
+
+        var count = 0;
+        for (var index = 0; index < manager->GetRetainerCount(); index++)
+            if (manager->Retainers[index].Available)
+                count++;
+
+        return count;
+    }
 }

@@ -55,9 +55,13 @@ public sealed class DalamudRetainerCrystalTransfer
 
     public async Task<RetainerCrystalTransferResult> DepositAsync(
         DalamudInventoryStack stack,
-        int requestedQuantity)
+        int requestedQuantity,
+        CancellationToken cancellationToken = default)
     {
-        var pending = await framework.RunOnTick(() => BeginDeposit(stack, requestedQuantity)).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        var pending = await framework.RunOnTick(
+            () => BeginDeposit(stack, requestedQuantity),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!pending.Success || pending.Requested == 0)
             return new(pending.Success, 0, pending.Code, pending.Message);
 
@@ -67,21 +71,25 @@ public sealed class DalamudRetainerCrystalTransfer
                 stack.ItemId,
                 pending.Requested,
                 pending.PlayerQuantityBefore,
-                pending.RetainerQuantityBefore)).ConfigureAwait(false);
+                pending.RetainerQuantityBefore),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             if (immediate.Success)
                 return immediate;
 
-            var submitted = await framework.RunOnTick(() => SubmitQuantity(stack.ItemId, pending.Requested)).ConfigureAwait(false);
+            var submitted = await framework.RunOnTick(
+                () => SubmitQuantity(stack.ItemId, pending.Requested),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             if (submitted.Success)
             {
                 return await WaitForCompletionAsync(
                     stack.ItemId,
                     submitted.Transferred,
                     pending.PlayerQuantityBefore,
-                    pending.RetainerQuantityBefore).ConfigureAwait(false);
+                    pending.RetainerQuantityBefore,
+                    cancellationToken).ConfigureAwait(false);
             }
 
-            await framework.DelayTicks(1).ConfigureAwait(false);
+            await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
         }
 
         return new(false, 0, "DepositNotObserved", $"Deposit neither completed nor opened a numeric quantity popup for item {stack.ItemId}.");
@@ -91,7 +99,8 @@ public sealed class DalamudRetainerCrystalTransfer
         uint itemId,
         int transferred,
         int playerQuantityBefore,
-        int retainerQuantityBefore)
+        int retainerQuantityBefore,
+        CancellationToken cancellationToken)
     {
         RetainerCrystalTransferResult last = new(false, 0, "TransferPending", $"Deposit did not complete for item {itemId}.");
         for (var attempt = 0; attempt < 60; attempt++)
@@ -100,11 +109,12 @@ public sealed class DalamudRetainerCrystalTransfer
                 itemId,
                 transferred,
                 playerQuantityBefore,
-                retainerQuantityBefore)).ConfigureAwait(false);
+                retainerQuantityBefore),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             if (last.Success)
                 return last;
 
-            await framework.DelayTicks(1).ConfigureAwait(false);
+            await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
         }
 
         return last;
