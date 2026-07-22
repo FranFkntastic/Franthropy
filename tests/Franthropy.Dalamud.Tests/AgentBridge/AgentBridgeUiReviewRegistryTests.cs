@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Text.Json;
 using Franthropy.Dalamud.AgentBridge;
 
 namespace Franthropy.Dalamud.Tests.AgentBridge;
@@ -80,5 +81,45 @@ public sealed class AgentBridgeUiReviewRegistryTests
         Assert.True(result.Success);
         Assert.Equal(1, invoked);
         Assert.False(registry.Invoke("squire.run", reviewedFrame.FrameId).Success);
+    }
+
+    [Fact]
+    public void TypedAction_ValidatesArgumentsAndReturnsOperationReceipt()
+    {
+        var registry = new AgentBridgeUiReviewRegistry();
+        string? selectedItem = null;
+        var schema = new AgentBridgeActionArgumentSchema([
+            new("itemName", AgentBridgeActionArgumentKind.ItemName),
+            new("quantity", AgentBridgeActionArgumentKind.Integer, Minimum: 1, Maximum: 99),
+        ]);
+        registry.BeginFrame();
+        registry.Register(
+            "stock.retrieve",
+            "Retrieve item",
+            AgentBridgeUiControlKind.Input,
+            Vector2.Zero,
+            new(100, 30),
+            true,
+            false,
+            null,
+            schema,
+            arguments =>
+            {
+                selectedItem = arguments!.Value.GetProperty("itemName").GetString();
+                return AgentBridgeUiActionResult.Ok("Retrieval queued.", "operation-1");
+            });
+        var frame = registry.EndFrame();
+
+        using var invalid = JsonDocument.Parse("{\"itemName\":\"Potion\",\"quantity\":0}");
+        var rejected = registry.Invoke("stock.retrieve", frame.FrameId, invalid.RootElement);
+        Assert.False(rejected.Success);
+        Assert.Contains("at least 1", rejected.Message);
+        Assert.Null(selectedItem);
+
+        using var valid = JsonDocument.Parse("{\"itemName\":\"Potion\",\"quantity\":3}");
+        var accepted = registry.Invoke("stock.retrieve", frame.FrameId, valid.RootElement);
+        Assert.True(accepted.Success);
+        Assert.Equal("Potion", selectedItem);
+        Assert.Equal("operation-1", accepted.Action?.OperationId);
     }
 }

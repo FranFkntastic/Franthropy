@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
+using System.Reflection;
 using System.Text;
+using System.Text.Json;
 
 namespace Franthropy.Dalamud.AgentBridge;
 
@@ -10,6 +12,11 @@ public sealed record AgentBridgeDiscovery
     public required string PipeName { get; init; }
     public required int ProcessId { get; init; }
     public required string PluginInstanceId { get; init; }
+    public string? RuntimeInstanceId { get; init; }
+    public string? PluginInternalName { get; init; }
+    public string? ProfileId { get; init; }
+    public string? ProfileAlias { get; init; }
+    public int ProtocolVersion { get; init; } = 1;
 }
 
 public sealed record AgentBridgeRequest
@@ -20,6 +27,8 @@ public sealed record AgentBridgeRequest
     public long? FrameId { get; init; }
     public bool FullViewport { get; init; }
     public string? TransactionId { get; init; }
+    public JsonElement? Arguments { get; init; }
+    public string? OperationId { get; init; }
 }
 
 public sealed record AgentBridgeUiCaptureTransactionReceipt(
@@ -45,13 +54,133 @@ public sealed record AgentBridgeCaptureSurfaceDescriptor(
     int Order,
     bool IsDefault = false);
 
+/// <summary>Versioned, discovery-safe description of one bridge capability.</summary>
+public sealed record AgentBridgeCapabilityDescriptor(string Id, int Version = 1);
+
+/// <summary>A typed semantic action which a provider can present and invoke without coordinate input.</summary>
+public sealed record AgentBridgeActionDescriptor(
+    string Id,
+    string Label,
+    string SurfaceId,
+    AgentBridgeUiControlKind Kind,
+    bool Mutating,
+    AgentBridgeActionArgumentSchema? Arguments = null,
+    string? CompletionOperationKind = null);
+
+public enum AgentBridgeActionArgumentKind
+{
+    String,
+    Integer,
+    Boolean,
+    Enum,
+    ItemName,
+}
+
+public sealed record AgentBridgeActionArgumentDescriptor(
+    string Name,
+    AgentBridgeActionArgumentKind Kind,
+    bool Required = true,
+    IReadOnlyList<string>? AllowedValues = null,
+    long? Minimum = null,
+    long? Maximum = null);
+
+public sealed record AgentBridgeActionArgumentSchema(
+    IReadOnlyList<AgentBridgeActionArgumentDescriptor> Properties,
+    bool AllowAdditionalProperties = false);
+
+/// <summary>Stable build identity for proving which assembly is actually loaded in the game process.</summary>
+public sealed record AgentBridgeRuntimeIdentity(
+    string PluginInternalName,
+    string AssemblyVersion,
+    string InformationalVersion,
+    string BuildConfiguration,
+    string? Commit,
+    string MainDllSha256,
+    string MainDllPath,
+    int ProcessId,
+    string RuntimeInstanceId,
+    DateTimeOffset LoadedAtUtc)
+{
+    public static AgentBridgeRuntimeIdentity FromAssembly(string pluginInternalName, Assembly assembly)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pluginInternalName);
+        ArgumentNullException.ThrowIfNull(assembly);
+        var assemblyVersion = assembly.GetName().Version?.ToString() ?? "0.0.0.0";
+        var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? assemblyVersion;
+        var buildConfiguration = assembly.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration
+            ?? "Unknown";
+        var commit = TryExtractCommit(informationalVersion);
+        var location = assembly.Location;
+        var sha256 = File.Exists(location)
+            ? Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(location)))
+            : string.Empty;
+        return new AgentBridgeRuntimeIdentity(
+            pluginInternalName,
+            assemblyVersion,
+            informationalVersion,
+            buildConfiguration,
+            commit,
+            sha256,
+            location,
+            Environment.ProcessId,
+            Guid.NewGuid().ToString("N"),
+            DateTimeOffset.UtcNow);
+    }
+
+    private static string? TryExtractCommit(string informationalVersion)
+    {
+        var separator = informationalVersion.LastIndexOf('+');
+        if (separator < 0 || separator == informationalVersion.Length - 1)
+            return null;
+        var metadata = informationalVersion[(separator + 1)..];
+        return metadata.Length >= 7 && metadata.All(char.IsAsciiHexDigit) ? metadata : null;
+    }
+}
+
+public sealed record AgentBridgeManifest(
+    int ProtocolVersion,
+    AgentBridgeRuntimeIdentity Runtime,
+    string ProfileId,
+    string ProfileAlias,
+    string SnapshotSchema,
+    IReadOnlyList<AgentBridgeCapabilityDescriptor> Capabilities,
+    IReadOnlyList<AgentBridgeReviewSurfaceDescriptor> ReviewSurfaces,
+    IReadOnlyList<AgentBridgeCaptureSurfaceDescriptor> CaptureSurfaces,
+    IReadOnlyList<AgentBridgeActionDescriptor> Actions);
+
+public enum AgentBridgeOperationState
+{
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+public sealed record AgentBridgeOperationSnapshot(
+    string Id,
+    string Kind,
+    AgentBridgeOperationState State,
+    string Message,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc,
+    long? Current = null,
+    long? Total = null,
+    bool CanCancel = false,
+    string? ErrorCode = null,
+    IReadOnlyDictionary<string, string>? Postconditions = null);
+
 public sealed record AgentBridgeResponse
 {
     public required bool Success { get; init; }
     public required string Message { get; init; }
     public object? Receipt { get; init; }
 
-    public static AgentBridgeResponse Ok(string message, object? receipt = null) => new() { Success = true, Message = message, Receipt = receipt };
+    public string? OperationId { get; init; }
+
+    public static AgentBridgeResponse Ok(string message, object? receipt = null, string? operationId = null) =>
+        new() { Success = true, Message = message, Receipt = receipt, OperationId = operationId };
     public static AgentBridgeResponse Fail(string message) => new() { Success = false, Message = message };
 }
 

@@ -1,4 +1,5 @@
 using Dalamud.Bindings.ImGui;
+using System.Text.Json;
 
 namespace Franthropy.Dalamud.AgentBridge;
 
@@ -57,6 +58,31 @@ public static class AgentBridgeUiReviewRegistryImGuiExtensions
             enabled,
             selected,
             value,
+            invoke);
+    }
+
+    public static void RegisterLastAction(
+        this AgentBridgeUiReviewRegistry registry,
+        string id,
+        string label,
+        AgentBridgeUiControlKind kind,
+        bool enabled,
+        bool selected,
+        string? value,
+        AgentBridgeActionArgumentSchema? arguments,
+        Func<JsonElement?, AgentBridgeUiActionResult> invoke)
+    {
+        ArgumentNullException.ThrowIfNull(registry);
+        registry.Register(
+            id,
+            label,
+            kind,
+            ImGui.GetItemRectMin(),
+            ImGui.GetItemRectMax(),
+            enabled,
+            selected,
+            value,
+            arguments,
             invoke);
     }
 }
