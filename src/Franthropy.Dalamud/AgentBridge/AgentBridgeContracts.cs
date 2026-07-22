@@ -38,6 +38,13 @@ public sealed record AgentBridgeReviewSurfaceDescriptor(
     string Target,
     int Order);
 
+/// <summary>A provider-advertised rendered surface which a generic bridge client can prepare for unfocused capture.</summary>
+public sealed record AgentBridgeCaptureSurfaceDescriptor(
+    string Id,
+    string Label,
+    int Order,
+    bool IsDefault = false);
+
 public sealed record AgentBridgeResponse
 {
     public required bool Success { get; init; }
