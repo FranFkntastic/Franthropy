@@ -65,7 +65,8 @@ public sealed record EquipmentInstanceFingerprint(
     ulong? CrafterContentId,
     IReadOnlyList<uint> MateriaIds,
     uint? GlamourId,
-    IReadOnlyList<byte> Stains);
+    IReadOnlyList<byte> Stains,
+    IReadOnlyList<byte>? MateriaGrades = null);
 
 public sealed class EquipmentInstanceFingerprintComparer : IEqualityComparer<EquipmentInstanceFingerprint>
 {
@@ -84,6 +85,7 @@ public sealed class EquipmentInstanceFingerprintComparer : IEqualityComparer<Equ
         left.Spiritbond == right.Spiritbond &&
         left.CrafterContentId == right.CrafterContentId &&
         left.MateriaIds.SequenceEqual(right.MateriaIds) &&
+        (left.MateriaGrades ?? []).SequenceEqual(right.MateriaGrades ?? []) &&
         left.GlamourId == right.GlamourId &&
         left.Stains.SequenceEqual(right.Stains);
 
@@ -100,6 +102,7 @@ public sealed class EquipmentInstanceFingerprintComparer : IEqualityComparer<Equ
         hash.Add(value.Spiritbond);
         hash.Add(value.CrafterContentId);
         foreach (var materiaId in value.MateriaIds) hash.Add(materiaId);
+        foreach (var materiaGrade in value.MateriaGrades ?? []) hash.Add(materiaGrade);
         hash.Add(value.GlamourId);
         foreach (var stain in value.Stains) hash.Add(stain);
         return hash.ToHashCode();
@@ -324,7 +327,16 @@ public static class EquipmentInstanceStats
         instance.Fingerprint.IsHighQuality ? EquipmentQuality.High : EquipmentQuality.Normal;
 }
 
-public sealed record GearsetItemReference(EquipmentSlot Slot, uint ItemId, bool? IsHighQuality = null);
+public sealed record GearsetItemReference(
+    EquipmentSlot Slot,
+    uint ItemId,
+    bool? IsHighQuality = null,
+    EquipmentLoadoutPosition? Position = null,
+    IReadOnlyList<uint>? MateriaIds = null,
+    IReadOnlyList<byte>? MateriaGrades = null,
+    uint? GlamourId = null,
+    IReadOnlyList<byte>? Stains = null,
+    bool IsMissing = false);
 
 public sealed record GearsetSnapshot(
     int GearsetId,
