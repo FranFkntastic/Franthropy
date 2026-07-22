@@ -109,6 +109,20 @@ public sealed class EquipmentDecisionContractsTests
     }
 
     [Fact]
+    public void Frontier_AllowsLaterSameCostSolutionToDominateWithinUtilityEpsilon()
+    {
+        var higherUtility = Solution("higher-utility", 10_000, 80, new(1, 1, 1), new(0, 0, 0));
+        var lowerBurden = Solution("lower-burden", 10_000, 80 - 0.5e-9, new(0, 1, 1), new(0, 0, 0));
+
+        var result = new EquipmentParetoFrontierBuilder().Build([higherUtility, lowerBurden]);
+
+        Assert.Equal("lower-burden", Assert.Single(result.Frontier).Candidate.SolutionId);
+        var dominated = Assert.Single(result.Dominated);
+        Assert.Equal("higher-utility", dominated.Solution.Candidate.SolutionId);
+        Assert.Equal(["lower-burden"], dominated.DominatingSolutionIds);
+    }
+
+    [Fact]
     public void Frontier_ReportsAdjacentTradeoffAndStructuralDiff()
     {
         var cheap = Solution("cheap", 1_000, 50, new(0, 1, 1), new(0, 0, 0), EquipmentQuality.Normal, itemId: 100);

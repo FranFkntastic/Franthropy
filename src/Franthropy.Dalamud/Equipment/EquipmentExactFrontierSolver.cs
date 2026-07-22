@@ -283,6 +283,8 @@ public sealed class EquipmentExactFrontierSolver
         {
             cancellationToken.ThrowIfCancellationRequested();
             var position = positions[positionIndex];
+            var remainingPositions = positions.Skip(positionIndex + 1).ToArray();
+            var futureResources = resources.CreateProjection(remainingPositions);
             var next = new List<State>();
             foreach (var state in states)
             {
@@ -291,6 +293,7 @@ public sealed class EquipmentExactFrontierSolver
                     expanded++;
                     next.Add(state with
                     {
+                        Resources = resources.Project(state.Resources, futureResources),
                         IsBaselineSoFar = state.IsBaselineSoFar && request.Baseline[position] is null,
                     });
                     continue;
@@ -304,21 +307,15 @@ public sealed class EquipmentExactFrontierSolver
                         infeasible++;
                         continue;
                     }
+                    allocatedResources = resources.Project(allocatedResources, futureResources);
                     next.Add(Allocate(state, choice, request.Baseline[position], allocatedResources, utilities));
                 }
             }
             if (next.Count == 0)
                 throw new InvalidOperationException($"No feasible loadout state can fill {position}.");
-
-            var remainingPositions = positions.Skip(positionIndex + 1).ToArray();
-            var futureResources = resources.CreateProjection(remainingPositions);
-            for (var stateIndex = 0; stateIndex < next.Count; stateIndex++)
-            {
-                var state = next[stateIndex];
-                var projectedResources = resources.Project(state.Resources, futureResources);
-                if (!ReferenceEquals(projectedResources, state.Resources))
-                    next[stateIndex] = state with { Resources = projectedResources };
-            }
+            var usesFastResourceIndex = reportProgress is null
+                ? (bool?)null
+                : next.All(state => state.Resources.TryGetFastResourceKey(futureResources, out _));
             reportProgress?.Invoke(new(
                 positionIndex,
                 positions.Length,
@@ -330,7 +327,7 @@ public sealed class EquipmentExactFrontierSolver
                 states.Count,
                 stopwatch.Elapsed,
                 "Pruning",
-                next.All(state => state.Resources.TryGetFastResourceKey(futureResources, out _))));
+                usesFastResourceIndex ?? false));
             states = cancellationToken.CanBeCanceled
                 ? PruneCancellable(
                     next,
@@ -338,6 +335,7 @@ public sealed class EquipmentExactFrontierSolver
                     futureResources,
                     request.MaxRetainedRepresentatives,
                     cancellationToken,
+                    usesFastResourceIndex,
                     (processed, retained, index) => reportProgress?.Invoke(new(
                         positionIndex,
                         positions.Length,
@@ -595,6 +593,7 @@ public sealed class EquipmentExactFrontierSolver
         ResourceProjection futureResources,
         int maxRetainedRepresentatives,
         CancellationToken cancellationToken,
+        bool? usesFastResourceIndex,
         Action<int, int, ExactDominanceIndex?>? reportPruningProgress,
         ref long dominatedCount,
         ref long compactedCount)
@@ -606,13 +605,15 @@ public sealed class EquipmentExactFrontierSolver
             coordinateModel,
             futureResources,
             ordered,
-            cancellationToken);
+            cancellationToken,
+            usesFastResourceIndex);
         for (var candidateIndex = 0; candidateIndex < ordered.Length; candidateIndex++)
         {
             if ((candidateIndex & 4095) == 0)
+            {
                 reportPruningProgress?.Invoke(candidateIndex, retained.Count, dominanceIndex);
-            if (cancellationToken.CanBeCanceled)
                 cancellationToken.ThrowIfCancellationRequested();
+            }
             var candidate = ordered[candidateIndex];
             var isDominated = !candidate.IsBaselineSoFar && (dominanceIndex is not null
                 ? dominanceIndex.AnyDominates(candidate, utilityModel, cancellationToken)
@@ -1138,11 +1139,9 @@ public sealed class EquipmentExactFrontierSolver
                     ? cachedRepresentativePaths
                     : cachedRepresentativePaths.Take(limit).ToArray();
             var representatives = BuildCanonicalRepresentativePaths(limit)
-                .Select(value => (Path: value, Text: value.CanonicalText()))
-                .DistinctBy(value => value.Text, StringComparer.Ordinal)
-                .OrderBy(value => value.Text, StringComparer.Ordinal)
+                .Distinct(RepresentativePathComparer.Instance)
+                .Order(RepresentativePathComparer.Instance)
                 .Take(limit)
-                .Select(value => value.Path)
                 .ToArray();
             cachedRepresentativePaths = representatives;
             cachedLimit = limit;
@@ -1190,11 +1189,14 @@ public sealed class EquipmentExactFrontierSolver
             {
                 this.children = children;
                 retainedPathCount = children.Aggregate(0L, (sum, child) => checked(sum + child.RetainedPathCount));
-                canonicalFirstKey = children.Select(child => child.CanonicalFirstKey)
-                    .Where(value => value is not null)
-                    .Cast<CanonicalPathKey>()
-                    .OrderBy(value => value.Text, StringComparer.Ordinal)
-                    .First();
+                CanonicalPathKey? first = null;
+                foreach (var child in children)
+                {
+                    var candidate = child.CanonicalFirstKey;
+                    if (candidate is not null && (first is null || candidate.CompareCanonical(first) < 0))
+                        first = candidate;
+                }
+                canonicalFirstKey = first ?? throw new InvalidOperationException("A retained path union cannot be empty.");
             }
 
             public override long RetainedPathCount => retainedPathCount;
@@ -1207,6 +1209,9 @@ public sealed class EquipmentExactFrontierSolver
 
         protected sealed class RepresentativePath
         {
+            private const uint HashOffset = 2166136261;
+            private const uint HashPrime = 16777619;
+
             public static RepresentativePath Empty { get; } = new(null, null, 0);
 
             private RepresentativePath(
@@ -1220,16 +1225,19 @@ public sealed class EquipmentExactFrontierSolver
                 SelectionText = selection is null
                     ? string.Empty
                     : CanonicalRepresentativeSelectionTexts.GetValue(selection, CanonicalRepresentativeSelectionText);
-                CanonicalLength = previous is null
-                    ? SelectionText.Length
-                    : checked(previous.CanonicalLength + (previous.Count == 0 ? 0 : 1) + SelectionText.Length);
+                var hash = previous?.CanonicalHash ?? HashOffset;
+                if (previous?.Selection is not null)
+                    hash = AddHash(hash, '|');
+                foreach (var value in SelectionText)
+                    hash = AddHash(hash, value);
+                CanonicalHash = hash;
             }
 
             private RepresentativePath? Previous { get; }
             private EquipmentLoadoutSelection? Selection { get; }
             private string SelectionText { get; }
             private int Count { get; }
-            private int CanonicalLength { get; }
+            private uint CanonicalHash { get; }
 
             public RepresentativePath Append(EquipmentLoadoutSelection selection) =>
                 new(this, selection, checked(Count + 1));
@@ -1246,17 +1254,42 @@ public sealed class EquipmentExactFrontierSolver
                 return selections;
             }
 
-            public string CanonicalText() => string.Create(CanonicalLength, this, static (buffer, path) =>
+            public int GetCanonicalHashCode() => unchecked((int)CanonicalHash);
+
+            public int CompareCanonical(RepresentativePath other)
             {
-                var cursor = buffer.Length;
-                for (var current = path; current.Selection is not null; current = current.Previous!)
-                {
-                    cursor -= current.SelectionText.Length;
-                    current.SelectionText.AsSpan().CopyTo(buffer[cursor..]);
-                    if (current.Previous?.Selection is not null)
-                        buffer[--cursor] = '|';
-                }
-            });
+                CanonicalSegmentBuffer left = default;
+                CanonicalSegmentBuffer right = default;
+                var index = Count;
+                for (var current = this; current.Selection is not null; current = current.Previous!)
+                    left[--index] = current.SelectionText;
+                index = other.Count;
+                for (var current = other; current.Selection is not null; current = current.Previous!)
+                    right[--index] = current.SelectionText;
+                return CompareCanonicalSegments(left, Count, right, other.Count);
+            }
+
+            private static uint AddHash(uint hash, char value) => unchecked((hash ^ value) * HashPrime);
+        }
+
+        private sealed class RepresentativePathComparer : IComparer<RepresentativePath>, IEqualityComparer<RepresentativePath>
+        {
+            public static RepresentativePathComparer Instance { get; } = new();
+
+            public int Compare(RepresentativePath? x, RepresentativePath? y)
+            {
+                if (ReferenceEquals(x, y))
+                    return 0;
+                if (x is null)
+                    return -1;
+                if (y is null)
+                    return 1;
+                return x.CompareCanonical(y);
+            }
+
+            public bool Equals(RepresentativePath? x, RepresentativePath? y) => Compare(x, y) == 0;
+
+            public int GetHashCode(RepresentativePath obj) => obj.GetCanonicalHashCode();
         }
 
     }
@@ -1274,24 +1307,26 @@ public sealed class EquipmentExactFrontierSolver
             Previous = previous;
             Selection = selection;
             SelectionText = CanonicalStateSelectionTexts.GetValue(selection, CanonicalStateSelectionText);
-            CanonicalLength = checked((previous?.CanonicalLength ?? 0) + (previous is null ? 0 : 1) + SelectionText.Length);
+            Count = checked((previous?.Count ?? 0) + 1);
         }
 
         public CanonicalPathKey? Previous { get; }
         public EquipmentLoadoutSelection Selection { get; }
         private string SelectionText { get; }
-        private int CanonicalLength { get; }
-        public string Text => string.Create(CanonicalLength, this, static (buffer, path) =>
+        private int Count { get; }
+
+        public int CompareCanonical(CanonicalPathKey other)
         {
-            var cursor = buffer.Length;
-            for (var current = path; current is not null; current = current.Previous)
-            {
-                cursor -= current.SelectionText.Length;
-                current.SelectionText.AsSpan().CopyTo(buffer[cursor..]);
-                if (current.Previous is not null)
-                    buffer[--cursor] = '|';
-            }
-        });
+            CanonicalSegmentBuffer left = default;
+            CanonicalSegmentBuffer right = default;
+            var index = Count;
+            for (var current = this; current is not null; current = current.Previous)
+                left[--index] = current.SelectionText;
+            index = other.Count;
+            for (var current = other; current is not null; current = current.Previous)
+                right[--index] = current.SelectionText;
+            return CompareCanonicalSegments(left, Count, right, other.Count);
+        }
 
         public static CanonicalPathKey Append(CanonicalPathKey? current, EquipmentLoadoutSelection selection) =>
             new(current, selection);
@@ -1300,6 +1335,64 @@ public sealed class EquipmentExactFrontierSolver
 
     private static string CanonicalStateSelectionText(EquipmentLoadoutSelection selection) =>
         $"{selection.Position}:{selection.OfferKey.ItemId}:{selection.OfferKey.Quality}:{selection.OfferKey.SourceKind}:{selection.OfferKey.SourceCatalogKey}:{selection.ObservationId}";
+
+    [InlineArray(12)]
+    private struct CanonicalSegmentBuffer
+    {
+        private string? value;
+    }
+
+    private static int CompareCanonicalSegments(
+        Span<string?> left,
+        int leftCount,
+        Span<string?> right,
+        int rightCount)
+    {
+        var leftCursor = new CanonicalTextCursor(left[..leftCount]);
+        var rightCursor = new CanonicalTextCursor(right[..rightCount]);
+        while (true)
+        {
+            var hasLeft = leftCursor.TryGetChunk(out var leftChunk);
+            var hasRight = rightCursor.TryGetChunk(out var rightChunk);
+            if (!hasLeft || !hasRight)
+                return hasLeft.CompareTo(hasRight);
+            var length = Math.Min(leftChunk.Length, rightChunk.Length);
+            var comparison = leftChunk[..length].SequenceCompareTo(rightChunk[..length]);
+            if (comparison != 0)
+                return comparison;
+            leftCursor.Advance(length);
+            rightCursor.Advance(length);
+        }
+    }
+
+    private ref struct CanonicalTextCursor(ReadOnlySpan<string?> segments)
+    {
+        private readonly ReadOnlySpan<string?> segments = segments;
+        private int tokenIndex;
+        private int offset;
+
+        public bool TryGetChunk(out ReadOnlySpan<char> value)
+        {
+            var tokenCount = checked(segments.Length * 2 - 1);
+            while (tokenIndex < tokenCount)
+            {
+                var token = (tokenIndex & 1) == 0
+                    ? segments[tokenIndex / 2]!.AsSpan()
+                    : "|".AsSpan();
+                if (offset < token.Length)
+                {
+                    value = token[offset..];
+                    return true;
+                }
+                tokenIndex++;
+                offset = 0;
+            }
+            value = default;
+            return false;
+        }
+
+        public void Advance(int count) => offset = checked(offset + count);
+    }
 
     private sealed class ExactDominanceIndex
     {
@@ -1319,12 +1412,13 @@ public sealed class EquipmentExactFrontierSolver
             IEquipmentPartialDominanceCoordinateModel coordinateModel,
             ResourceProjection futureResources,
             IReadOnlyList<State> generation,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            bool? usesFastResources = null)
         {
             this.coordinateModel = coordinateModel;
             this.futureResources = futureResources;
             candidateScores = new ulong[checked(coordinateModel.GetPartialDominanceCoordinates(generation[0].Utility).Count + 9)];
-            useFastResources = generation.All(state => state.Resources.TryGetFastResourceKey(futureResources, out _));
+            useFastResources = usesFastResources ?? generation.All(state => state.Resources.TryGetFastResourceKey(futureResources, out _));
             if (useFastResources)
             {
                 axes = [];
@@ -1372,7 +1466,7 @@ public sealed class EquipmentExactFrontierSolver
         {
             if (useFastResources)
                 BuildScores(candidate, candidateScores);
-            IReadOnlyList<ulong> candidateScoreValues = useFastResources
+            var candidateScoreValues = useFastResources
                 ? candidateScores
                 : scores[candidate];
             var visited = 0;
@@ -1380,21 +1474,48 @@ public sealed class EquipmentExactFrontierSolver
             {
                 if (FastResourceCombinationCount(resource) <= 512)
                 {
-                    foreach (var key in DominatingResourceKeys(resource))
+                    for (var worlds = resource.Worlds; ; worlds = (worlds - 1) & resource.Worlds)
                     {
-                        if ((visited++ & 255) == 0)
-                            cancellationToken.ThrowIfCancellationRequested();
-                        if (!fastResourceBuckets.TryGetValue(key, out var bucket) ||
-                            !ScoresNoWorse(bucket.MaximumScores, candidateScoreValues))
-                            continue;
-                        if (BucketAnyDominates(
-                            bucket,
-                            candidate,
-                            candidateScoreValues,
-                            utilityModel,
-                            cancellationToken,
-                            ref visited))
-                            return true;
+                        for (var vendors = resource.Vendors; ; vendors = (vendors - 1) & resource.Vendors)
+                        {
+                            for (var unique = resource.UniqueItems; ; unique = (unique - 1) & resource.UniqueItems)
+                            {
+                                var occupancyCount = resource.MainHandOccupiesOffHand ? 2 : 1;
+                                for (var sunkWorlds = 0; sunkWorlds <= resource.SunkWorldVisitCount; sunkWorlds++)
+                                for (var sunkVendors = 0; sunkVendors <= resource.SunkVendorStopCount; sunkVendors++)
+                                for (var occupancy = 0; occupancy < occupancyCount; occupancy++)
+                                {
+                                    if (ResourceKeyAnyDominates(
+                                        new(worlds, vendors, unique, -1, 0, sunkWorlds, sunkVendors, occupancy != 0),
+                                        candidate,
+                                        candidateScoreValues,
+                                        utilityModel,
+                                        cancellationToken,
+                                        ref visited))
+                                        return true;
+                                    if (resource.AllocationIndex >= 0)
+                                    {
+                                        for (uint count = 1; count <= resource.AllocationCount; count++)
+                                        {
+                                            if (ResourceKeyAnyDominates(
+                                                new(worlds, vendors, unique, resource.AllocationIndex, count, sunkWorlds, sunkVendors, occupancy != 0),
+                                                candidate,
+                                                candidateScoreValues,
+                                                utilityModel,
+                                                cancellationToken,
+                                                ref visited))
+                                                return true;
+                                        }
+                                    }
+                                }
+                                if (unique == 0)
+                                    break;
+                            }
+                            if (vendors == 0)
+                                break;
+                        }
+                        if (worlds == 0)
+                            break;
                     }
                     return false;
                 }
@@ -1441,10 +1562,32 @@ public sealed class EquipmentExactFrontierSolver
             return false;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private bool ResourceKeyAnyDominates(
+            FastResourceKey key,
+            State candidate,
+            ulong[] candidateScores,
+            IEquipmentExactSolverUtilityModel utilityModel,
+            CancellationToken cancellationToken,
+            ref int visited)
+        {
+            if ((visited++ & 255) == 0)
+                cancellationToken.ThrowIfCancellationRequested();
+            return fastResourceBuckets.TryGetValue(key, out var bucket) &&
+                ScoresNoWorse(bucket.MaximumScores, candidateScores) &&
+                BucketAnyDominates(
+                    bucket,
+                    candidate,
+                    candidateScores,
+                    utilityModel,
+                    cancellationToken,
+                    ref visited);
+        }
+
         private bool BucketAnyDominates(
             FastResourceBucket bucket,
             State candidate,
-            IReadOnlyList<ulong> candidateScores,
+            ulong[] candidateScores,
             IEquipmentExactSolverUtilityModel utilityModel,
             CancellationToken cancellationToken,
             ref int visited)
@@ -1511,53 +1654,7 @@ public sealed class EquipmentExactFrontierSolver
                 (key.MainHandOccupiesOffHand ? 2 : 1));
         }
 
-        private IEnumerable<FastResourceKey> DominatingResourceKeys(FastResourceKey candidate)
-        {
-            for (var worlds = candidate.Worlds; ; worlds = (worlds - 1) & candidate.Worlds)
-            {
-                for (var vendors = candidate.Vendors; ; vendors = (vendors - 1) & candidate.Vendors)
-                {
-                    for (var unique = candidate.UniqueItems; ; unique = (unique - 1) & candidate.UniqueItems)
-                    {
-                        var occupancyCount = candidate.MainHandOccupiesOffHand ? 2 : 1;
-                        for (var sunkWorlds = 0; sunkWorlds <= candidate.SunkWorldVisitCount; sunkWorlds++)
-                        for (var sunkVendors = 0; sunkVendors <= candidate.SunkVendorStopCount; sunkVendors++)
-                        for (var occupancy = 0; occupancy < occupancyCount; occupancy++)
-                        {
-                            yield return new(
-                                worlds,
-                                vendors,
-                                unique,
-                                -1,
-                                0,
-                                sunkWorlds,
-                                sunkVendors,
-                                occupancy != 0);
-                            if (candidate.AllocationIndex >= 0)
-                            {
-                                for (uint count = 1; count <= candidate.AllocationCount; count++)
-                                    yield return new(
-                                        worlds,
-                                        vendors,
-                                        unique,
-                                        candidate.AllocationIndex,
-                                        count,
-                                        sunkWorlds,
-                                        sunkVendors,
-                                        occupancy != 0);
-                            }
-                        }
-                        if (unique == 0)
-                            break;
-                    }
-                    if (vendors == 0)
-                        break;
-                }
-                if (worlds == 0)
-                    break;
-            }
-        }
-
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool FastResourcesCouldDominate(FastResourceKey candidate, FastResourceKey other) =>
             (candidate.Worlds & ~other.Worlds) == 0 &&
             (candidate.Vendors & ~other.Vendors) == 0 &&
@@ -1596,9 +1693,10 @@ public sealed class EquipmentExactFrontierSolver
             result[^1] = ulong.MaxValue - checked((ulong)state.Resources.UniqueItems.CountMasked(futureResources.UniqueMask));
         }
 
-        private static bool ScoresNoWorse(IReadOnlyList<ulong> candidate, IReadOnlyList<ulong> other)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool ScoresNoWorse(ulong[] candidate, ulong[] other)
         {
-            for (var index = 0; index < candidate.Count; index++)
+            for (var index = 0; index < candidate.Length; index++)
             {
                 if (candidate[index] < other[index])
                     return false;
@@ -1615,7 +1713,7 @@ public sealed class EquipmentExactFrontierSolver
 
             public bool HasThreeUtilityCoordinates => scoreCount == 12;
 
-            public void Add(State state, IReadOnlyList<ulong> scores)
+            public void Add(State state, ulong[] scores)
             {
                 if (!statesByCostScore.TryGetValue(scores[0], out var sameCost))
                 {
@@ -1671,7 +1769,7 @@ public sealed class EquipmentExactFrontierSolver
 
             public bool AnyThreeCoordinateDominates(
                 State candidate,
-                IReadOnlyList<ulong> candidateScores,
+                ulong[] candidateScores,
                 IEquipmentExactSolverUtilityModel utilityModel,
                 ResourceProjection futureResources,
                 CancellationToken cancellationToken,
@@ -1727,7 +1825,7 @@ public sealed class EquipmentExactFrontierSolver
                 ulong IncompleteCoverage,
                 ulong Confidence)
             {
-                public bool IsNoWorseThan(IReadOnlyList<ulong> scores) =>
+                public bool IsNoWorseThan(ulong[] scores) =>
                     Transactions >= scores[1] &&
                     Freshness >= scores[2] &&
                     IncompleteCoverage >= scores[3] &&

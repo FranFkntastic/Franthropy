@@ -208,7 +208,7 @@ public sealed record EquipmentParetoResult(
 
 public static class EquipmentDecisionDominance
 {
-    private const double Epsilon = 1e-9;
+    internal const double Epsilon = 1e-9;
 
     public static bool CanCompare(EquipmentDecisionSolution left, EquipmentDecisionSolution right) =>
         left.Utility.Profile == right.Utility.Profile &&
@@ -230,11 +230,28 @@ public static class EquipmentDecisionDominance
         if (!costNoWorse || !utilityNoWorse || !burdenNoWorse || !riskNoWorse)
             return false;
 
-        return candidate.AcquisitionCostGil < other.AcquisitionCostGil ||
+        return IsStrictlyBetter(candidate, other);
+    }
+
+    internal static bool DominatesWithCostAndUtilityNoWorse(
+        EquipmentDecisionSolution candidate,
+        EquipmentDecisionSolution other)
+    {
+        if (!CanCompare(candidate, other) ||
+            !candidate.Burden.IsNoWorseThan(other.Burden) ||
+            !candidate.EvidenceRisk.IsNoWorseThan(other.EvidenceRisk))
+            return false;
+
+        return IsStrictlyBetter(candidate, other);
+    }
+
+    private static bool IsStrictlyBetter(
+        EquipmentDecisionSolution candidate,
+        EquipmentDecisionSolution other) =>
+        candidate.AcquisitionCostGil < other.AcquisitionCostGil ||
             candidate.Utility.UtilityScore > other.Utility.UtilityScore + Epsilon ||
             candidate.Burden.IsStrictlyBetterThan(other.Burden) ||
             candidate.EvidenceRisk.IsStrictlyBetterThan(other.EvidenceRisk);
-    }
 
     public static bool IsUtilityCostEquivalent(EquipmentDecisionSolution left, EquipmentDecisionSolution right) =>
         CanCompare(left, right) &&
@@ -269,12 +286,18 @@ public sealed class EquipmentParetoFrontierBuilder : IEquipmentParetoAdvisor
         var witnessCount = 0;
         try
         {
-            foreach (var solution in ordered)
+            for (var solutionIndex = 0; solutionIndex < ordered.Length; solutionIndex++)
             {
+                var solution = ordered[solutionIndex];
                 witnessCount = 0;
-                foreach (var candidate in ordered)
+                for (var candidateIndex = 0; candidateIndex < ordered.Length; candidateIndex++)
                 {
-                    if (!ReferenceEquals(candidate, solution) && EquipmentDecisionDominance.Dominates(candidate, solution))
+                    var candidate = ordered[candidateIndex];
+                    if (candidate.AcquisitionCostGil > solution.AcquisitionCostGil)
+                        break;
+                    if (candidateIndex != solutionIndex &&
+                        candidate.Utility.UtilityScore + EquipmentDecisionDominance.Epsilon >= solution.Utility.UtilityScore &&
+                        EquipmentDecisionDominance.DominatesWithCostAndUtilityNoWorse(candidate, solution))
                         witnessBuffer[witnessCount++] = candidate.Candidate.SolutionId;
                 }
                 if (witnessCount == 0)
