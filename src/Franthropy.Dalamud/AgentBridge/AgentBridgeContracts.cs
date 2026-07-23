@@ -25,6 +25,8 @@ public sealed record AgentBridgeRequest
     public string? Command { get; init; }
     public string? Target { get; init; }
     public long? FrameId { get; init; }
+    public string? Challenge { get; init; }
+    public string? ProofId { get; init; }
     public bool FullViewport { get; init; }
     public string? TransactionId { get; init; }
     public JsonElement? Arguments { get; init; }
@@ -101,7 +103,7 @@ public sealed record AgentBridgeRuntimeIdentity(
     string RuntimeInstanceId,
     DateTimeOffset LoadedAtUtc)
 {
-    public static AgentBridgeRuntimeIdentity FromAssembly(string pluginInternalName, Assembly assembly)
+    public static AgentBridgeRuntimeIdentity FromAssembly(string pluginInternalName, Assembly assembly, string? mainDllPath = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(pluginInternalName);
         ArgumentNullException.ThrowIfNull(assembly);
@@ -111,7 +113,7 @@ public sealed record AgentBridgeRuntimeIdentity(
         var buildConfiguration = assembly.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration
             ?? "Unknown";
         var commit = TryExtractCommit(informationalVersion);
-        var location = assembly.Location;
+        var location = string.IsNullOrWhiteSpace(mainDllPath) ? assembly.Location : Path.GetFullPath(mainDllPath);
         var sha256 = File.Exists(location)
             ? Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(location)))
             : string.Empty;
