@@ -6,7 +6,8 @@ public sealed record DalamudInventoryStack(
     InventoryType Container,
     int SlotIndex,
     uint ItemId,
-    int Quantity);
+    int Quantity,
+    bool IsHighQuality = false);
 
 /// <summary>
 /// Reads exact live inventory stacks without applying product-specific grouping or policy.
@@ -40,14 +41,18 @@ public static class DalamudInventoryStackScanner
                     inventoryType,
                     slotIndex,
                     slot->ItemId,
-                    checked((int)slot->Quantity)));
+                    checked((int)slot->Quantity),
+                    slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality)));
             }
         }
 
         return stacks;
     }
 
-    public static unsafe int CountLoadedItem(InventoryType inventoryType, uint itemId)
+    public static unsafe int CountLoadedItem(
+        InventoryType inventoryType,
+        uint itemId,
+        bool? isHighQuality = null)
     {
         var inventoryManager = InventoryManager.Instance();
         if (inventoryManager == null)
@@ -61,8 +66,13 @@ public static class DalamudInventoryStackScanner
         for (var slotIndex = 0; slotIndex < container->Size; slotIndex++)
         {
             var slot = container->GetInventorySlot(slotIndex);
-            if (slot != null && slot->ItemId == itemId)
+            if (slot != null &&
+                slot->ItemId == itemId &&
+                (isHighQuality is null ||
+                 slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality) == isHighQuality))
+            {
                 quantity += checked((int)slot->Quantity);
+            }
         }
 
         return quantity;

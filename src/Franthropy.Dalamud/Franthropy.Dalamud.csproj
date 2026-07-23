@@ -84,6 +84,7 @@
     <Compile Remove="Automation\Ui\RenderedItemDetailTooltipRequest.cs" />
     <Compile Remove="Automation\Inventory\DalamudInventoryStackScanner.cs" />
     <Compile Remove="Automation\Retainers\DalamudRetainerCrystalTransfer.cs" />
+    <Compile Remove="Automation\Retainers\DalamudRetainerItemTransfer.cs" />
     <Compile Remove="Automation\Retainers\DalamudRetainerInventory.cs" />
     <Compile Remove="Automation\Retainers\DalamudAutoRetainerIpc.cs" />
     <Compile Remove="UI\Settings\DalamudSettingsTreeRenderer.cs" />

@@ -19,12 +19,16 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private const string SelectString = "SelectString";
     private const string InventoryLarge = "InventoryRetainerLarge";
     private const string InventorySmall = "InventoryRetainer";
-    private static readonly IReadOnlyList<InventoryType> PlayerItemContainers =
+    private static readonly IReadOnlyList<InventoryType> PlayerOrdinaryItemContainers =
     [
         InventoryType.Inventory1,
         InventoryType.Inventory2,
         InventoryType.Inventory3,
         InventoryType.Inventory4,
+    ];
+    private static readonly IReadOnlyList<InventoryType> PlayerItemContainers =
+    [
+        .. PlayerOrdinaryItemContainers,
         InventoryType.Crystals,
     ];
 
@@ -33,6 +37,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private readonly IDataManager dataManager;
     private readonly DalamudSummoningBellInteractor bell;
     private readonly DalamudRetainerCrystalTransfer crystals;
+    private readonly DalamudRetainerItemTransfer items;
     private RetainerAutomationTarget? active;
 
     public DalamudRetainerAutomationSession(
@@ -49,6 +54,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         this.dataManager = dataManager;
         bell = new(objects, targets, dataManager);
         crystals = new(sigScanner, gameGui, framework, log);
+        items = new(sigScanner, gameGui, framework, log);
     }
 
     /// <remarks>Read this property from the Dalamud framework thread.</remarks>
@@ -161,6 +167,22 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         framework.RunOnTick(
             () => DalamudInventoryStackScanner.ScanLoadedStacks([InventoryType.Crystals], itemIds),
             cancellationToken: cancellationToken);
+
+    public Task<IReadOnlyList<DalamudInventoryStack>> ScanPlayerInventoryAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default) =>
+        framework.RunOnTick(
+            () => DalamudInventoryStackScanner.ScanLoadedStacks(PlayerOrdinaryItemContainers, itemIds),
+            cancellationToken: cancellationToken);
+
+    public async Task<RetainerDepositResult> DepositAsync(
+        DalamudInventoryStack stack,
+        int quantity,
+        CancellationToken cancellationToken = default)
+    {
+        var verified = await framework.RunOnTick(() => VerifyActive(active?.RetainerId ?? 0), cancellationToken: cancellationToken).ConfigureAwait(false);
+        return verified.Success
+            ? await items.DepositAsync(stack, quantity, cancellationToken).ConfigureAwait(false)
+            : new(false, 0, "RetainerIdentityMismatch", verified.Message);
+    }
 
     public async Task<RetainerCrystalTransferResult> DepositCrystalAsync(
         DalamudInventoryStack stack,

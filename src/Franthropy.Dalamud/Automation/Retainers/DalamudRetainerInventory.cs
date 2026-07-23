@@ -5,7 +5,7 @@ namespace Franthropy.Dalamud.Automation.Retainers;
 
 public static class DalamudRetainerInventory
 {
-    public static readonly IReadOnlyList<InventoryType> ItemContainers =
+    public static readonly IReadOnlyList<InventoryType> OrdinaryItemContainers =
     [
         InventoryType.RetainerPage1,
         InventoryType.RetainerPage2,
@@ -14,6 +14,11 @@ public static class DalamudRetainerInventory
         InventoryType.RetainerPage5,
         InventoryType.RetainerPage6,
         InventoryType.RetainerPage7,
+    ];
+
+    public static readonly IReadOnlyList<InventoryType> ItemContainers =
+    [
+        .. OrdinaryItemContainers,
         InventoryType.RetainerCrystals,
     ];
 

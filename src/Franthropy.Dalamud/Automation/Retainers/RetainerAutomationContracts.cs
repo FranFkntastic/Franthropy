@@ -11,6 +11,7 @@ public sealed record RetainerAutomationResult(bool Success, string Code, string 
 }
 
 public sealed record RetainerRetrievalResult(bool Success, int Transferred, string Code, string Message);
+public sealed record RetainerDepositResult(bool Success, int Transferred, string Code, string Message);
 
 /// <summary>
 /// Complete game-facing retainer interaction lifecycle. Product planning, authorization,
@@ -25,11 +26,26 @@ public interface IRetainerAutomationSession
     Task<RetainerAutomationResult> OpenInventoryAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DalamudInventoryStack>> ScanRetainerAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default);
     Task<RetainerRetrievalResult> RetrieveAsync(DalamudInventoryStack stack, int quantity, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<DalamudInventoryStack>> ScanPlayerInventoryAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default);
+    Task<RetainerDepositResult> DepositAsync(DalamudInventoryStack stack, int quantity, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DalamudInventoryStack>> ScanPlayerCrystalsAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default);
     Task<RetainerCrystalTransferResult> DepositCrystalAsync(DalamudInventoryStack stack, int quantity, CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> CloseInventoryAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> CloseRetainerAsync(CancellationToken cancellationToken = default);
     void CancelActive();
+}
+
+public static class RetainerDepositObservation
+{
+    public static bool Matches(
+        int expected,
+        int playerQuantityBefore,
+        int playerQuantityAfter,
+        int retainerQuantityBefore,
+        int retainerQuantityAfter) =>
+        expected > 0 &&
+        playerQuantityBefore - playerQuantityAfter == expected &&
+        retainerQuantityAfter - retainerQuantityBefore == expected;
 }
 
 public static class RetainerRetrievalObservation

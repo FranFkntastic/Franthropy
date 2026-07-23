@@ -51,6 +51,25 @@ public sealed class RetainerAutomationSessionTests
             playerBefore,
             playerAfter));
 
+    [Theory]
+    [InlineData(4, 10, 6, 3, 7, true)]
+    [InlineData(4, 10, 7, 3, 7, false)]
+    [InlineData(4, 10, 6, 3, 6, false)]
+    [InlineData(0, 10, 10, 3, 3, false)]
+    public void DepositObservation_RequiresMatchingSourceAndDestinationDeltas(
+        int transferred,
+        int playerBefore,
+        int playerAfter,
+        int retainerBefore,
+        int retainerAfter,
+        bool expected) =>
+        Assert.Equal(expected, RetainerDepositObservation.Matches(
+            transferred,
+            playerBefore,
+            playerAfter,
+            retainerBefore,
+            retainerAfter));
+
     [Fact]
     public async Task Session_PropagatesCancellationIntoFrameworkWork()
     {
