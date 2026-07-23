@@ -26,18 +26,13 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         InventoryType.Inventory3,
         InventoryType.Inventory4,
     ];
-    private static readonly IReadOnlyList<InventoryType> PlayerItemContainers =
-    [
-        .. PlayerOrdinaryItemContainers,
-        InventoryType.Crystals,
-    ];
-
     private readonly IFramework framework;
     private readonly IGameGui gameGui;
     private readonly IDataManager dataManager;
     private readonly DalamudSummoningBellInteractor bell;
     private readonly DalamudRetainerCrystalTransfer crystals;
     private readonly DalamudRetainerItemTransfer items;
+    private readonly DalamudRetainerItemRetrieval retrievals;
     private RetainerAutomationTarget? active;
 
     public DalamudRetainerAutomationSession(
@@ -55,6 +50,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         bell = new(objects, targets, dataManager);
         crystals = new(sigScanner, gameGui, framework, log);
         items = new(sigScanner, gameGui, framework, log);
+        retrievals = new(sigScanner, gameGui, framework, log);
     }
 
     /// <remarks>Read this property from the Dalamud framework thread.</remarks>
@@ -132,35 +128,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     public async Task<RetainerRetrievalResult> RetrieveAsync(DalamudInventoryStack stack, int quantity, CancellationToken cancellationToken = default)
     {
         var verified = await framework.RunOnTick(() => VerifyActive(active?.RetainerId ?? 0), cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (!verified.Success)
-            return new(false, 0, "RetainerIdentityMismatch", verified.Message);
-
-        var pending = await framework.RunOnTick(() => OpenContext(stack, quantity), cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (!pending.Success)
-            return new(false, 0, "ContextOpenFailed", pending.Message);
-
-        var selection = await PollAsync(() => SelectContextEntry(pending.Label, stack), 30, cancellationToken).ConfigureAwait(false);
-        if (!selection.Success)
-            return new(false, 0, "ContextSelectionFailed", selection.Message);
-
-        if (pending.NeedsQuantity)
-        {
-            var submitted = await PollAsync(() => SubmitQuantity(pending.Quantity), 30, cancellationToken).ConfigureAwait(false);
-            if (!submitted.Success)
-                return new(false, 0, "QuantityFailed", submitted.Message);
-        }
-
-        for (var attempt = 0; attempt < 60; attempt++)
-        {
-            var result = await framework.RunOnTick(
-                () => VerifyRetrieval(stack, pending.Quantity, pending.PlayerBefore),
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (result.Success)
-                return result;
-            await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
-        }
-
-        return new(false, 0, "TransferNotObserved", $"Retrieval was not observed for item {stack.ItemId}.");
+        return verified.Success
+            ? await retrievals.RetrieveAsync(stack, quantity, cancellationToken).ConfigureAwait(false)
+            : new(false, 0, "RetainerIdentityMismatch", verified.Message);
     }
 
     public Task<IReadOnlyList<DalamudInventoryStack>> ScanPlayerCrystalsAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default) =>
@@ -260,23 +230,6 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         return false;
     }
 
-    private async Task<RetainerAutomationResult> PollAsync(
-        Func<RetainerAutomationResult> action,
-        int attempts,
-        CancellationToken cancellationToken)
-    {
-        var result = RetainerAutomationResult.Failed("ActionNotReady", "Action did not become ready.");
-        for (var attempt = 0; attempt < attempts; attempt++)
-        {
-            result = await framework.RunOnTick(action, cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (result.Success)
-                return result;
-            await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
-        }
-
-        return result;
-    }
-
     private unsafe RetainerAutomationResult SelectRetainer(string name)
     {
         var addon = gameGui.GetAddonByName<AtkUnitBase>(RetainerList, 1);
@@ -338,89 +291,6 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         return -1;
     }
 
-    private unsafe PendingRetrieval OpenContext(DalamudInventoryStack stack, int requested)
-    {
-        if (requested <= 0 || active is null)
-            return PendingRetrieval.Fail("Invalid retrieval request.");
-        var manager = InventoryManager.Instance();
-        if (manager == null)
-            return PendingRetrieval.Fail("Inventory manager is unavailable.");
-        var container = manager->GetInventoryContainer(stack.Container);
-        if (container == null || !container->IsLoaded)
-            return PendingRetrieval.Fail("Retainer source container is unavailable.");
-        var slot = container->GetInventorySlot(stack.SlotIndex);
-        if (slot == null || slot->ItemId != stack.ItemId || slot->Quantity != stack.Quantity)
-            return PendingRetrieval.Fail("Exact retainer source slot changed before retrieval.");
-
-        var quantity = Math.Min(requested, slot->Quantity);
-        var retainerAgent = AgentModule.Instance()->GetAgentByInternalId(AgentId.Retainer);
-        var context = AgentInventoryContext.Instance();
-        if (retainerAgent is null || context is null)
-            return PendingRetrieval.Fail("Retainer inventory context agent is unavailable.");
-        context->OpenForItemSlot(stack.Container, stack.SlotIndex, 0, retainerAgent->GetAddonId());
-        return new(true, quantity, quantity < slot->Quantity, ResolveAddonText(quantity < slot->Quantity ? 773u : 98u), CountPlayer(stack.ItemId), "Context menu requested.");
-    }
-
-    private unsafe RetainerAutomationResult SelectContextEntry(string label, DalamudInventoryStack stack)
-    {
-        var addon = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
-        var agent = AgentInventoryContext.Instance();
-        if (addon is null || !addon->IsReady || !addon->IsVisible || agent is null || agent->TargetInventoryId != stack.Container || agent->TargetInventorySlotId != stack.SlotIndex)
-            return RetainerAutomationResult.Failed("ContextNotReady", "Waiting for exact retainer context menu.");
-
-        var labels = new List<string>();
-        foreach (var value in agent->EventParams)
-            if (value.Type is AtkValueType.String or AtkValueType.ManagedString or AtkValueType.WideString or AtkValueType.ConstString)
-                labels.Add(value.GetValueAsString());
-        var index = RetainerUiAutomationText.FindContextMenuLabelIndex(labels, label);
-        if (index is null)
-            return RetainerAutomationResult.Failed("ContextEntryUnavailable", $"Context entry '{label}' is unavailable.");
-
-        var values = stackalloc AtkValue[5];
-        values[0] = new() { Type = AtkValueType.Int, Int = 0 };
-        values[1] = new() { Type = AtkValueType.Int, Int = index.Value };
-        return addon->FireCallback(5, values, true)
-            ? RetainerAutomationResult.Succeeded("ContextActionSelected", "Context action selected.")
-            : RetainerAutomationResult.Failed("ContextCallbackRejected", "Context action callback was rejected.");
-    }
-
-    private unsafe RetainerAutomationResult SubmitQuantity(int quantity)
-    {
-        var addon = gameGui.GetAddonByName<AtkUnitBase>("InputNumeric", 1);
-        if (addon is null || !addon->IsReady || !addon->IsVisible)
-            return RetainerAutomationResult.Failed("QuantityInputNotReady", "Waiting for quantity input.");
-        addon->FireCallbackInt(quantity);
-        return RetainerAutomationResult.Succeeded("QuantitySubmitted", "Quantity submitted.");
-    }
-
-    private unsafe RetainerRetrievalResult VerifyRetrieval(DalamudInventoryStack original, int transferred, int playerBefore)
-    {
-        var manager = InventoryManager.Instance();
-        if (manager == null)
-            return new(false, 0, "ContainerUnavailable", "Inventory manager became unavailable.");
-        var container = manager->GetInventoryContainer(original.Container);
-        if (container == null || !container->IsLoaded)
-            return new(false, 0, "ContainerUnavailable", "Retainer source container became unavailable.");
-        var slot = container->GetInventorySlot(original.SlotIndex);
-        if (slot == null)
-            return new(false, 0, "SlotUnavailable", "Retainer source slot became unavailable.");
-
-        var playerAfter = CountPlayer(original.ItemId);
-        if (RetainerRetrievalObservation.Matches(
-                original.ItemId,
-                original.Quantity,
-                transferred,
-                slot->ItemId,
-                slot->Quantity,
-                playerBefore,
-                playerAfter))
-        {
-            return new(true, transferred, "TransferVerified", $"Verified {transferred}x item {original.ItemId}: player {playerBefore}->{playerAfter}.");
-        }
-
-        return new(false, 0, "TransferPending", "Waiting for matching retainer-slot and player-inventory deltas.");
-    }
-
     private static unsafe RetainerAutomationResult VerifyActive(ulong expected)
     {
         var manager = RetainerManager.Instance();
@@ -429,8 +299,6 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             ? RetainerAutomationResult.Succeeded("RetainerIdentityVerified", "Retainer identity verified.")
             : RetainerAutomationResult.Failed("RetainerIdentityMismatch", "Active retainer identity does not match the expected stable ID.");
     }
-
-    private static int CountPlayer(uint itemId) => PlayerItemContainers.Sum(type => DalamudInventoryStackScanner.CountLoadedItem(type, itemId));
 
     private unsafe bool IsReady(string name)
     {
@@ -451,8 +319,4 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
     private string ResolveAddonText(uint rowId) => dataManager.GetExcelSheet<Addon>().GetRow(rowId).Text.ExtractText();
 
-    private sealed record PendingRetrieval(bool Success, int Quantity, bool NeedsQuantity, string Label, int PlayerBefore, string Message)
-    {
-        public static PendingRetrieval Fail(string message) => new(false, 0, false, string.Empty, 0, message);
-    }
 }

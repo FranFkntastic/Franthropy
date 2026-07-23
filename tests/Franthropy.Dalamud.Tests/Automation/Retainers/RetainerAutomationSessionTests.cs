@@ -52,6 +52,24 @@ public sealed class RetainerAutomationSessionTests
             playerAfter));
 
     [Theory]
+    [InlineData(false, 999, 400, 3, true)]
+    [InlineData(false, 400, 400, 0, false)]
+    [InlineData(true, 9999, 7000, 0, true)]
+    [InlineData(true, 7000, 7000, 0, true)]
+    public void RetrievalCommand_UsesTypedPartialAndCrystalSemantics(
+        bool isCrystalContainer,
+        int sourceQuantity,
+        int requestedQuantity,
+        long expectedCommand,
+        bool expectedQuantityInput)
+    {
+        var selected = RetainerRetrievalCommandPolicy.Select(isCrystalContainer, sourceQuantity, requestedQuantity);
+
+        Assert.Equal(expectedCommand, (long)selected.Command);
+        Assert.Equal(expectedQuantityInput, selected.NeedsQuantityInput);
+    }
+
+    [Theory]
     [InlineData(4, 10, 6, 3, 7, true)]
     [InlineData(4, 10, 7, 3, 7, false)]
     [InlineData(4, 10, 6, 3, 6, false)]
