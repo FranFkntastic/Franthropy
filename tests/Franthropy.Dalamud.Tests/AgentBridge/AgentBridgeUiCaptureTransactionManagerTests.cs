@@ -16,15 +16,32 @@ public sealed class AgentBridgeUiCaptureTransactionManagerTests
         Assert.False(collapsed);
         Assert.True(manager.ShouldPresentInMainViewport("main-window"));
 
-        manager.MarkRendered("main-window", 42);
+        for (var frameId = 42; frameId <= 47; frameId++)
+            manager.MarkRendered("main-window", frameId);
         var receipt = await handle.Ready;
         Assert.Equal(handle.TransactionId, receipt.TransactionId);
-        Assert.Equal(42, receipt.FrameId);
+        Assert.Equal(47, receipt.FrameId);
 
         var result = manager.Complete(handle.TransactionId);
         Assert.True(result.Success);
         Assert.False(open);
         Assert.False(manager.ShouldPresentInMainViewport("main-window"));
+    }
+
+    [Fact]
+    public void ReadyWaitsForSettledRenderPasses()
+    {
+        var open = false;
+        var collapsed = false;
+        var manager = CreateManager(() => open, value => open = value, () => collapsed, value => collapsed = value);
+        var handle = manager.Begin("main-window");
+
+        for (var frame = 0; frame < 5; frame++)
+            manager.MarkRendered("main-window", 5);
+
+        Assert.False(handle.Ready.IsCompleted);
+        manager.MarkRendered("main-window", 6);
+        Assert.True(handle.Ready.IsCompletedSuccessfully);
     }
 
     [Fact]

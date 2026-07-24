@@ -8,6 +8,7 @@ namespace Franthropy.Dalamud.AgentBridge;
 public sealed class AgentBridgeUiCaptureTransactionManager
 {
     private static readonly TimeSpan DefaultLifetime = TimeSpan.FromSeconds(8);
+    private const int DefaultMinimumRenderedFrames = 6;
     private readonly object gate = new();
     private readonly Func<bool> isWindowOpen;
     private readonly Action<bool> setWindowOpen;
@@ -16,6 +17,7 @@ public sealed class AgentBridgeUiCaptureTransactionManager
     private readonly Action? beginPresentation;
     private readonly Action? restorePresentation;
     private readonly TimeSpan lifetime;
+    private readonly int minimumRenderedFrames;
     private Transaction? active;
 
     public AgentBridgeUiCaptureTransactionManager(
@@ -25,7 +27,8 @@ public sealed class AgentBridgeUiCaptureTransactionManager
         Action<bool> requestWindowCollapsed,
         TimeSpan? lifetime = null,
         Action? beginPresentation = null,
-        Action? restorePresentation = null)
+        Action? restorePresentation = null,
+        int minimumRenderedFrames = DefaultMinimumRenderedFrames)
     {
         this.isWindowOpen = isWindowOpen ?? throw new ArgumentNullException(nameof(isWindowOpen));
         this.setWindowOpen = setWindowOpen ?? throw new ArgumentNullException(nameof(setWindowOpen));
@@ -34,6 +37,9 @@ public sealed class AgentBridgeUiCaptureTransactionManager
         this.beginPresentation = beginPresentation;
         this.restorePresentation = restorePresentation;
         this.lifetime = lifetime is { } configured && configured > TimeSpan.Zero ? configured : DefaultLifetime;
+        this.minimumRenderedFrames = minimumRenderedFrames > 0
+            ? minimumRenderedFrames
+            : throw new ArgumentOutOfRangeException(nameof(minimumRenderedFrames));
     }
 
     public AgentBridgeUiCaptureTransactionHandle Begin(string target)
@@ -79,6 +85,9 @@ public sealed class AgentBridgeUiCaptureTransactionManager
         {
             ExpireCore(DateTimeOffset.UtcNow);
             if (active == null || active.Ready.Task.IsCompleted || !string.Equals(active.Target, target, StringComparison.Ordinal))
+                return;
+            active.RenderedFrameCount++;
+            if (active.RenderedFrameCount < minimumRenderedFrames)
                 return;
             var readyAt = DateTimeOffset.UtcNow;
             active.Ready.TrySetResult(new AgentBridgeUiCaptureTransactionReceipt(
@@ -151,6 +160,7 @@ public sealed class AgentBridgeUiCaptureTransactionManager
         public DateTimeOffset ExpiresAtUtc { get; }
         public bool WasOpen { get; }
         public bool WasCollapsed { get; }
+        public int RenderedFrameCount { get; set; }
         public TaskCompletionSource<AgentBridgeUiCaptureTransactionReceipt> Ready { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
