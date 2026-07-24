@@ -16,10 +16,12 @@ public interface IAutoRetainerIpc : IDisposable
 {
     bool IsAvailable { get; }
     bool IsBusy { get; }
+    bool IsSuppressed { get; }
     void Register(AutoRetainerIpcCallbacks callbacks);
     void QueueRetainerListTask(string consumer);
     void RequestPostprocess(string consumer);
     void FinishPostprocess();
+    void SetSuppressed(bool suppressed);
 }
 
 public sealed class DalamudAutoRetainerIpc : IAutoRetainerIpc
@@ -32,6 +34,8 @@ public sealed class DalamudAutoRetainerIpc : IAutoRetainerIpc
     private const string RequestPostprocessChannel = "AutoRetainer.RequestPostprocess";
     private const string ReadyForPostprocessChannel = "AutoRetainer.OnRetainerReadyForPostprocess";
     private const string FinishPostprocessChannel = "AutoRetainer.FinishPostprocessRequest";
+    private const string GetSuppressedChannel = "AutoRetainer.GetSuppressed";
+    private const string SetSuppressedChannel = "AutoRetainer.SetSuppressed";
 
     private readonly ICallGateSubscriber<object> init;
     private readonly ICallGateSubscriber<bool> isBusy;
@@ -41,6 +45,8 @@ public sealed class DalamudAutoRetainerIpc : IAutoRetainerIpc
     private readonly ICallGateSubscriber<string, object> requestPostprocess;
     private readonly ICallGateSubscriber<string, string, object> readyForPostprocess;
     private readonly ICallGateSubscriber<object> finishPostprocess;
+    private readonly ICallGateSubscriber<bool> getSuppressed;
+    private readonly ICallGateSubscriber<bool, object> setSuppressed;
     private AutoRetainerIpcCallbacks? callbacks;
     private bool registered;
     private bool disposed;
@@ -54,7 +60,9 @@ public sealed class DalamudAutoRetainerIpc : IAutoRetainerIpc
             pluginInterface.GetIpcSubscriber<string, object>(AdditionalTaskChannel),
             pluginInterface.GetIpcSubscriber<string, object>(RequestPostprocessChannel),
             pluginInterface.GetIpcSubscriber<string, string, object>(ReadyForPostprocessChannel),
-            pluginInterface.GetIpcSubscriber<object>(FinishPostprocessChannel))
+            pluginInterface.GetIpcSubscriber<object>(FinishPostprocessChannel),
+            pluginInterface.GetIpcSubscriber<bool>(GetSuppressedChannel),
+            pluginInterface.GetIpcSubscriber<bool, object>(SetSuppressedChannel))
     {
     }
 
@@ -66,7 +74,9 @@ public sealed class DalamudAutoRetainerIpc : IAutoRetainerIpc
         ICallGateSubscriber<string, object> additionalTask,
         ICallGateSubscriber<string, object> requestPostprocess,
         ICallGateSubscriber<string, string, object> readyForPostprocess,
-        ICallGateSubscriber<object> finishPostprocess)
+        ICallGateSubscriber<object> finishPostprocess,
+        ICallGateSubscriber<bool> getSuppressed,
+        ICallGateSubscriber<bool, object> setSuppressed)
     {
         this.init = init;
         this.isBusy = isBusy;
@@ -76,6 +86,8 @@ public sealed class DalamudAutoRetainerIpc : IAutoRetainerIpc
         this.requestPostprocess = requestPostprocess;
         this.readyForPostprocess = readyForPostprocess;
         this.finishPostprocess = finishPostprocess;
+        this.getSuppressed = getSuppressed;
+        this.setSuppressed = setSuppressed;
     }
 
     public bool IsAvailable
@@ -110,6 +122,15 @@ public sealed class DalamudAutoRetainerIpc : IAutoRetainerIpc
             {
                 return false;
             }
+        }
+    }
+
+    public bool IsSuppressed
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            return getSuppressed.InvokeFunc();
         }
     }
 
@@ -163,6 +184,12 @@ public sealed class DalamudAutoRetainerIpc : IAutoRetainerIpc
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         finishPostprocess.InvokeAction();
+    }
+
+    public void SetSuppressed(bool suppressed)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        setSuppressed.InvokeAction(suppressed);
     }
 
     private void OnDrawButtons() => callbacks?.DrawRetainerListTaskButtons();

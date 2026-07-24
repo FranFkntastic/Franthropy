@@ -20,12 +20,14 @@ public sealed class DalamudAutoRetainerIpcTests
 
         Assert.True(transport.IsAvailable);
         Assert.True(transport.IsBusy);
+        Assert.False(transport.IsSuppressed);
         channels.Draw.Publish();
         channels.Additional.Publish("Alpha");
         channels.Ready.Publish("Quartermaster", "Beta");
         transport.QueueRetainerListTask("Quartermaster");
         transport.RequestPostprocess("Quartermaster");
         transport.FinishPostprocess();
+        transport.SetSuppressed(true);
 
         Assert.Equal(1, draws);
         Assert.Equal("Alpha", additional);
@@ -33,6 +35,7 @@ public sealed class DalamudAutoRetainerIpcTests
         Assert.Equal(["Quartermaster"], channels.CustomTask.ActionArguments);
         Assert.Equal(["Quartermaster"], channels.Request.ActionArguments);
         Assert.Equal(1, channels.Finish.ActionInvocations);
+        Assert.Equal([true], channels.SetSuppressed.ActionArguments);
 
         transport.Dispose();
         Assert.Empty(channels.Draw.Subscriptions);
@@ -64,8 +67,11 @@ public sealed class DalamudAutoRetainerIpcTests
         public FakeSubscriber<string, object> Request { get; } = new();
         public FakeSubscriber<string, string, object> Ready { get; } = new();
         public FakeSubscriber<object> Finish { get; } = new();
+        public FakeSubscriber<bool> GetSuppressed { get; } = new() { Function = () => false };
+        public FakeSubscriber<bool, object> SetSuppressed { get; } = new();
 
-        public DalamudAutoRetainerIpc Create() => new(Init, Busy, Draw, CustomTask, Additional, Request, Ready, Finish);
+        public DalamudAutoRetainerIpc Create() =>
+            new(Init, Busy, Draw, CustomTask, Additional, Request, Ready, Finish, GetSuppressed, SetSuppressed);
     }
 
     private sealed class FakeSubscriber<TRet> : ICallGateSubscriber<TRet>
