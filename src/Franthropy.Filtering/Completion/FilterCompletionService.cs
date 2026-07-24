@@ -40,7 +40,11 @@ public static class FilterCompletionService
                     ?? CompleteOperators(context, expression, caret)
                     ?? CompleteValues(context, expression, replacement, prefix, maximumItems)
                     ?? CompleteFunctionField(context, expression, fieldTarget.Replacement, fieldTarget.Prefix)
-                    ?? CompleteFields(context, fieldTarget.Replacement, fieldTarget.Prefix);
+                    ?? CompleteFields(
+                        context,
+                        fieldTarget.Replacement,
+                        fieldTarget.Prefix,
+                        fieldTarget.Replacement.End < expression.Length && expression[fieldTarget.Replacement.End] == ':');
         var diagnostics = FilterCompiler.Compile(expression, context).Diagnostics;
 
         return new FilterCompletionResult(
@@ -116,7 +120,9 @@ public static class FilterCompletionService
         var fieldStart = fieldEnd;
         while (fieldStart > 0 && IsFieldCharacter(expression[fieldStart - 1]))
             fieldStart--;
-        if (fieldStart == fieldEnd || IsEvidenceFunctionArgument(expression, fieldStart) ||
+        if (fieldStart == fieldEnd ||
+            (fieldStart > 0 && ComparatorCharacters.Contains(expression[fieldStart - 1])) ||
+            IsEvidenceFunctionArgument(expression, fieldStart) ||
             IsInsideListValue(expression, fieldStart))
             return null;
 
@@ -196,7 +202,7 @@ public static class FilterCompletionService
                 FilterCompletionKind.Value,
                 replacement,
                 candidate.Description,
-                $"{candidate.Qualifier}: predicate"))
+                $"{candidate.TargetFieldKey}{candidate.Operator.Display()}{candidate.TargetValue}"))
             .Take(maximumItems)
             .ToArray();
         if (predicates.Length > 0 || context.Catalog.PredicateAliases.Any(candidate =>
@@ -207,7 +213,7 @@ public static class FilterCompletionService
         var resolution = context.Catalog.Resolve(fieldText, context.AvailableKeys);
         if (resolution.Kind != FilterFieldResolutionKind.Success || resolution.Field is null ||
             !context.AvailableKeys.Contains(resolution.Field.Key))
-            return null;
+            return [];
 
         return resolution.Field.Values
             .SelectMany(value => CandidateNames(value).Select(name => (Value: value, Name: name)))
@@ -244,13 +250,14 @@ public static class FilterCompletionService
         if (!function[functionStart..].Equals("known", StringComparison.OrdinalIgnoreCase) &&
             !function[functionStart..].Equals("unknown", StringComparison.OrdinalIgnoreCase))
             return null;
-        return CompleteFields(context, replacement, prefix);
+        return CompleteFields(context, replacement, prefix, false);
     }
 
     private static IReadOnlyList<FilterCompletionItem> CompleteFields<TRecord>(
         FilterContext<TRecord> context,
         TextSpan replacement,
-        string prefix)
+        string prefix,
+        bool hasTrailingColon)
     {
         var fields = context.Catalog.Fields
             .Where(field => context.AvailableKeys.Contains(field.Key))
@@ -272,21 +279,14 @@ public static class FilterCompletionService
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Where(qualifier => Matches(qualifier, prefix))
             .Select(qualifier => new FilterCompletionItem(
-                qualifier,
-                qualifier,
+                $"{qualifier}:",
+                hasTrailingColon ? qualifier : $"{qualifier}:",
                 FilterCompletionKind.Field,
                 replacement,
-                "Human-readable state predicate.",
-                "predicate namespace"));
+                "Browse human-readable states available in this context.",
+                "state namespace"));
 
-        var syntax = new[]
-        {
-            new FilterCompletionItem("unknown(…)", "unknown(", FilterCompletionKind.Function, replacement, "Match records where a field has no usable evidence."),
-            new FilterCompletionItem("known(…)", "known(", FilterCompletionKind.Function, replacement, "Match records where a field has usable evidence."),
-            new FilterCompletionItem("NOT", "NOT ", FilterCompletionKind.Keyword, replacement, "Negate the next expression."),
-        }.Where(item => Matches(item.Label, prefix));
-
-        return predicates.Concat(fields).Concat(syntax).ToArray();
+        return predicates.Concat(fields).ToArray();
     }
 
     private static TextSpan FindReplacementSpan(string expression, int caret)

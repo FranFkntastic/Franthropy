@@ -48,4 +48,18 @@ internal static class FilterComparisonOperatorExtensions
         FilterComparisonOperator.GreaterOrEqual => ">=",
         _ => throw new ArgumentOutOfRangeException(nameof(value), value, null),
     };
+
+    public static FilterTokenKind TokenKind(this FilterComparisonOperator value) => value switch
+    {
+        FilterComparisonOperator.Match => FilterTokenKind.Colon,
+        FilterComparisonOperator.Equals => FilterTokenKind.Equals,
+        FilterComparisonOperator.NotEquals => FilterTokenKind.BangEquals,
+        FilterComparisonOperator.ExactEquals => FilterTokenKind.ExactEquals,
+        FilterComparisonOperator.ExactNotEquals => FilterTokenKind.ExactNotEquals,
+        FilterComparisonOperator.Less => FilterTokenKind.Less,
+        FilterComparisonOperator.LessOrEqual => FilterTokenKind.LessOrEqual,
+        FilterComparisonOperator.Greater => FilterTokenKind.Greater,
+        FilterComparisonOperator.GreaterOrEqual => FilterTokenKind.GreaterOrEqual,
+        _ => throw new ArgumentOutOfRangeException(nameof(value), value, null),
+    };
 }

@@ -151,6 +151,18 @@ public sealed class FilterCompletionServiceTests
         Assert.Contains(result.Items, item => item.Kind == FilterCompletionKind.Field && item.Label == "quality");
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("unk")]
+    [InlineData("kno")]
+    [InlineData("N")]
+    public void Complete_DoesNotSuggestAdvancedSyntax(string expression)
+    {
+        var result = FilterCompletionService.Complete(Context, new("test", expression, expression.Length));
+
+        Assert.DoesNotContain(result.Items, item => item.Kind is FilterCompletionKind.Function or FilterCompletionKind.Keyword);
+    }
+
 
     [Fact]
     public void Complete_PredicateValuesUsesTheCaretPrefix()
@@ -173,6 +185,46 @@ public sealed class FilterCompletionServiceTests
         Assert.Equal(new Franthropy.Filtering.Syntax.TextSpan(3, 1), hq.ReplacementSpan);
     }
 
+    [Fact]
+    public void Complete_BooleanStatesAreAutomaticAndNamespaceAcceptanceEntersTheValueMenu()
+    {
+        var field = FilterFields.Boolean("item.highQualityCapable", "HQ capable", statePredicateName: "hqCapable");
+        var catalog = new FilterCatalog([field]);
+        var context = new FilterContextBuilder<Row>(catalog)
+            .Bind(field, _ => Evidence.Known(true))
+            .Build();
+
+        var namespaceCompletion = FilterCompletionService.Complete(context, new("test", "i", 1));
+        var stateNamespace = Assert.Single(namespaceCompletion.Items, item => item.Detail == "state namespace");
+        Assert.Equal("is:", stateNamespace.Label);
+        Assert.Equal("is:", stateNamespace.InsertionText);
+
+        var beforeExistingColon = FilterCompletionService.Complete(context, new("test", "is:hqCapable", 2));
+        var existingNamespace = Assert.Single(beforeExistingColon.Items, item => item.Detail == "state namespace");
+        Assert.Equal("is", existingNamespace.InsertionText);
+
+        var states = FilterCompletionService.Complete(context, new("test", "is:", 3));
+        var state = Assert.Single(states.Items);
+        Assert.Equal("hqCapable", state.Label);
+        Assert.Equal("item.highQualityCapable==true", state.Detail);
+    }
+
+    [Fact]
+    public void Complete_DoesNotTreatAnExactStateValueAsANewField()
+    {
+        var field = FilterFields.Boolean("instance.equipped", "Equipped");
+        var catalog = new FilterCatalog([field]);
+        var context = new FilterContextBuilder<Row>(catalog)
+            .Bind(field, _ => Evidence.Known(true))
+            .Build();
+
+        var result = FilterCompletionService.Complete(context, new("test", "is:equipped", 11));
+
+        var state = Assert.Single(result.Items);
+        Assert.Equal(FilterCompletionKind.Value, state.Kind);
+        Assert.Equal("equipped", state.Label);
+    }
+
 
     [Fact]
     public void Complete_HidesPredicatesWhoseTargetFieldIsUnavailable()
@@ -187,8 +239,20 @@ public sealed class FilterCompletionServiceTests
 
         var result = FilterCompletionService.Complete(context, new("test", "is:", 3));
 
-        Assert.DoesNotContain(result.Items, item => item.InsertionText == "hq");
+        Assert.Empty(result.Items);
         Assert.Empty(Franthropy.Filtering.Documentation.FilterReferenceGenerator.Create(context).Predicates);
+    }
+
+    [Fact]
+    public void Complete_DoesNotFallBackToFieldsAfterAnUnavailableFieldComparator()
+    {
+        var context = new FilterContextBuilder<Row>(Catalog)
+            .Bind(QuantityField, row => Evidence.Known(row.Quantity))
+            .Build();
+
+        var result = FilterCompletionService.Complete(context, new("test", "quality:", 8));
+
+        Assert.Empty(result.Items);
     }
 
     private sealed record Row(Quality Quality, long Quantity);

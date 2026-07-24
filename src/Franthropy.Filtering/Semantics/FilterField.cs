@@ -25,6 +25,17 @@ public abstract class FilterField
         string description,
         FilterValueKind valueKind,
         IEnumerable<string>? aliases)
+        : this(key, displayName, description, valueKind, aliases, null)
+    {
+    }
+
+    protected FilterField(
+        string key,
+        string displayName,
+        string description,
+        FilterValueKind valueKind,
+        IEnumerable<string>? aliases,
+        string? statePredicateName)
     {
         if (string.IsNullOrWhiteSpace(key))
             throw new ArgumentException("A canonical field key is required.", nameof(key));
@@ -38,6 +49,7 @@ public abstract class FilterField
             .Select(alias => alias.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray() ?? [];
+        StatePredicateName = string.IsNullOrWhiteSpace(statePredicateName) ? null : statePredicateName.Trim();
     }
 
     public string Key { get; }
@@ -45,6 +57,7 @@ public abstract class FilterField
     public string Description { get; }
     public FilterValueKind ValueKind { get; }
     public IReadOnlyList<string> Aliases { get; }
+    public string? StatePredicateName { get; }
     public abstract IReadOnlySet<FilterComparisonOperator> Operators { get; }
     public abstract IReadOnlyList<FilterValueReference> Values { get; }
     internal abstract bool MatchUsesRecordFuzzy { get; }
@@ -71,8 +84,9 @@ public sealed class FilterField<T> : FilterField
         IEqualityComparer<T>? equalityComparer = null,
         IComparer<T>? orderComparer = null,
         bool textMatching = false,
-        bool matchUsesRecordFuzzy = false)
-        : base(key, displayName, description, valueKind, aliases)
+        bool matchUsesRecordFuzzy = false,
+        string? statePredicateName = null)
+        : base(key, displayName, description, valueKind, aliases, statePredicateName)
     {
         this.codec = codec;
         this.equalityComparer = equalityComparer ?? EqualityComparer<T>.Default;
@@ -349,7 +363,7 @@ public sealed class FilterSetField<T> : FilterField
         IFilterLiteralCodec<T> codec,
         IEnumerable<string>? aliases,
         IEqualityComparer<T>? comparer)
-        : base(key, displayName, description, FilterValueKind.Set, aliases)
+        : base(key, displayName, description, FilterValueKind.Set, aliases, null)
     {
         this.codec = codec;
         this.comparer = comparer ?? EqualityComparer<T>.Default;
@@ -468,10 +482,20 @@ public static class FilterFields
 
     public static FilterField<bool> Boolean(
         string key,
+        string? displayName,
+        string description,
+        IEnumerable<string>? aliases) =>
+        Boolean(key, displayName, description, aliases, null, true);
+
+    public static FilterField<bool> Boolean(
+        string key,
         string? displayName = null,
         string description = "",
-        IEnumerable<string>? aliases = null) =>
-        new(key, displayName ?? key, description, FilterValueKind.Boolean, new BooleanLiteralCodec(), EqualityOperators, aliases);
+        IEnumerable<string>? aliases = null,
+        string? statePredicateName = null,
+        bool exposeAsState = true) =>
+        new(key, displayName ?? key, description, FilterValueKind.Boolean, new BooleanLiteralCodec(), EqualityOperators, aliases,
+            statePredicateName: exposeAsState ? statePredicateName ?? key.Split('.').Last() : null);
 
     public static FilterField<long> Integer(
         string key,

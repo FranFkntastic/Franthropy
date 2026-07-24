@@ -195,6 +195,96 @@ public sealed class FilterCompilerTests
     }
 
     [Fact]
+    public void BooleanFields_AutomaticallyExposePositiveStatePredicates()
+    {
+        var friendly = FilterCompiler.Compile<Item>("is:unique", Context);
+        var canonical = FilterCompiler.Compile<Item>("item.unique==true", Context);
+
+        Assert.True(friendly.Matches(Sample));
+        Assert.Equal(canonical.SemanticExpression, friendly.SemanticExpression);
+        Assert.True(FilterCompiler.Compile<Item>("-is:unique", Context).Matches(Sample with { Unique = false }));
+    }
+
+    [Fact]
+    public void NegatedBooleanState_DoesNotConvertUnknownEvidenceIntoFalse()
+    {
+        var field = FilterFields.Boolean("item.unique");
+        var catalog = new FilterCatalog([field]);
+        var context = new FilterContextBuilder<Item>(catalog)
+            .Bind(field, _ => Evidence.Unknown<bool>("Unique-item evidence is missing."))
+            .Build();
+
+        Assert.Equal(FilterTruth.Unknown, FilterCompiler.Compile<Item>("-is:unique", context).Evaluate(Sample));
+    }
+
+    [Fact]
+    public void AtomicStatePredicates_CanLowerToOrderedComparisons()
+    {
+        var catalog = new FilterCatalog([Quantity], predicateAliases:
+        [
+            new("is", "stackable", Quantity.Key, "1", "Quantity can exceed one.", FilterComparisonOperator.Greater),
+        ]);
+        var context = new FilterContextBuilder<Item>(catalog)
+            .Bind(Quantity, item => Evidence.Known(item.Quantity))
+            .Build();
+        var friendly = FilterCompiler.Compile<Item>("is:stackable", context);
+        var canonical = FilterCompiler.Compile<Item>("ownership.quantity>1", context);
+
+        Assert.True(friendly.Matches(Sample));
+        Assert.Equal(canonical.SemanticExpression, friendly.SemanticExpression);
+    }
+
+    [Fact]
+    public void AtomicStatePredicates_UseTheTargetFieldsSemanticNormalization()
+    {
+        var catalog = new FilterCatalog([ItemQuality], predicateAliases:
+        [
+            new("is", "high", ItemQuality.Key, "hq", "High quality.", FilterComparisonOperator.Match),
+        ]);
+        var context = new FilterContextBuilder<Item>(catalog)
+            .Bind(ItemQuality, item => Evidence.Known(item.Quality))
+            .Build();
+        var friendly = FilterCompiler.Compile<Item>("is:high", context);
+        var canonical = FilterCompiler.Compile<Item>("instance.quality:hq", context);
+
+        Assert.True(friendly.Matches(Sample));
+        Assert.Equal(canonical.SemanticExpression, friendly.SemanticExpression);
+    }
+
+    [Fact]
+    public void BooleanStateName_CanOverrideTheCanonicalLeaf()
+    {
+        var field = FilterFields.Boolean("item.highQualityCapable", statePredicateName: "hqCapable");
+        var catalog = new FilterCatalog([field]);
+
+        Assert.NotNull(catalog.ResolvePredicate("is", "hqCapable"));
+        Assert.Null(catalog.ResolvePredicate("is", "highQualityCapable"));
+    }
+
+    [Fact]
+    public void EquivalentExplicitBooleanPredicate_IsRetainedWithoutGeneratedDuplication()
+    {
+        var field = FilterFields.Boolean("item.unique");
+        var explicitPredicate = new FilterPredicateAlias("is", "unique", field.Key, "yes", "Explicit description.");
+        var catalog = new FilterCatalog([field], predicateAliases: [explicitPredicate]);
+
+        var predicate = Assert.Single(catalog.PredicateAliases);
+        Assert.Same(explicitPredicate, predicate);
+        Assert.Equal("Explicit description.", predicate.Description);
+    }
+
+    [Fact]
+    public void PredicateAlias_PreservesFiveValueDeconstruction()
+    {
+        var predicate = new FilterPredicateAlias("is", "unique", "item.unique", "true", "Unique item.", FilterComparisonOperator.ExactEquals);
+
+        var (qualifier, specifier, field, value, description) = predicate;
+
+        Assert.Equal(("is", "unique", "item.unique", "true", "Unique item."),
+            (qualifier, specifier, field, value, description));
+    }
+
+    [Fact]
     public void ReservedNestedQualifier_HasFocusedDiagnosticAndRoundTrips()
     {
         const string expression = "stat:range:>=50";
@@ -295,8 +385,61 @@ public sealed class FilterCompilerTests
         Assert.Equal("test-1", reference.CatalogVersion);
         Assert.Contains(reference.Fields, field => field.Key == "item.name" && field.IsAvailable);
         Assert.Contains(reference.Fields, field => field.Key == "instance.quantity" && !field.IsAvailable);
+        Assert.Contains(reference.PredicateReferences, predicate =>
+            predicate.Qualifier == "is" && predicate.Specifier == "unique" &&
+            predicate.TargetFieldKey == "item.unique" && predicate.Operator == "==" && predicate.TargetValue == "true");
         Assert.Contains(reference.Fields.Single(field => field.Key == "instance.quality").Values,
             value => value.Aliases.Contains("hq"));
+    }
+
+    [Fact]
+    public void ReferenceModel_PredicateCompatibilitySurvivesJsonRoundTrip()
+    {
+        var predicate = new FilterPredicateAlias("is", "unique", "item.unique", "true", "Unique item.");
+        var reference = new FilterReferenceModel("1", "test", "1", [])
+        {
+            Predicates = [predicate],
+        };
+
+        var json = FilterReferenceWriter.ToJson(reference);
+        var roundTrip = System.Text.Json.JsonSerializer.Deserialize<FilterReferenceModel>(
+            json,
+            new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!;
+
+        Assert.Contains("\"operator\": \"==\"", json);
+        Assert.Equal(predicate, Assert.Single(roundTrip.Predicates));
+        Assert.Equal("==", Assert.Single(roundTrip.PredicateReferences).Operator);
+    }
+
+    [Fact]
+    public void ReferenceModel_LegacyPredicateJsonDefaultsToExactEquality()
+    {
+        const string json = """
+            {
+              "catalogVersion": "1",
+              "contextId": "test",
+              "contextSchemaVersion": "1",
+              "fields": [],
+              "predicates": [
+                {
+                  "qualifier": "is",
+                  "specifier": "unique",
+                  "targetFieldKey": "item.unique",
+                  "targetValue": "true",
+                  "description": "Unique item."
+                }
+              ]
+            }
+            """;
+
+        var reference = System.Text.Json.JsonSerializer.Deserialize<FilterReferenceModel>(
+            json,
+            new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!;
+
+        Assert.Equal(FilterComparisonOperator.ExactEquals, Assert.Single(reference.Predicates).Operator);
+        Assert.Equal("==", Assert.Single(reference.PredicateReferences).Operator);
+        Assert.Contains("item.unique==true", FilterReferenceWriter.ToMarkdown(reference));
+        Assert.Contains("\"operator\": \"==\"", FilterReferenceWriter.ToJson(reference));
     }
 
     [Fact]
