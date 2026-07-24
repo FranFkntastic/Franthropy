@@ -63,9 +63,9 @@ public static class FilterCompiler
                         });
                         var syntheticComparator = fieldExpression.Comparator with
                         {
-                            Kind = FilterTokenKind.ExactEquals,
-                            Text = "==",
-                            Value = "==",
+                            Kind = predicate.Operator.TokenKind(),
+                            Text = predicate.Operator.Display(),
+                            Value = predicate.Operator.Display(),
                         };
                         return BindResolvedField(target.Field!, syntheticComparator, syntheticValue, context, diagnostics, fieldExpression.Span);
                     }

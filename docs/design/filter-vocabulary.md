@@ -213,6 +213,7 @@ category:"Metal"
 ```text
 unique:true
 unique:false
+is:unique
 ```
 
 The first expression requires the FFXIV unique-item flag. The second requires it to be known and false; records with unknown uniqueness do not match either expression.
@@ -227,6 +228,7 @@ This describes whether the item definition permits trade or market listing where
 ```text
 tradable:true
 tradable:false
+is:tradable
 ```
 
 ### `item.desynthesizable`
@@ -239,11 +241,41 @@ This reflects item-definition eligibility for desynthesis. Character skill, unlo
 ```text
 desynth:true
 desynth:false
+is:desynthesizable
 ```
+
+### `item.highQualityCapable`
+
+- **Type:** boolean
+- **Alias:** `hqCapable`
+
+This describes whether the item definition permits an HQ variant. It is independent of `instance.quality`, which describes whether one observed item is actually NQ or HQ.
+
+```text
+hqCapable:true
+hqCapable:false
+is:hqCapable
+```
+
+### `item.maxStackSize`
+
+- **Type:** positive integer
+- **Alias:** `stackSize`
+- **Typical operators:** all numeric comparisons and ranges
+
+This is the maximum quantity the game permits in one inventory stack. It is not an observed stack's current `instance.quantity` and must remain unknown when authoritative item-definition evidence is unavailable.
+
+```text
+stackSize>1
+stackSize:1..99
+is:stackable
+```
+
+`is:stackable` is a discoverable atomic state that lowers to `item.maxStackSize>1`; it does not introduce a duplicate stackability field.
 
 ### Deliberate omissions
 
-The item family does not duplicate acquisition facts as `item.craftable` or `item.vendorAvailable`. Use `acquisition.source:craft` or `acquisition.source:vendor` when asking whether those methods are known for an item. A particular actionable vendor or market quote uses `offer.source` instead.
+The item family does not duplicate acquisition facts as `item.craftable` or `item.vendorAvailable`. Use `acquisition.source:craft` or `acquisition.source:vendor` when asking whether those methods are known for an item. The discoverable `is:vendorBuyable` state lowers to ordinary-gil-vendor membership in `acquisition.source`; it is not another bound Boolean. A particular actionable vendor or market quote uses `offer.source` instead.
 
 This gives obtainability one representation at each grain. If concise predicate aliases such as `craftable` are later justified for adoption, they must expand to canonical expressions rather than introduce separately bound boolean evidence.
 
@@ -357,6 +389,30 @@ This is the total amount across the active ownership scope after the context's d
 ```text
 ownership.quantity<10
 ownership.quantity:1..99
+```
+
+### `ownership.quality`
+
+- **Type:** set of quality values (`NQ`, `HQ`)
+- **Short form:** `quality` when the context does not also bind `instance.quality`
+
+This records every quality represented inside an ownership aggregate. It allows grouped inventory rows containing both NQ and HQ stacks to remain truthful instead of collapsing several physical instances into one scalar quality.
+
+```text
+ownership.quality:HQ
+quality:(NQ | HQ)
+```
+
+### `ownership.location`
+
+- **Type:** set of semantic storage locations
+- **Short form:** `location` when the context does not also bind `instance.location`
+
+This records every semantic location contributing to an ownership aggregate. It is distinct from `instance.location`, which describes exactly one physical stack.
+
+```text
+ownership.location:retainer
+location:(inventory | saddlebag)
 ```
 
 ### `ownership.character`
@@ -489,12 +545,13 @@ Live vendor data may reasonably bind age as zero or leave it unavailable, depend
 - **Type:** set of canonical acquisition-source values
 - **Short form:** `source` when unambiguous
 
-This is the set of known ways the item can be obtained, independent of whether an actionable offer is currently present. The initial vocabulary should cover at least `vendor`, `market`, `craft`, `gather`, `retainer`, `quest`, `duty`, `drop`, and `exchange`. Each value describes a method of obtaining the item, not a product subsystem that performs it.
+This is the set of known ways the item can be obtained, independent of whether an actionable offer is currently present. The initial vocabulary covers `vendor`, `market`, `craft`, `gather`, `retainer`, `quest`, `duty`, `drop`, and `exchange`. `vendor` specifically means an ordinary NPC purchase for gil; non-gil currency and item exchanges use `exchange`. Each value describes a method of obtaining the item, not a product subsystem that performs it.
 
 ```text
 acquisition.source:vendor
 acquisition.source:(vendor | market)
 acquisition.source:(craft | gather) NOT acquisition.source:vendor
+is:vendorBuyable
 ```
 
 Named source values are stable keys with user-facing labels. More specific provenance—vendor identity, recipe, gathering node, duty, or currency—belongs in additional canonical fields rather than encoded strings inside `source`.

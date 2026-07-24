@@ -21,7 +21,33 @@ public sealed record FilterPredicateAlias(
     string Specifier,
     string TargetFieldKey,
     string TargetValue,
-    string Description = "");
+    string Description = "",
+    FilterComparisonOperator Operator = FilterComparisonOperator.ExactEquals)
+{
+    public FilterPredicateAlias(
+        string qualifier,
+        string specifier,
+        string targetFieldKey,
+        string targetValue,
+        string description)
+        : this(qualifier, specifier, targetFieldKey, targetValue, description, FilterComparisonOperator.ExactEquals)
+    {
+    }
+
+    public void Deconstruct(
+        out string qualifier,
+        out string specifier,
+        out string targetFieldKey,
+        out string targetValue,
+        out string description)
+    {
+        qualifier = Qualifier;
+        specifier = Specifier;
+        targetFieldKey = TargetFieldKey;
+        targetValue = TargetValue;
+        description = Description;
+    }
+}
 
 public sealed class FilterCatalog
 {
@@ -36,7 +62,7 @@ public sealed class FilterCatalog
     {
         Fields = fields?.ToArray() ?? throw new ArgumentNullException(nameof(fields));
         Version = string.IsNullOrWhiteSpace(version) ? "1" : version.Trim();
-        PredicateAliases = predicateAliases?.ToArray() ?? [];
+        var explicitPredicates = predicateAliases?.ToArray() ?? [];
 
         var exactBuilder = new Dictionary<string, FilterField>(StringComparer.OrdinalIgnoreCase);
         var aliasBuilder = new Dictionary<string, FilterField>(StringComparer.OrdinalIgnoreCase);
@@ -64,16 +90,43 @@ public sealed class FilterCatalog
             .GroupBy(field => field.Key.Split('.').Last(), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => (IReadOnlyList<FilterField>)group.ToArray(), StringComparer.OrdinalIgnoreCase);
 
+        var duplicateExplicitPredicate = explicitPredicates
+            .GroupBy(predicate => $"{predicate.Qualifier}\0{predicate.Specifier}", StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault(group => group.Count() > 1);
+        if (duplicateExplicitPredicate is not null)
+            throw new ArgumentException($"Predicate '{duplicateExplicitPredicate.First().Qualifier}:{duplicateExplicitPredicate.First().Specifier}' is registered more than once.", nameof(predicateAliases));
+
+        var combinedPredicates = explicitPredicates.ToList();
+        foreach (var generated in Fields
+            .Where(field => field.ValueKind == FilterValueKind.Boolean && field.StatePredicateName is not null)
+            .Select(field => new FilterPredicateAlias(
+                "is",
+                field.StatePredicateName!,
+                field.Key,
+                "true",
+                field.Description)))
+        {
+            var existing = combinedPredicates.SingleOrDefault(predicate =>
+                predicate.Qualifier.Equals(generated.Qualifier, StringComparison.OrdinalIgnoreCase) &&
+                predicate.Specifier.Equals(generated.Specifier, StringComparison.OrdinalIgnoreCase));
+            if (existing is null)
+            {
+                combinedPredicates.Add(generated);
+                continue;
+            }
+            if (!Equivalent(existing, generated, exact[generated.TargetFieldKey]))
+                throw new ArgumentException($"Generated predicate '{generated.Qualifier}:{generated.Specifier}' conflicts with an explicitly registered predicate.", nameof(predicateAliases));
+        }
+        PredicateAliases = combinedPredicates;
+
         foreach (var predicate in PredicateAliases)
         {
             if (exact.ContainsKey(predicate.Qualifier) || aliases.ContainsKey(predicate.Qualifier) || leaves.ContainsKey(predicate.Qualifier))
                 throw new ArgumentException($"Predicate qualifier '{predicate.Qualifier}' collides with a field name.", nameof(predicateAliases));
             if (!exact.ContainsKey(predicate.TargetFieldKey))
                 throw new ArgumentException($"Predicate '{predicate.Qualifier}:{predicate.Specifier}' targets unknown field '{predicate.TargetFieldKey}'.", nameof(predicateAliases));
-            if (PredicateAliases.Count(candidate =>
-                    candidate.Qualifier.Equals(predicate.Qualifier, StringComparison.OrdinalIgnoreCase) &&
-                    candidate.Specifier.Equals(predicate.Specifier, StringComparison.OrdinalIgnoreCase)) > 1)
-                throw new ArgumentException($"Predicate '{predicate.Qualifier}:{predicate.Specifier}' is registered more than once.", nameof(predicateAliases));
+            if (!exact[predicate.TargetFieldKey].Operators.Contains(predicate.Operator))
+                throw new ArgumentException($"Predicate '{predicate.Qualifier}:{predicate.Specifier}' uses unsupported operator '{predicate.Operator.Display()}' for field '{predicate.TargetFieldKey}'.", nameof(predicateAliases));
         }
     }
 
@@ -122,5 +175,21 @@ public sealed class FilterCatalog
         return resolution.Kind == FilterFieldResolutionKind.Success && ReferenceEquals(resolution.Field, field)
             ? leaf
             : field.Key;
+    }
+
+    private static bool Equivalent(FilterPredicateAlias left, FilterPredicateAlias right, FilterField target) =>
+        left.TargetFieldKey.Equals(right.TargetFieldKey, StringComparison.OrdinalIgnoreCase) &&
+        left.Operator == right.Operator &&
+        string.Equals(
+            NormalizePredicateValue(target, left),
+            NormalizePredicateValue(target, right),
+            StringComparison.OrdinalIgnoreCase);
+
+    private static string NormalizePredicateValue(FilterField field, FilterPredicateAlias predicate)
+    {
+        if (predicate.Operator == FilterComparisonOperator.Match && field.MatchUsesRecordFuzzy)
+            return FilterText.Normalize(predicate.TargetValue);
+        var fuzzy = predicate.Operator is FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals;
+        return field.NormalizeLiteral(predicate.TargetValue, fuzzy) ?? FilterText.Normalize(predicate.TargetValue);
     }
 }
