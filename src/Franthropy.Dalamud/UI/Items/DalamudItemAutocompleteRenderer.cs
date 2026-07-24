@@ -102,7 +102,9 @@ public static class DalamudItemAutocompleteRenderer
             ImGui.OpenPopup(popupId);
 
         ImGui.SetNextWindowSizeConstraints(new Vector2(260, 0), new Vector2(520, 260));
-        if (ImGui.BeginPopup(popupId))
+        if (ImGui.BeginPopup(
+                popupId,
+                ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoNav))
         {
             foreach (var result in results)
             {
