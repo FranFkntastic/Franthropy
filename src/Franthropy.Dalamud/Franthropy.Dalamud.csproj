@@ -97,6 +97,7 @@
     <Compile Remove="UI\Plots\DalamudPlotRenderer.cs" />
     <Compile Remove="UI\Tables\DalamudTableSelectionRenderer.cs" />
     <Compile Remove="Travel\DalamudLifestreamObjectInteractor.cs" />
+    <Compile Remove="Travel\DalamudLifestreamPropertyTravel.cs" />
     <Compile Remove="Travel\DalamudLifestreamLogin.cs" />
   </ItemGroup>
 
