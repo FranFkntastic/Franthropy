@@ -41,8 +41,15 @@ public sealed record RemoteSummoningBellInteractionResult(
     string BellEventIdSource = "",
     float OriginalHitboxRadius = 0,
     float TemporaryHitboxRadius = 0,
+    float OriginalBellX = 0,
     float OriginalBellY = 0,
+    float OriginalBellZ = 0,
+    float TemporaryBellX = 0,
     float TemporaryBellY = 0,
+    float TemporaryBellZ = 0,
+    float OriginalDefaultBellX = 0,
+    float OriginalDefaultBellY = 0,
+    float OriginalDefaultBellZ = 0,
     int PacketsObservedWhileArmed = 0,
     int SizeEligiblePacketsObserved = 0)
 {
@@ -146,8 +153,8 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
     }
 
     /// <summary>
-    /// Temporarily extends only the selected bell's hitbox and shadows its Y to the player,
-    /// invokes the stock interaction path, restores both fields immediately, and passively
+    /// Temporarily extends only the selected bell's hitbox and shadows its live/default
+    /// positions to the player, invokes the stock interaction path, and passively
     /// observes the resulting StartTalkEvent.
     /// </summary>
     public unsafe RemoteSummoningBellInteractionResult TryOpenLoadedWithScopedHitboxRadius()
@@ -203,7 +210,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
                 nearest.Object.GameObjectId,
                 nearest.Distance,
                 nearest.InteractionDistance,
-                "Scoped bell HitboxRadius and Position.Y plus stock TargetSystem.InteractWithObject",
+                "Scoped bell HitboxRadius, Position, and DefaultPosition plus stock TargetSystem.InteractWithObject",
                 BellEventId: eventId,
                 BellEventIdSource: eventIdSource);
         }
@@ -219,26 +226,33 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
                 nearest.Object.GameObjectId,
                 nearest.Distance,
                 nearest.InteractionDistance,
-                "Scoped bell HitboxRadius and Position.Y plus stock TargetSystem.InteractWithObject",
+                "Scoped bell HitboxRadius, Position, and DefaultPosition plus stock TargetSystem.InteractWithObject",
                 BellEventId: eventId,
                 BellEventIdSource: eventIdSource);
         }
 
         var originalHitboxRadius = nativeBell->HitboxRadius;
         var temporaryHitboxRadius = GetTemporaryHitboxRadius(originalHitboxRadius, nearest.Distance);
-        var originalBellY = nativeBell->Position.Y;
-        var temporaryBellY = objectTable.LocalPlayer!.Position.Y;
+        var originalBellPosition = nativeBell->Position;
+        var originalDefaultBellPosition = nativeBell->DefaultPosition;
+        var playerPosition = objectTable.LocalPlayer!.Position;
+        var temporaryBellPosition = originalBellPosition;
+        temporaryBellPosition.X = playerPosition.X;
+        temporaryBellPosition.Y = playerPosition.Y;
+        temporaryBellPosition.Z = playerPosition.Z;
         remoteGeometrySnapshot = new(
             nearest.Object.GameObjectId,
             nearest.Object.Address,
             originalHitboxRadius,
             temporaryHitboxRadius,
-            originalBellY,
-            temporaryBellY);
+            originalBellPosition,
+            originalDefaultBellPosition,
+            temporaryBellPosition);
         try
         {
             nativeBell->HitboxRadius = temporaryHitboxRadius;
-            nativeBell->Position.Y = temporaryBellY;
+            nativeBell->Position = temporaryBellPosition;
+            nativeBell->DefaultPosition = temporaryBellPosition;
             targetManager.Target = nearest.Object;
             targetSystem->InteractWithObject(nativeBell, false);
         }
@@ -253,29 +267,43 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
                 nearest.Object.GameObjectId,
                 nearest.Distance,
                 nearest.InteractionDistance,
-                "Scoped bell HitboxRadius and Position.Y plus stock TargetSystem.InteractWithObject",
+                "Scoped bell HitboxRadius, Position, and DefaultPosition plus stock TargetSystem.InteractWithObject",
                 BellEventId: eventId,
                 BellEventIdSource: eventIdSource,
                 OriginalHitboxRadius: originalHitboxRadius,
                 TemporaryHitboxRadius: temporaryHitboxRadius,
-                OriginalBellY: originalBellY,
-                TemporaryBellY: temporaryBellY);
+                OriginalBellX: originalBellPosition.X,
+                OriginalBellY: originalBellPosition.Y,
+                OriginalBellZ: originalBellPosition.Z,
+                TemporaryBellX: temporaryBellPosition.X,
+                TemporaryBellY: temporaryBellPosition.Y,
+                TemporaryBellZ: temporaryBellPosition.Z,
+                OriginalDefaultBellX: originalDefaultBellPosition.X,
+                OriginalDefaultBellY: originalDefaultBellPosition.Y,
+                OriginalDefaultBellZ: originalDefaultBellPosition.Z);
         }
 
         return new(
             SummoningBellInteractionState.Submitted,
             "StockBellInteractionSubmitted",
-            $"Invoked the stock bell interaction with scoped radius {originalHitboxRadius:F1}->{temporaryHitboxRadius:F1} and Y {originalBellY:F1}->{temporaryBellY:F1}; holding both shadows through the bounded response observation.",
+            $"Invoked the stock bell interaction with scoped radius {originalHitboxRadius:F1}->{temporaryHitboxRadius:F1} and live/default positions shadowed to the player; holding all shadows through the bounded response observation.",
             nearest.Object.GameObjectId,
             nearest.Distance,
             nearest.InteractionDistance,
-            "Scoped bell HitboxRadius and Position.Y plus stock TargetSystem.InteractWithObject",
+            "Scoped bell HitboxRadius, Position, and DefaultPosition plus stock TargetSystem.InteractWithObject",
             BellEventId: eventId,
             BellEventIdSource: eventIdSource,
             OriginalHitboxRadius: originalHitboxRadius,
             TemporaryHitboxRadius: temporaryHitboxRadius,
-            OriginalBellY: originalBellY,
-            TemporaryBellY: temporaryBellY);
+            OriginalBellX: originalBellPosition.X,
+            OriginalBellY: originalBellPosition.Y,
+            OriginalBellZ: originalBellPosition.Z,
+            TemporaryBellX: temporaryBellPosition.X,
+            TemporaryBellY: temporaryBellPosition.Y,
+            TemporaryBellZ: temporaryBellPosition.Z,
+            OriginalDefaultBellX: originalDefaultBellPosition.X,
+            OriginalDefaultBellY: originalDefaultBellPosition.Y,
+            OriginalDefaultBellZ: originalDefaultBellPosition.Z);
     }
 
     public TalkEventPacketTransportObservation ObserveTalkPacketTransport() =>
@@ -308,11 +336,20 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             return;
 
         var nativeObject = (NativeGameObject*)snapshot.Address;
-        if (MathF.Abs(nativeObject->Position.Y - snapshot.TemporaryY) < 0.001f)
-            nativeObject->Position.Y = snapshot.OriginalY;
+        if (PositionsMatch(nativeObject->Position, snapshot.TemporaryPosition))
+            nativeObject->Position = snapshot.OriginalPosition;
+        if (PositionsMatch(nativeObject->DefaultPosition, snapshot.TemporaryPosition))
+            nativeObject->DefaultPosition = snapshot.OriginalDefaultPosition;
         if (MathF.Abs(nativeObject->HitboxRadius - snapshot.TemporaryRadius) < 0.001f)
             nativeObject->HitboxRadius = snapshot.OriginalRadius;
     }
+
+    private static bool PositionsMatch(
+        FFXIVClientStructs.FFXIV.Common.Math.Vector3 left,
+        FFXIVClientStructs.FFXIV.Common.Math.Vector3 right) =>
+        MathF.Abs(left.X - right.X) < 0.001f &&
+        MathF.Abs(left.Y - right.Y) < 0.001f &&
+        MathF.Abs(left.Z - right.Z) < 0.001f;
 
     public RemoteSummoningBellObservation ObserveLoadedBell()
     {
@@ -441,6 +478,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
         nint Address,
         float OriginalRadius,
         float TemporaryRadius,
-        float OriginalY,
-        float TemporaryY);
+        FFXIVClientStructs.FFXIV.Common.Math.Vector3 OriginalPosition,
+        FFXIVClientStructs.FFXIV.Common.Math.Vector3 OriginalDefaultPosition,
+        FFXIVClientStructs.FFXIV.Common.Math.Vector3 TemporaryPosition);
 }
