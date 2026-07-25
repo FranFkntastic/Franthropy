@@ -24,6 +24,10 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
     private const int MaximumCapturedActorControlSamples = 16;
     private const int MaximumCapturedRawInboundSamples = 32;
     private const double RawInboundCaptureWindowMilliseconds = 500;
+    private const int MaximumFlightRecorderSamples = 512;
+    private const int MaximumFlightRecorderPacketBytes = 512;
+    private const int MaximumPlausiblePacketBytes = 64 * 1024;
+    private const double FlightRecorderWindowMilliseconds = 30_000;
 
     private readonly Hook<ZoneClient.Delegates.SendPacket> sendPacketHook;
     private readonly Hook<PacketDispatcher.Delegates.OnReceivePacket> receivePacketHook;
@@ -33,6 +37,7 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
     private readonly object observationGate = new();
     private CaptureTarget? activeTarget;
     private bool outboundObservationArmed;
+    private bool flightRecorderArmed;
     private long outboundSentTimestamp;
     private int packetsObservedWhileArmed;
     private int sizeEligiblePacketsObserved;
@@ -80,7 +85,16 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
         receivePacketHook.Enable();
     }
 
-    public TalkEventPacketTransportObservation ArmPassThrough(ulong actorId, uint eventId)
+    public TalkEventPacketTransportObservation ArmPassThrough(ulong actorId, uint eventId) =>
+        Arm(actorId, eventId, captureAllZoneTraffic: false);
+
+    public TalkEventPacketTransportObservation ArmFlightRecorder(ulong actorId, uint eventId) =>
+        Arm(actorId, eventId, captureAllZoneTraffic: true);
+
+    private TalkEventPacketTransportObservation Arm(
+        ulong actorId,
+        uint eventId,
+        bool captureAllZoneTraffic)
     {
         if (disposed)
             return Failed("The talk-event packet observer has been disposed.");
@@ -94,6 +108,7 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             Interlocked.Exchange(ref sizeEligiblePacketsObserved, 0);
             activeTarget = new(actorId, eventId);
             outboundObservationArmed = true;
+            flightRecorderArmed = captureAllZoneTraffic;
             outboundSentTimestamp = 0;
             observation = new(
                 TalkEventPacketTransportState.AwaitingBuilderPacket,
@@ -102,7 +117,10 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
                 false,
                 0,
                 0,
-                "Armed passive observers for the stock StartTalkEvent and matching inbound EventPlay.");
+                captureAllZoneTraffic
+                    ? "Armed the passive normal-bell flight recorder; waiting for the stock StartTalkEvent."
+                    : "Armed passive observers for the stock StartTalkEvent and matching inbound EventPlay.",
+                FlightRecorderArmed: captureAllZoneTraffic);
             return observation;
         }
     }
@@ -135,10 +153,14 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
                         ? $"Observed and passed through one stock StartTalkEvent packet unchanged (opcode 0x{opcode:X})."
                         : $"Observed the stock StartTalkEvent packet, but the zone send primitive returned false (opcode 0x{opcode:X}).",
                 };
+                if (accepted)
+                    AppendOutboundFlightRecorderSample(packet, argument3, argument4, argument5);
             }
             return accepted;
         }
 
+        lock (observationGate)
+            AppendOutboundFlightRecorderSample(packet, argument3, argument4, argument5);
         return sendPacketHook.Original(zoneClient, packet, argument3, argument4, argument5);
     }
 
@@ -381,6 +403,9 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
                 {
                     var millisecondsAfterOutbound = GetMillisecondsAfterOutbound();
                     var samples = observation.InboundRawPacketSamples ?? [];
+                    var word0 = packet == 0 ? 0 : *(uint*)packet;
+                    var packetSize = (ushort)(word0 & 0xFFFF);
+                    var opcode = (ushort)(word0 >> 16);
                     var updatedSamples =
                         millisecondsAfterOutbound <= RawInboundCaptureWindowMilliseconds &&
                         samples.Length < MaximumCapturedRawInboundSamples &&
@@ -391,13 +416,17 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
                                 *(uint*)packet,
                                 *((uint*)packet + 1),
                                 *((uint*)packet + 2),
-                                *((uint*)packet + 3))]
+                                *((uint*)packet + 3),
+                                packetSize >= 20 ? *((uint*)packet + 4) : 0,
+                                packetSize,
+                                opcode)]
                             : samples;
                     observation = observation with
                     {
                         InboundRawPacketCount = observation.InboundRawPacketCount + 1,
                         InboundRawPacketSamples = updatedSamples,
                     };
+                    AppendInboundFlightRecorderSample(targetId, packet);
                 }
             }
         }
@@ -426,13 +455,23 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
         lock (observationGate)
         {
             var wasPending = observation.State == TalkEventPacketTransportState.AwaitingBuilderPacket;
+            var wasRecording = flightRecorderArmed && observation.State == TalkEventPacketTransportState.StockPacketSent;
             activeTarget = null;
             outboundObservationArmed = false;
+            flightRecorderArmed = false;
             if (wasPending)
             {
                 observation = Failed(
                     $"{reason} Observed {Volatile.Read(ref packetsObservedWhileArmed)} outbound packet(s) while armed, " +
                     $"{Volatile.Read(ref sizeEligiblePacketsObserved)} with a compatible envelope size.");
+            }
+            else if (wasRecording)
+            {
+                observation = observation with
+                {
+                    FlightRecorderStopped = true,
+                    Message = reason,
+                };
             }
         }
     }
@@ -466,6 +505,98 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             ? 0
             : Stopwatch.GetElapsedTime(sentAt).TotalMilliseconds;
     }
+
+    private void AppendOutboundFlightRecorderSample(
+        nint packet,
+        uint argument3,
+        uint argument4,
+        bool argument5)
+    {
+        if (!CanCaptureFlightRecorderPacket() || packet == 0)
+            return;
+
+        try
+        {
+            var encodedSize = *(ulong*)((byte*)packet + 8);
+            if (encodedSize < 0x10 || encodedSize > MaximumPlausiblePacketBytes)
+                return;
+
+            var declaredSize = checked((int)encodedSize + 0x10);
+            AppendFlightRecorderSample(new(
+                GetMillisecondsAfterOutbound(),
+                "outbound",
+                *(uint*)packet,
+                declaredSize,
+                0,
+                argument3,
+                argument4,
+                argument5,
+                declaredSize > MaximumFlightRecorderPacketBytes,
+                CaptureHex(packet, Math.Min(declaredSize, MaximumFlightRecorderPacketBytes))));
+        }
+        catch
+        {
+            // Observation must never interfere with the client's outbound path.
+        }
+    }
+
+    private void AppendInboundFlightRecorderSample(uint targetId, nint packet)
+    {
+        if (!CanCaptureFlightRecorderPacket() || packet == 0)
+            return;
+
+        try
+        {
+            var word0 = *(uint*)packet;
+            var declaredSize = (int)(ushort)(word0 & 0xFFFF);
+            if (declaredSize < sizeof(uint) || declaredSize > MaximumPlausiblePacketBytes)
+                return;
+
+            AppendFlightRecorderSample(new(
+                GetMillisecondsAfterOutbound(),
+                "inbound",
+                (ushort)(word0 >> 16),
+                declaredSize,
+                targetId,
+                0,
+                0,
+                false,
+                declaredSize > MaximumFlightRecorderPacketBytes,
+                CaptureHex(packet, Math.Min(declaredSize, MaximumFlightRecorderPacketBytes))));
+        }
+        catch
+        {
+            // Observation must never interfere with the client's inbound path.
+        }
+    }
+
+    private bool CanCaptureFlightRecorderPacket() =>
+        flightRecorderArmed &&
+        observation.State == TalkEventPacketTransportState.StockPacketSent &&
+        observation.FlightRecorderSamples is not { Length: >= MaximumFlightRecorderSamples } &&
+        GetMillisecondsAfterOutbound() <= FlightRecorderWindowMilliseconds;
+
+    private void AppendFlightRecorderSample(ZonePacketFlightRecorderSample sample)
+    {
+        var samples = observation.FlightRecorderSamples ?? [];
+        if (samples.Length >= MaximumFlightRecorderSamples)
+            return;
+
+        observation = observation with
+        {
+            FlightRecorderPacketCount = observation.FlightRecorderPacketCount + 1,
+            FlightRecorderOutboundPacketCount =
+                observation.FlightRecorderOutboundPacketCount + (sample.Direction == "outbound" ? 1 : 0),
+            FlightRecorderInboundPacketCount =
+                observation.FlightRecorderInboundPacketCount + (sample.Direction == "inbound" ? 1 : 0),
+            FlightRecorderSamples = [.. samples, sample],
+        };
+    }
+
+    private static string CaptureHex(nint packet, int length) =>
+        length <= 0
+            ? string.Empty
+            : Convert.ToHexString(new ReadOnlySpan<byte>((void*)packet, length));
 
     public void Dispose()
     {
@@ -514,7 +645,13 @@ public sealed record TalkEventPacketTransportObservation(
     int InboundActorControlCount = 0,
     InboundActorControlSample[]? InboundActorControlSamples = null,
     int InboundRawPacketCount = 0,
-    InboundRawPacketSample[]? InboundRawPacketSamples = null)
+    InboundRawPacketSample[]? InboundRawPacketSamples = null,
+    bool FlightRecorderArmed = false,
+    bool FlightRecorderStopped = false,
+    int FlightRecorderPacketCount = 0,
+    int FlightRecorderOutboundPacketCount = 0,
+    int FlightRecorderInboundPacketCount = 0,
+    ZonePacketFlightRecorderSample[]? FlightRecorderSamples = null)
 {
     public bool Pending => State == TalkEventPacketTransportState.AwaitingBuilderPacket;
     public bool Sent => State == TalkEventPacketTransportState.StockPacketSent;
@@ -558,4 +695,19 @@ public sealed record InboundRawPacketSample(
     uint Word0,
     uint Word1,
     uint Word2,
-    uint Word3);
+    uint Word3,
+    uint Word4,
+    ushort PacketSize,
+    ushort Opcode);
+
+public sealed record ZonePacketFlightRecorderSample(
+    double MillisecondsAfterOutbound,
+    string Direction,
+    uint Opcode,
+    int DeclaredSize,
+    uint TargetId,
+    uint Argument3,
+    uint Argument4,
+    bool Argument5,
+    bool Truncated,
+    string PacketHex);
