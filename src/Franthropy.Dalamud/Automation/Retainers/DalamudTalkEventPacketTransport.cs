@@ -17,6 +17,7 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
     private const int MinimumTalkPayloadLength = 12;
     private const int MaximumCapturedPayloadLength = 256;
     private const int MaximumCapturedSceneDataCount = 8;
+    private const int MaximumCapturedEventPlaySamples = 8;
 
     private readonly Hook<ZoneClient.Delegates.SendPacket> sendPacketHook;
     private readonly Hook<PacketDispatcher.Delegates.HandleEventPlayPacket> eventPlayHook;
@@ -155,9 +156,7 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             lock (observationGate)
                 target = activeTarget;
 
-            if (target is not null &&
-                objectId.Id == target.ActorId &&
-                eventId.Id == target.EventId)
+            if (target is not null)
             {
                 var capturedCount = Math.Min((int)sceneDataCount, MaximumCapturedSceneDataCount);
                 var capturedSceneData = new uint[capturedCount];
@@ -171,16 +170,34 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
                 {
                     if (activeTarget == target)
                     {
+                        var samples = observation.InboundEventPlaySamples ?? [];
+                        var updatedSamples = samples.Length < MaximumCapturedEventPlaySamples
+                            ? [.. samples, new InboundEventPlaySample(
+                                objectId.Id,
+                                eventId.Id,
+                                scene,
+                                sceneFlags,
+                                sceneDataCount,
+                                capturedSceneData)]
+                            : samples;
                         observation = observation with
                         {
-                            InboundEventPlayObserved = true,
-                            InboundEventObjectId = objectId.Id,
-                            InboundEventId = eventId.Id,
-                            InboundScene = scene,
-                            InboundSceneFlags = sceneFlags,
-                            InboundSceneDataCount = sceneDataCount,
-                            InboundSceneData = capturedSceneData,
+                            InboundEventPlayCount = observation.InboundEventPlayCount + 1,
+                            InboundEventPlaySamples = updatedSamples,
                         };
+                        if (objectId.Id == target.ActorId && eventId.Id == target.EventId)
+                        {
+                            observation = observation with
+                            {
+                                InboundEventPlayObserved = true,
+                                InboundEventObjectId = objectId.Id,
+                                InboundEventId = eventId.Id,
+                                InboundScene = scene,
+                                InboundSceneFlags = sceneFlags,
+                                InboundSceneDataCount = sceneDataCount,
+                                InboundSceneData = capturedSceneData,
+                            };
+                        }
                     }
                 }
             }
@@ -278,8 +295,18 @@ public sealed record TalkEventPacketTransportObservation(
     short InboundScene = 0,
     ulong InboundSceneFlags = 0,
     byte InboundSceneDataCount = 0,
-    uint[]? InboundSceneData = null)
+    uint[]? InboundSceneData = null,
+    int InboundEventPlayCount = 0,
+    InboundEventPlaySample[]? InboundEventPlaySamples = null)
 {
     public bool Pending => State == TalkEventPacketTransportState.AwaitingBuilderPacket;
     public bool Sent => State == TalkEventPacketTransportState.StockPacketSent;
 }
+
+public sealed record InboundEventPlaySample(
+    ulong ObjectId,
+    uint EventId,
+    short Scene,
+    ulong SceneFlags,
+    byte SceneDataCount,
+    uint[] SceneData);

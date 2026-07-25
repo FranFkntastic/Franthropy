@@ -58,7 +58,9 @@ public sealed record RemoteSummoningBellInteractionResult(
     short InboundScene = 0,
     ulong InboundSceneFlags = 0,
     byte InboundSceneDataCount = 0,
-    uint[]? InboundSceneData = null)
+    uint[]? InboundSceneData = null,
+    int InboundEventPlayCount = 0,
+    InboundEventPlaySample[]? InboundEventPlaySamples = null)
 {
     public bool Submitted => State == SummoningBellInteractionState.Submitted;
 }
