@@ -55,7 +55,7 @@ public sealed class DalamudTableProjection<TRow>
         }
     }
 
-    public IReadOnlyList<TRow> Apply(IEnumerable<TRow> rows, ImGuiTableSortSpecsPtr sortSpecs)
+    public unsafe IReadOnlyList<TRow> Apply(IEnumerable<TRow> rows, ImGuiTableSortSpecsPtr sortSpecs)
     {
         var filtered = rows.Where(MatchesAllFilters).ToArray();
         if (sortSpecs.Handle == null || sortSpecs.SpecsCount == 0)
