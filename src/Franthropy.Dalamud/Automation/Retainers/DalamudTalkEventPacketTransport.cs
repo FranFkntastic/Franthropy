@@ -13,7 +13,7 @@ namespace Franthropy.Dalamud.Automation.Retainers;
 /// Passively observes one stock StartTalkEvent packet and any matching inbound
 /// EventPlay for an exact live actor/event pair. Neither packet is altered.
 /// </summary>
-public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
+public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
 {
     private const int PacketPayloadOffset = 0x20;
     private const int MinimumTalkPayloadLength = 12;
@@ -101,8 +101,8 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
 
         lock (observationGate)
         {
-            if (activeTarget is not null)
-                return Failed("A talk-event packet observation is already armed.");
+            if (activeTarget is not null || activeYieldProbe is not null)
+                return Failed("Another event-packet observation is already armed.");
 
             Interlocked.Exchange(ref packetsObservedWhileArmed, 0);
             Interlocked.Exchange(ref sizeEligiblePacketsObserved, 0);
@@ -132,6 +132,17 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
         uint argument4,
         bool argument5)
     {
+        if (TryReplaceYieldControlPacket(
+                zoneClient,
+                packet,
+                argument3,
+                argument4,
+                argument5,
+                out var yieldSendResult))
+        {
+            return yieldSendResult;
+        }
+
         if (IsOutboundObservationArmed())
             Interlocked.Increment(ref packetsObservedWhileArmed);
 
@@ -269,6 +280,7 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             // Observation must never interfere with the client's inbound event path.
         }
 
+        ObserveYieldEventPlay(objectId, eventId, scene, sceneFlags, sceneData, sceneDataCount);
         eventPlayHook.Original(objectId, eventId, scene, sceneFlags, sceneData, sceneDataCount);
     }
 
@@ -320,6 +332,7 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             // Observation must never interfere with the client's inbound event path.
         }
 
+        ObserveYieldEventYield(eventId, scene, yieldId, intParams, intParamCount);
         eventYieldHook.Original(eventId, scene, yieldId, intParams, intParamCount);
     }
 
@@ -374,6 +387,19 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             // Observation must never interfere with the client's inbound control path.
         }
 
+        ObserveYieldActorControl(
+            entityId,
+            category,
+            arg1,
+            arg2,
+            arg3,
+            arg4,
+            arg5,
+            arg6,
+            arg7,
+            arg8,
+            targetId,
+            isRecorded);
         actorControlHook.Original(
             entityId,
             category,
@@ -435,6 +461,7 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             // Observation must never interfere with the client's generic receive path.
         }
 
+        ObserveYieldRawPacket(targetId, packet);
         receivePacketHook.Original(packetDispatcher, targetId, packet);
     }
 
@@ -604,6 +631,7 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             return;
         disposed = true;
         CancelPending("The talk-event packet observer was disposed.");
+        CancelYieldProbe("The yield-event packet observer was disposed.");
         receivePacketHook.Dispose();
         actorControlHook.Dispose();
         eventYieldHook.Dispose();
