@@ -115,7 +115,9 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
 
         lock (observationGate)
         {
-            if (activeTarget is not null || activeYieldProbe is not null)
+            if (activeTarget is not null ||
+                activeYieldProbe is not null ||
+                activeWarmSessionProbe is not null)
                 return Failed("Another event-packet observation is already armed.");
 
             Interlocked.Exchange(ref packetsObservedWhileArmed, 0);
@@ -156,6 +158,17 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         uint argument4,
         bool argument5)
     {
+        if (TryHandleWarmSessionPacket(
+                zoneClient,
+                packet,
+                argument3,
+                argument4,
+                argument5,
+                out var warmSessionSendResult))
+        {
+            return warmSessionSendResult;
+        }
+
         if (TryReplaceYieldControlPacket(
                 zoneClient,
                 packet,
@@ -305,6 +318,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         }
 
         ObserveYieldEventPlay(objectId, eventId, scene, sceneFlags, sceneData, sceneDataCount);
+        ObserveWarmSessionEventPlay(objectId, eventId, scene, sceneFlags, sceneData, sceneDataCount);
         eventPlayHook.Original(objectId, eventId, scene, sceneFlags, sceneData, sceneDataCount);
     }
 
@@ -357,6 +371,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         }
 
         ObserveYieldEventYield(eventId, scene, yieldId, intParams, intParamCount);
+        ObserveWarmSessionEventYield(eventId, scene, yieldId, intParams, intParamCount);
         eventYieldHook.Original(eventId, scene, yieldId, intParams, intParamCount);
     }
 
@@ -412,6 +427,19 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         }
 
         ObserveYieldActorControl(
+            entityId,
+            category,
+            arg1,
+            arg2,
+            arg3,
+            arg4,
+            arg5,
+            arg6,
+            arg7,
+            arg8,
+            targetId,
+            isRecorded);
+        ObserveWarmSessionActorControl(
             entityId,
             category,
             arg1,
@@ -486,6 +514,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         }
 
         ObserveYieldRawPacket(targetId, packet);
+        ObserveWarmSessionRawPacket(targetId, packet);
         receivePacketHook.Original(packetDispatcher, targetId, packet);
     }
 
@@ -710,6 +739,13 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         disposed = true;
         CancelPending("The talk-event packet observer was disposed.");
         CancelYieldProbe("The yield-event packet observer was disposed.");
+        if (warmSessionObservation.TeardownSuppressed &&
+            !warmSessionObservation.MatchingScene2Observed &&
+            !warmSessionObservation.TeardownReleaseSent)
+        {
+            ReleaseWarmSession();
+        }
+        StopWarmSessionRetention("The warm-session packet observer was disposed.");
         receivePacketHook.Dispose();
         actorControlHook.Dispose();
         eventYieldHook.Dispose();

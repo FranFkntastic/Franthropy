@@ -101,6 +101,16 @@ public sealed record YieldEventSceneControlArmResult(
     float Distance,
     float OrdinaryInteractionDistance);
 
+public sealed record WarmSessionRetentionArmResult(
+    bool Armed,
+    string Code,
+    string Message,
+    ulong BellGameObjectId,
+    uint BellEventId,
+    string BellEventIdSource,
+    float Distance,
+    float OrdinaryInteractionDistance);
+
 /// <summary>
 /// Finds and interacts with a nearby summoning bell through the normal game-object interaction path.
 /// Call this on the framework thread, then observe the retainer-list addon before continuing.
@@ -525,6 +535,108 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
 
     public void DiscardYieldEventSceneTemplate(string reason) =>
         talkPacketTransport?.DiscardYieldTemplate(reason);
+
+    public unsafe WarmSessionRetentionArmResult TryArmWarmSessionRetention()
+    {
+        var nearest = FindLoadedBell();
+        if (nearest is null)
+        {
+            return new(
+                false,
+                objectTable.LocalPlayer is null ? "PlayerUnavailable" : "NoLoadedSummoningBell",
+                objectTable.LocalPlayer is null
+                    ? "The local player is unavailable."
+                    : "No targetable summoning bell is loaded in the current object table.",
+                0,
+                0,
+                string.Empty,
+                0,
+                0);
+        }
+
+        if (IsOutsideInteractionRange(nearest.Distance, nearest.Object.ObjectKind))
+        {
+            return new(
+                false,
+                "SummoningBellOutOfRange",
+                $"Move inside ordinary interaction range before arming warm-session retention ({nearest.Distance:F1} yalms away; limit {nearest.InteractionDistance:F1}).",
+                nearest.Object.GameObjectId,
+                0,
+                string.Empty,
+                nearest.Distance,
+                nearest.InteractionDistance);
+        }
+
+        if (talkPacketTransport is null)
+        {
+            return new(
+                false,
+                "WarmSessionPacketTransportUnavailable",
+                "The warm-session packet transport is unavailable.",
+                nearest.Object.GameObjectId,
+                0,
+                string.Empty,
+                nearest.Distance,
+                nearest.InteractionDistance);
+        }
+
+        var nativeBell = (NativeGameObject*)nearest.Object.Address;
+        var (eventId, eventIdSource) = ResolveEventId(nativeBell);
+        if (eventId == 0)
+        {
+            return new(
+                false,
+                "SummoningBellEventIdUnavailable",
+                "The loaded summoning bell has no live event ID.",
+                nearest.Object.GameObjectId,
+                0,
+                string.Empty,
+                nearest.Distance,
+                nearest.InteractionDistance);
+        }
+
+        var armed = talkPacketTransport.ArmWarmSessionRetention(
+            nearest.Object.GameObjectId,
+            eventId);
+        return new(
+            armed.State == WarmSessionRetentionProbeState.AwaitingSelection,
+            armed.State == WarmSessionRetentionProbeState.AwaitingSelection
+                ? "WarmSessionRetentionArmed"
+                : "WarmSessionRetentionArmFailed",
+            armed.Message,
+            nearest.Object.GameObjectId,
+            eventId,
+            eventIdSource,
+            nearest.Distance,
+            nearest.InteractionDistance);
+    }
+
+    public WarmSessionRetentionProbeObservation ReplayWarmSessionSelection() =>
+        talkPacketTransport?.ReplayWarmSelection() ??
+        WarmSessionRetentionProbeObservation.Idle with
+        {
+            State = WarmSessionRetentionProbeState.Failed,
+            Message = "The warm-session packet transport is unavailable.",
+        };
+
+    public WarmSessionRetentionProbeObservation ReleaseWarmSession() =>
+        talkPacketTransport?.ReleaseWarmSession() ??
+        WarmSessionRetentionProbeObservation.Idle with
+        {
+            State = WarmSessionRetentionProbeState.Failed,
+            Message = "The warm-session packet transport is unavailable.",
+        };
+
+    public WarmSessionRetentionProbeObservation ObserveWarmSessionRetention() =>
+        talkPacketTransport?.ObserveWarmSessionRetention() ??
+        WarmSessionRetentionProbeObservation.Idle with
+        {
+            State = WarmSessionRetentionProbeState.Failed,
+            Message = "The warm-session packet transport is unavailable.",
+        };
+
+    public void StopWarmSessionRetention(string reason) =>
+        talkPacketTransport?.StopWarmSessionRetention(reason);
 
     public void CancelTalkPacketTransport(string reason)
     {

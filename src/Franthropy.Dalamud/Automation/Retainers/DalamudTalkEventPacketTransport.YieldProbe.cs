@@ -25,7 +25,9 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
 
         lock (observationGate)
         {
-            if (activeTarget is not null || activeYieldProbe is not null)
+            if (activeTarget is not null ||
+                activeYieldProbe is not null ||
+                activeWarmSessionProbe is not null)
                 return FailYield("Another event-packet observation is already armed.");
 
             cachedYieldTemplate = null;
@@ -69,7 +71,9 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
         {
             if (disposed)
                 return FailYield("The yield-event packet observer has been disposed.");
-            if (activeTarget is not null || activeYieldProbe is not null)
+            if (activeTarget is not null ||
+                activeYieldProbe is not null ||
+                activeWarmSessionProbe is not null)
                 return FailYield("Another event-packet observation is already active.");
             if (cachedYieldTemplate is null)
                 return FailYield("No confirmed current-build YieldEventScene2 template is cached.");

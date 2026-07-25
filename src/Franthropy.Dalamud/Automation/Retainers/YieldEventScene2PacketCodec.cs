@@ -14,6 +14,18 @@ internal static class YieldEventScene2PacketCodec
         uint expectedEventId,
         out YieldEventScene2PacketFields fields)
     {
+        if (!TryDecodeEnvelope(packet, expectedEventId, out fields))
+            return false;
+
+        return fields.SceneId == 0 &&
+               fields.ResultCount == ExpectedResultCount;
+    }
+
+    internal static bool TryDecodeEnvelope(
+        ReadOnlySpan<byte> packet,
+        uint expectedEventId,
+        out YieldEventScene2PacketFields fields)
+    {
         fields = default;
         if (packet.Length < MinimumDeclaredPacketSize)
             return false;
@@ -34,12 +46,8 @@ internal static class YieldEventScene2PacketCodec
         var sceneId = BinaryPrimitives.ReadUInt16LittleEndian(payload.Slice(4, 2));
         var yieldId = payload[6];
         var resultCount = payload[7];
-        if (eventId != expectedEventId ||
-            sceneId != 0 ||
-            resultCount != ExpectedResultCount)
-        {
+        if (eventId != expectedEventId)
             return false;
-        }
 
         var result0 = BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(8, 4));
         var result1 = BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(12, 4));
