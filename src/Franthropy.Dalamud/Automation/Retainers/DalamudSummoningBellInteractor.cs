@@ -41,6 +41,8 @@ public sealed record RemoteSummoningBellInteractionResult(
     string BellEventIdSource = "",
     float OriginalHitboxRadius = 0,
     float TemporaryHitboxRadius = 0,
+    float OriginalBellY = 0,
+    float TemporaryBellY = 0,
     int PacketsObservedWhileArmed = 0,
     int SizeEligiblePacketsObserved = 0)
 {
@@ -72,6 +74,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
     private readonly ITargetManager targetManager;
     private readonly IDataManager dataManager;
     private readonly DalamudTalkEventPacketTransport? talkPacketTransport;
+    private RemoteGeometrySnapshot? remoteGeometrySnapshot;
 
     public DalamudSummoningBellInteractor(
         IObjectTable objectTable,
@@ -143,8 +146,9 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
     }
 
     /// <summary>
-    /// Temporarily extends only the selected bell's hitbox, invokes the stock interaction path,
-    /// restores the radius immediately, and passively observes the resulting StartTalkEvent.
+    /// Temporarily extends only the selected bell's hitbox and shadows its Y to the player,
+    /// invokes the stock interaction path, restores both fields immediately, and passively
+    /// observes the resulting StartTalkEvent.
     /// </summary>
     public unsafe RemoteSummoningBellInteractionResult TryOpenLoadedWithScopedHitboxRadius()
     {
@@ -199,7 +203,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
                 nearest.Object.GameObjectId,
                 nearest.Distance,
                 nearest.InteractionDistance,
-                "Scoped bell HitboxRadius plus stock TargetSystem.InteractWithObject",
+                "Scoped bell HitboxRadius and Position.Y plus stock TargetSystem.InteractWithObject",
                 BellEventId: eventId,
                 BellEventIdSource: eventIdSource);
         }
@@ -215,22 +219,33 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
                 nearest.Object.GameObjectId,
                 nearest.Distance,
                 nearest.InteractionDistance,
-                "Scoped bell HitboxRadius plus stock TargetSystem.InteractWithObject",
+                "Scoped bell HitboxRadius and Position.Y plus stock TargetSystem.InteractWithObject",
                 BellEventId: eventId,
                 BellEventIdSource: eventIdSource);
         }
 
         var originalHitboxRadius = nativeBell->HitboxRadius;
         var temporaryHitboxRadius = GetTemporaryHitboxRadius(originalHitboxRadius, nearest.Distance);
+        var originalBellY = nativeBell->Position.Y;
+        var temporaryBellY = objectTable.LocalPlayer!.Position.Y;
+        remoteGeometrySnapshot = new(
+            nearest.Object.GameObjectId,
+            nearest.Object.Address,
+            originalHitboxRadius,
+            temporaryHitboxRadius,
+            originalBellY,
+            temporaryBellY);
         try
         {
             nativeBell->HitboxRadius = temporaryHitboxRadius;
+            nativeBell->Position.Y = temporaryBellY;
             targetManager.Target = nearest.Object;
             targetSystem->InteractWithObject(nativeBell, false);
         }
         catch (Exception exception)
         {
             talkPacketTransport.CancelPending("The stock interaction call failed.");
+            RestoreRemoteProbeGeometry();
             return new(
                 SummoningBellInteractionState.Unavailable,
                 "StockBellInteractionFailed",
@@ -238,29 +253,29 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
                 nearest.Object.GameObjectId,
                 nearest.Distance,
                 nearest.InteractionDistance,
-                "Scoped bell HitboxRadius plus stock TargetSystem.InteractWithObject",
+                "Scoped bell HitboxRadius and Position.Y plus stock TargetSystem.InteractWithObject",
                 BellEventId: eventId,
                 BellEventIdSource: eventIdSource,
                 OriginalHitboxRadius: originalHitboxRadius,
-                TemporaryHitboxRadius: temporaryHitboxRadius);
-        }
-        finally
-        {
-            nativeBell->HitboxRadius = originalHitboxRadius;
+                TemporaryHitboxRadius: temporaryHitboxRadius,
+                OriginalBellY: originalBellY,
+                TemporaryBellY: temporaryBellY);
         }
 
         return new(
             SummoningBellInteractionState.Submitted,
             "StockBellInteractionSubmitted",
-            $"Invoked the stock bell interaction with a scoped hitbox radius of {temporaryHitboxRadius:F1}; restored the original {originalHitboxRadius:F1} radius and left the packet observer armed.",
+            $"Invoked the stock bell interaction with scoped radius {originalHitboxRadius:F1}->{temporaryHitboxRadius:F1} and Y {originalBellY:F1}->{temporaryBellY:F1}; holding both shadows through the bounded response observation.",
             nearest.Object.GameObjectId,
             nearest.Distance,
             nearest.InteractionDistance,
-            "Scoped bell HitboxRadius plus stock TargetSystem.InteractWithObject",
+            "Scoped bell HitboxRadius and Position.Y plus stock TargetSystem.InteractWithObject",
             BellEventId: eventId,
             BellEventIdSource: eventIdSource,
             OriginalHitboxRadius: originalHitboxRadius,
-            TemporaryHitboxRadius: temporaryHitboxRadius);
+            TemporaryHitboxRadius: temporaryHitboxRadius,
+            OriginalBellY: originalBellY,
+            TemporaryBellY: temporaryBellY);
     }
 
     public TalkEventPacketTransportObservation ObserveTalkPacketTransport() =>
@@ -274,7 +289,30 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             0,
             "The StartTalkEvent packet transport is unavailable.");
 
-    public void CancelTalkPacketTransport(string reason) => talkPacketTransport?.CancelPending(reason);
+    public void CancelTalkPacketTransport(string reason)
+    {
+        talkPacketTransport?.CancelPending(reason);
+        RestoreRemoteProbeGeometry();
+    }
+
+    public unsafe void RestoreRemoteProbeGeometry()
+    {
+        if (remoteGeometrySnapshot is not { } snapshot)
+            return;
+        remoteGeometrySnapshot = null;
+
+        var liveObject = objectTable.FirstOrDefault(value =>
+            value.GameObjectId == snapshot.GameObjectId &&
+            value.Address == snapshot.Address);
+        if (liveObject is null)
+            return;
+
+        var nativeObject = (NativeGameObject*)snapshot.Address;
+        if (MathF.Abs(nativeObject->Position.Y - snapshot.TemporaryY) < 0.001f)
+            nativeObject->Position.Y = snapshot.OriginalY;
+        if (MathF.Abs(nativeObject->HitboxRadius - snapshot.TemporaryRadius) < 0.001f)
+            nativeObject->HitboxRadius = snapshot.OriginalRadius;
+    }
 
     public RemoteSummoningBellObservation ObserveLoadedBell()
     {
@@ -390,7 +428,19 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
     private static RemoteSummoningBellInteractionResult RemoteUnavailable(string code, string message) =>
         new(SummoningBellInteractionState.Unavailable, code, message, 0, 0, 0);
 
-    public void Dispose() => talkPacketTransport?.Dispose();
+    public void Dispose()
+    {
+        RestoreRemoteProbeGeometry();
+        talkPacketTransport?.Dispose();
+    }
 
     private sealed record LoadedBell(IGameObject Object, float Distance, float InteractionDistance);
+
+    private sealed record RemoteGeometrySnapshot(
+        ulong GameObjectId,
+        nint Address,
+        float OriginalRadius,
+        float TemporaryRadius,
+        float OriginalY,
+        float TemporaryY);
 }
