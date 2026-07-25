@@ -106,6 +106,24 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         return RetainerAutomationResult.Succeeded("RetainerOpened", $"Opened and verified {target.RetainerName}.");
     }
 
+    public async Task<RetainerAutomationOpenResult> OpenFirstAvailableRetainerAsync(CancellationToken cancellationToken = default)
+    {
+        active = null;
+        var selected = await framework.RunOnTick(SelectFirstAvailableRetainer, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (!selected.Result.Success || string.IsNullOrWhiteSpace(selected.RetainerName))
+            return RetainerAutomationOpenResult.Failed(selected.Result.Code, selected.Result.Message);
+        if (!await WaitUntilAsync(IsCommandMenuReady, cancellationToken).ConfigureAwait(false))
+            return RetainerAutomationOpenResult.Failed("RetainerMenuTimeout", "Timed out waiting for the first available retainer's command menu.");
+
+        var retainerId = await framework.RunOnTick(ReadActiveRetainerId, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (retainerId == 0)
+            return RetainerAutomationOpenResult.Failed("RetainerIdentityUnavailable", "The opened retainer did not expose a stable retainer ID.");
+
+        var target = new RetainerAutomationTarget(retainerId, selected.RetainerName);
+        active = target;
+        return RetainerAutomationOpenResult.Succeeded(target, "RetainerOpened", $"Opened and verified {target.RetainerName}.");
+    }
+
     public async Task<RetainerAutomationResult> WaitForCurrentRetainerMenuAsync(CancellationToken cancellationToken = default) =>
         await WaitUntilAsync(IsCommandMenuReady, cancellationToken).ConfigureAwait(false)
             ? RetainerAutomationResult.Succeeded("RetainerMenuReady", "Current retainer command menu is ready.")
@@ -205,6 +223,17 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         return RetainerAutomationResult.Succeeded("RetainerClosed", "Retainer closed.");
     }
 
+    public async Task<RetainerAutomationResult> CloseRetainerListAsync(CancellationToken cancellationToken = default)
+    {
+        var closed = await framework.RunOnTick(CloseRetainerList, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (!closed.Success)
+            return closed;
+
+        return await WaitUntilAsync(() => !IsReady(RetainerList), cancellationToken).ConfigureAwait(false)
+            ? RetainerAutomationResult.Succeeded("RetainerListClosed", "Retainer list closed.")
+            : RetainerAutomationResult.Failed("RetainerListCloseTimeout", "Timed out waiting for the retainer list to close.");
+    }
+
     public unsafe void CancelActive()
     {
         CloseInventory();
@@ -264,6 +293,25 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         return RetainerAutomationResult.Succeeded("RetainerSelected", $"Selected {name}.");
     }
 
+    private unsafe (RetainerAutomationResult Result, string? RetainerName) SelectFirstAvailableRetainer()
+    {
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(RetainerList, 1);
+        if (addon is null || !addon->IsReady || !addon->IsVisible)
+            return (RetainerAutomationResult.Failed("RetainerListUnavailable", "Retainer list is not ready."), null);
+
+        var entries = ReadRetainerListEntries(addon);
+        var selectedIndex = RetainerUiAutomationText.FindFirstActiveRetainerListIndex(entries);
+        if (selectedIndex is null)
+            return (RetainerAutomationResult.Failed("RetainerNotVisible", "No active retainer was visible in the retainer list."), null);
+
+        var values = stackalloc AtkValue[4];
+        values[0] = new() { Type = AtkValueType.Int, Int = 2 };
+        values[1] = new() { Type = AtkValueType.UInt, UInt = (uint)selectedIndex.Value };
+        addon->FireCallback(4, values, true);
+        var name = entries[selectedIndex.Value].Name;
+        return (RetainerAutomationResult.Succeeded("RetainerSelected", $"Selected {name}."), name);
+    }
+
     private unsafe bool IsCommandMenuReady()
     {
         var addon = gameGui.GetAddonByName<AddonSelectString>(SelectString, 1);
@@ -300,6 +348,19 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             : RetainerAutomationResult.Failed("RetainerIdentityMismatch", "Active retainer identity does not match the expected stable ID.");
     }
 
+    private static unsafe ulong ReadActiveRetainerId()
+    {
+        var manager = RetainerManager.Instance();
+        var current = manager == null ? null : manager->GetActiveRetainer();
+        return current == null ? 0 : current->RetainerId;
+    }
+
+    private static unsafe List<RetainerListEntry> ReadRetainerListEntries(AtkUnitBase* addon)
+    {
+        var entries = ReadRetainerListEntries(addon);
+        return entries;
+    }
+
     private unsafe bool IsReady(string name)
     {
         var addon = gameGui.GetAddonByName<AtkUnitBase>(name, 1);
@@ -315,6 +376,16 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             addon = gameGui.GetAddonByName<AtkUnitBase>(InventorySmall, 1);
         if (addon != null && addon->IsReady && addon->IsVisible)
             addon->Close(true);
+    }
+
+    private unsafe RetainerAutomationResult CloseRetainerList()
+    {
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(RetainerList, 1);
+        if (addon is null || !addon->IsReady || !addon->IsVisible)
+            return RetainerAutomationResult.Failed("RetainerListUnavailable", "Retainer list is not ready.");
+
+        addon->Close(true);
+        return RetainerAutomationResult.Succeeded("RetainerListCloseRequested", "Retainer list close requested.");
     }
 
     private string ResolveAddonText(uint rowId) => dataManager.GetExcelSheet<Addon>().GetRow(rowId).Text.ExtractText();

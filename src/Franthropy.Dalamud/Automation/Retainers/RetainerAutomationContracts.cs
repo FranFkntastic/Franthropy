@@ -10,6 +10,19 @@ public sealed record RetainerAutomationResult(bool Success, string Code, string 
     public static RetainerAutomationResult Failed(string code, string message) => new(false, code, message);
 }
 
+public sealed record RetainerAutomationOpenResult(
+    bool Success,
+    RetainerAutomationTarget? Target,
+    string Code,
+    string Message)
+{
+    public static RetainerAutomationOpenResult Succeeded(RetainerAutomationTarget target, string code, string message) =>
+        new(true, target, code, message);
+
+    public static RetainerAutomationOpenResult Failed(string code, string message) =>
+        new(false, null, code, message);
+}
+
 public sealed record RetainerRetrievalResult(bool Success, int Transferred, string Code, string Message);
 public sealed record RetainerDepositResult(bool Success, int Transferred, string Code, string Message);
 
@@ -21,6 +34,7 @@ public interface IRetainerAutomationSession
 {
     bool IsRetainerListReady { get; }
     Task<RetainerAutomationResult> EnsureRetainerListAsync(CancellationToken cancellationToken = default);
+    Task<RetainerAutomationOpenResult> OpenFirstAvailableRetainerAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> OpenRetainerAsync(RetainerAutomationTarget target, CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> WaitForCurrentRetainerMenuAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> OpenInventoryAsync(CancellationToken cancellationToken = default);
@@ -32,6 +46,7 @@ public interface IRetainerAutomationSession
     Task<RetainerCrystalTransferResult> DepositCrystalAsync(DalamudInventoryStack stack, int quantity, CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> CloseInventoryAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> CloseRetainerAsync(CancellationToken cancellationToken = default);
+    Task<RetainerAutomationResult> CloseRetainerListAsync(CancellationToken cancellationToken = default);
     void CancelActive();
 }
 

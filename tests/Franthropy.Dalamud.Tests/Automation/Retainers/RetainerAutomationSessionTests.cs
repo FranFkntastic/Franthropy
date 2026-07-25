@@ -28,6 +28,22 @@ public sealed class RetainerAutomationSessionTests
         Assert.Null(RetainerUiAutomationText.FindRetainerListIndex(rows, "Beta"));
     }
 
+    [Fact]
+    public void FirstRetainerSelection_SkipsInactiveAndEmptyRows()
+    {
+        var rows = new[]
+        {
+            new RetainerListEntry("Inactive", false),
+            new RetainerListEntry(string.Empty, true),
+            new RetainerListEntry("First active", true),
+            new RetainerListEntry("Second active", true),
+        };
+
+        Assert.Equal(2, RetainerUiAutomationText.FindFirstActiveRetainerListIndex(rows));
+        Assert.Null(RetainerUiAutomationText.FindFirstActiveRetainerListIndex(
+            [new RetainerListEntry("Inactive", false)]));
+    }
+
     [Theory]
     [InlineData(100, 10, 4, 100, 6, 3, 7, true)]
     [InlineData(100, 10, 10, 0, 0, 3, 13, true)]
