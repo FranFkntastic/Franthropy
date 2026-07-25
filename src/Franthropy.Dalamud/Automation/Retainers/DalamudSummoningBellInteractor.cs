@@ -60,7 +60,12 @@ public sealed record RemoteSummoningBellInteractionResult(
     byte InboundSceneDataCount = 0,
     uint[]? InboundSceneData = null,
     int InboundEventPlayCount = 0,
-    InboundEventPlaySample[]? InboundEventPlaySamples = null)
+    InboundEventPlaySample[]? InboundEventPlaySamples = null,
+    bool MatchingInboundEventYieldObserved = false,
+    int InboundEventYieldCount = 0,
+    InboundEventYieldSample[]? InboundEventYieldSamples = null,
+    int InboundActorControlCount = 0,
+    InboundActorControlSample[]? InboundActorControlSamples = null)
 {
     public bool Submitted => State == SummoningBellInteractionState.Submitted;
 }

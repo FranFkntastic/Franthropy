@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Application.Network;
@@ -18,12 +19,17 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
     private const int MaximumCapturedPayloadLength = 256;
     private const int MaximumCapturedSceneDataCount = 8;
     private const int MaximumCapturedEventPlaySamples = 8;
+    private const int MaximumCapturedEventYieldSamples = 8;
+    private const int MaximumCapturedActorControlSamples = 16;
 
     private readonly Hook<ZoneClient.Delegates.SendPacket> sendPacketHook;
     private readonly Hook<PacketDispatcher.Delegates.HandleEventPlayPacket> eventPlayHook;
+    private readonly Hook<PacketDispatcher.Delegates.HandleEventYieldPacket> eventYieldHook;
+    private readonly Hook<PacketDispatcher.Delegates.HandleActorControlPacket> actorControlHook;
     private readonly object observationGate = new();
     private CaptureTarget? activeTarget;
     private bool outboundObservationArmed;
+    private long outboundSentTimestamp;
     private int packetsObservedWhileArmed;
     private int sizeEligiblePacketsObserved;
     private TalkEventPacketTransportObservation observation =
@@ -41,6 +47,16 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             (nint)PacketDispatcher.MemberFunctionPointers.HandleEventPlayPacket,
             HandleEventPlayPacketDetour);
         eventPlayHook.Enable();
+
+        eventYieldHook = interopProvider.HookFromAddress<PacketDispatcher.Delegates.HandleEventYieldPacket>(
+            (nint)PacketDispatcher.MemberFunctionPointers.HandleEventYieldPacket,
+            HandleEventYieldPacketDetour);
+        eventYieldHook.Enable();
+
+        actorControlHook = interopProvider.HookFromAddress<PacketDispatcher.Delegates.HandleActorControlPacket>(
+            (nint)PacketDispatcher.MemberFunctionPointers.HandleActorControlPacket,
+            HandleActorControlPacketDetour);
+        actorControlHook.Enable();
     }
 
     public TalkEventPacketTransportObservation ArmPassThrough(ulong actorId, uint eventId)
@@ -57,6 +73,7 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             Interlocked.Exchange(ref sizeEligiblePacketsObserved, 0);
             activeTarget = new(actorId, eventId);
             outboundObservationArmed = true;
+            outboundSentTimestamp = 0;
             observation = new(
                 TalkEventPacketTransportState.AwaitingBuilderPacket,
                 0,
@@ -84,6 +101,7 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             var accepted = sendPacketHook.Original(zoneClient, packet, argument3, argument4, argument5);
             lock (observationGate)
             {
+                outboundSentTimestamp = accepted ? Stopwatch.GetTimestamp() : 0;
                 observation = observation with
                 {
                     State = accepted
@@ -173,6 +191,7 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
                         var samples = observation.InboundEventPlaySamples ?? [];
                         var updatedSamples = samples.Length < MaximumCapturedEventPlaySamples
                             ? [.. samples, new InboundEventPlaySample(
+                                GetMillisecondsAfterOutbound(),
                                 objectId.Id,
                                 eventId.Id,
                                 scene,
@@ -208,6 +227,123 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
         }
 
         eventPlayHook.Original(objectId, eventId, scene, sceneFlags, sceneData, sceneDataCount);
+    }
+
+    private void HandleEventYieldPacketDetour(
+        EventId eventId,
+        short scene,
+        byte yieldId,
+        int* intParams,
+        byte intParamCount)
+    {
+        try
+        {
+            lock (observationGate)
+            {
+                if (activeTarget is { } target &&
+                    observation.State == TalkEventPacketTransportState.StockPacketSent)
+                {
+                    var capturedCount = Math.Min((int)intParamCount, MaximumCapturedSceneDataCount);
+                    var capturedParams = new int[capturedCount];
+                    if (intParams != null)
+                    {
+                        for (var index = 0; index < capturedCount; index++)
+                            capturedParams[index] = intParams[index];
+                    }
+
+                    var samples = observation.InboundEventYieldSamples ?? [];
+                    var updatedSamples = samples.Length < MaximumCapturedEventYieldSamples
+                        ? [.. samples, new InboundEventYieldSample(
+                            GetMillisecondsAfterOutbound(),
+                            eventId.Id,
+                            scene,
+                            yieldId,
+                            intParamCount,
+                            capturedParams)]
+                        : samples;
+                    observation = observation with
+                    {
+                        InboundEventYieldCount = observation.InboundEventYieldCount + 1,
+                        InboundEventYieldSamples = updatedSamples,
+                        MatchingInboundEventYieldObserved =
+                            observation.MatchingInboundEventYieldObserved ||
+                            eventId.Id == target.EventId,
+                    };
+                }
+            }
+        }
+        catch
+        {
+            // Observation must never interfere with the client's inbound event path.
+        }
+
+        eventYieldHook.Original(eventId, scene, yieldId, intParams, intParamCount);
+    }
+
+    private void HandleActorControlPacketDetour(
+        uint entityId,
+        uint category,
+        uint arg1,
+        uint arg2,
+        uint arg3,
+        uint arg4,
+        uint arg5,
+        uint arg6,
+        uint arg7,
+        uint arg8,
+        GameObjectId targetId,
+        bool isRecorded)
+    {
+        try
+        {
+            lock (observationGate)
+            {
+                if (activeTarget is not null &&
+                    observation.State == TalkEventPacketTransportState.StockPacketSent)
+                {
+                    var samples = observation.InboundActorControlSamples ?? [];
+                    var updatedSamples = samples.Length < MaximumCapturedActorControlSamples
+                        ? [.. samples, new InboundActorControlSample(
+                            GetMillisecondsAfterOutbound(),
+                            entityId,
+                            category,
+                            arg1,
+                            arg2,
+                            arg3,
+                            arg4,
+                            arg5,
+                            arg6,
+                            arg7,
+                            arg8,
+                            targetId.Id,
+                            isRecorded)]
+                        : samples;
+                    observation = observation with
+                    {
+                        InboundActorControlCount = observation.InboundActorControlCount + 1,
+                        InboundActorControlSamples = updatedSamples,
+                    };
+                }
+            }
+        }
+        catch
+        {
+            // Observation must never interfere with the client's inbound control path.
+        }
+
+        actorControlHook.Original(
+            entityId,
+            category,
+            arg1,
+            arg2,
+            arg3,
+            arg4,
+            arg5,
+            arg6,
+            arg7,
+            arg8,
+            targetId,
+            isRecorded);
     }
 
     public TalkEventPacketTransportObservation Observe()
@@ -260,12 +396,22 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             return outboundObservationArmed;
     }
 
+    private double GetMillisecondsAfterOutbound()
+    {
+        var sentAt = outboundSentTimestamp;
+        return sentAt == 0
+            ? 0
+            : Stopwatch.GetElapsedTime(sentAt).TotalMilliseconds;
+    }
+
     public void Dispose()
     {
         if (disposed)
             return;
         disposed = true;
         CancelPending("The talk-event packet observer was disposed.");
+        actorControlHook.Dispose();
+        eventYieldHook.Dispose();
         eventPlayHook.Dispose();
         sendPacketHook.Dispose();
     }
@@ -297,16 +443,45 @@ public sealed record TalkEventPacketTransportObservation(
     byte InboundSceneDataCount = 0,
     uint[]? InboundSceneData = null,
     int InboundEventPlayCount = 0,
-    InboundEventPlaySample[]? InboundEventPlaySamples = null)
+    InboundEventPlaySample[]? InboundEventPlaySamples = null,
+    bool MatchingInboundEventYieldObserved = false,
+    int InboundEventYieldCount = 0,
+    InboundEventYieldSample[]? InboundEventYieldSamples = null,
+    int InboundActorControlCount = 0,
+    InboundActorControlSample[]? InboundActorControlSamples = null)
 {
     public bool Pending => State == TalkEventPacketTransportState.AwaitingBuilderPacket;
     public bool Sent => State == TalkEventPacketTransportState.StockPacketSent;
 }
 
 public sealed record InboundEventPlaySample(
+    double MillisecondsAfterOutbound,
     ulong ObjectId,
     uint EventId,
     short Scene,
     ulong SceneFlags,
     byte SceneDataCount,
     uint[] SceneData);
+
+public sealed record InboundEventYieldSample(
+    double MillisecondsAfterOutbound,
+    uint EventId,
+    short Scene,
+    byte YieldId,
+    byte IntParamCount,
+    int[] IntParams);
+
+public sealed record InboundActorControlSample(
+    double MillisecondsAfterOutbound,
+    uint EntityId,
+    uint Category,
+    uint Arg1,
+    uint Arg2,
+    uint Arg3,
+    uint Arg4,
+    uint Arg5,
+    uint Arg6,
+    uint Arg7,
+    uint Arg8,
+    ulong TargetId,
+    bool IsRecorded);
