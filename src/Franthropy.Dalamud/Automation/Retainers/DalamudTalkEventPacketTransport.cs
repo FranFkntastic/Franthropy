@@ -1,21 +1,28 @@
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Application.Network;
+using FFXIVClientStructs.FFXIV.Client.Game.Event;
+using FFXIVClientStructs.FFXIV.Client.Game.Object;
+using FFXIVClientStructs.FFXIV.Client.Network;
 
 namespace Franthropy.Dalamud.Automation.Retainers;
 
 /// <summary>
-/// Passively observes one stock StartTalkEvent packet for an exact live actor/event pair.
-/// The matching packet is never suppressed, replaced, retried, or otherwise altered.
+/// Passively observes one stock StartTalkEvent packet and any matching inbound
+/// EventPlay for an exact live actor/event pair. Neither packet is altered.
 /// </summary>
 public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
 {
     private const int PacketPayloadOffset = 0x20;
     private const int MinimumTalkPayloadLength = 12;
     private const int MaximumCapturedPayloadLength = 256;
+    private const int MaximumCapturedSceneDataCount = 8;
 
     private readonly Hook<ZoneClient.Delegates.SendPacket> sendPacketHook;
-    private CaptureTarget? captureTarget;
+    private readonly Hook<PacketDispatcher.Delegates.HandleEventPlayPacket> eventPlayHook;
+    private readonly object observationGate = new();
+    private CaptureTarget? activeTarget;
+    private bool outboundObservationArmed;
     private int packetsObservedWhileArmed;
     private int sizeEligiblePacketsObserved;
     private TalkEventPacketTransportObservation observation =
@@ -28,27 +35,37 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             (nint)ZoneClient.MemberFunctionPointers.SendPacket,
             SendPacketDetour);
         sendPacketHook.Enable();
+
+        eventPlayHook = interopProvider.HookFromAddress<PacketDispatcher.Delegates.HandleEventPlayPacket>(
+            (nint)PacketDispatcher.MemberFunctionPointers.HandleEventPlayPacket,
+            HandleEventPlayPacketDetour);
+        eventPlayHook.Enable();
     }
 
     public TalkEventPacketTransportObservation ArmPassThrough(ulong actorId, uint eventId)
     {
         if (disposed)
             return Failed("The talk-event packet observer has been disposed.");
-        if (captureTarget is not null)
-            return Failed("A talk-event packet observation is already armed.");
 
-        Interlocked.Exchange(ref packetsObservedWhileArmed, 0);
-        Interlocked.Exchange(ref sizeEligiblePacketsObserved, 0);
-        captureTarget = new(actorId, eventId);
-        observation = new(
-            TalkEventPacketTransportState.AwaitingBuilderPacket,
-            0,
-            false,
-            false,
-            0,
-            0,
-            "Armed a passive observer for the stock StartTalkEvent packet.");
-        return observation;
+        lock (observationGate)
+        {
+            if (activeTarget is not null)
+                return Failed("A talk-event packet observation is already armed.");
+
+            Interlocked.Exchange(ref packetsObservedWhileArmed, 0);
+            Interlocked.Exchange(ref sizeEligiblePacketsObserved, 0);
+            activeTarget = new(actorId, eventId);
+            outboundObservationArmed = true;
+            observation = new(
+                TalkEventPacketTransportState.AwaitingBuilderPacket,
+                0,
+                false,
+                false,
+                0,
+                0,
+                "Armed passive observers for the stock StartTalkEvent and matching inbound EventPlay.");
+            return observation;
+        }
     }
 
     private bool SendPacketDetour(
@@ -58,23 +75,27 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
         uint argument4,
         bool argument5)
     {
-        if (captureTarget is not null)
+        if (IsOutboundObservationArmed())
             Interlocked.Increment(ref packetsObservedWhileArmed);
 
         if (TryObserve(packet) is { } opcode)
         {
-            captureTarget = null;
             var accepted = sendPacketHook.Original(zoneClient, packet, argument3, argument4, argument5);
-            observation = new(
-                accepted ? TalkEventPacketTransportState.StockPacketSent : TalkEventPacketTransportState.Failed,
-                opcode,
-                false,
-                false,
-                Volatile.Read(ref packetsObservedWhileArmed),
-                Volatile.Read(ref sizeEligiblePacketsObserved),
-                accepted
-                    ? $"Observed and passed through one stock StartTalkEvent packet unchanged (opcode 0x{opcode:X})."
-                    : $"Observed the stock StartTalkEvent packet, but the zone send primitive returned false (opcode 0x{opcode:X}).");
+            lock (observationGate)
+            {
+                observation = observation with
+                {
+                    State = accepted
+                        ? TalkEventPacketTransportState.StockPacketSent
+                        : TalkEventPacketTransportState.Failed,
+                    Opcode = opcode,
+                    PacketsObservedWhileArmed = Volatile.Read(ref packetsObservedWhileArmed),
+                    SizeEligiblePacketsObserved = Volatile.Read(ref sizeEligiblePacketsObserved),
+                    Message = accepted
+                        ? $"Observed and passed through one stock StartTalkEvent packet unchanged (opcode 0x{opcode:X})."
+                        : $"Observed the stock StartTalkEvent packet, but the zone send primitive returned false (opcode 0x{opcode:X}).",
+                };
+            }
             return accepted;
         }
 
@@ -83,7 +104,15 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
 
     private uint? TryObserve(nint packet)
     {
-        if (captureTarget is not { } target || packet == 0)
+        CaptureTarget? target;
+        lock (observationGate)
+        {
+            if (!outboundObservationArmed || activeTarget is null)
+                return null;
+            target = activeTarget;
+        }
+
+        if (packet == 0)
             return null;
 
         var packetPointer = (byte*)packet;
@@ -96,42 +125,122 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
 
         Interlocked.Increment(ref sizeEligiblePacketsObserved);
         var payloadPointer = packetPointer + PacketPayloadOffset;
-        return *(ulong*)payloadPointer == target.ActorId &&
-               *(uint*)(payloadPointer + 8) == target.EventId
-            ? *(uint*)packetPointer
-            : null;
+        if (*(ulong*)payloadPointer != target.ActorId ||
+            *(uint*)(payloadPointer + 8) != target.EventId)
+        {
+            return null;
+        }
+
+        lock (observationGate)
+        {
+            if (!outboundObservationArmed || activeTarget != target)
+                return null;
+            outboundObservationArmed = false;
+        }
+
+        return *(uint*)packetPointer;
     }
 
-    public TalkEventPacketTransportObservation Observe() =>
-        observation with
+    private void HandleEventPlayPacketDetour(
+        GameObjectId objectId,
+        EventId eventId,
+        short scene,
+        ulong sceneFlags,
+        uint* sceneData,
+        byte sceneDataCount)
+    {
+        try
         {
-            PacketsObservedWhileArmed = Volatile.Read(ref packetsObservedWhileArmed),
-            SizeEligiblePacketsObserved = Volatile.Read(ref sizeEligiblePacketsObserved),
-        };
+            CaptureTarget? target;
+            lock (observationGate)
+                target = activeTarget;
+
+            if (target is not null &&
+                objectId.Id == target.ActorId &&
+                eventId.Id == target.EventId)
+            {
+                var capturedCount = Math.Min((int)sceneDataCount, MaximumCapturedSceneDataCount);
+                var capturedSceneData = new uint[capturedCount];
+                if (sceneData != null)
+                {
+                    for (var index = 0; index < capturedCount; index++)
+                        capturedSceneData[index] = sceneData[index];
+                }
+
+                lock (observationGate)
+                {
+                    if (activeTarget == target)
+                    {
+                        observation = observation with
+                        {
+                            InboundEventPlayObserved = true,
+                            InboundEventObjectId = objectId.Id,
+                            InboundEventId = eventId.Id,
+                            InboundScene = scene,
+                            InboundSceneFlags = sceneFlags,
+                            InboundSceneDataCount = sceneDataCount,
+                            InboundSceneData = capturedSceneData,
+                        };
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Observation must never interfere with the client's inbound event path.
+        }
+
+        eventPlayHook.Original(objectId, eventId, scene, sceneFlags, sceneData, sceneDataCount);
+    }
+
+    public TalkEventPacketTransportObservation Observe()
+    {
+        lock (observationGate)
+        {
+            return observation with
+            {
+                PacketsObservedWhileArmed = Volatile.Read(ref packetsObservedWhileArmed),
+                SizeEligiblePacketsObserved = Volatile.Read(ref sizeEligiblePacketsObserved),
+            };
+        }
+    }
 
     public void CancelPending(string reason)
     {
-        var wasPending = observation.State == TalkEventPacketTransportState.AwaitingBuilderPacket;
-        captureTarget = null;
-        if (wasPending)
+        lock (observationGate)
         {
-            observation = Failed(
-                $"{reason} Observed {Volatile.Read(ref packetsObservedWhileArmed)} outbound packet(s) while armed, " +
-                $"{Volatile.Read(ref sizeEligiblePacketsObserved)} with a compatible envelope size.");
+            var wasPending = observation.State == TalkEventPacketTransportState.AwaitingBuilderPacket;
+            activeTarget = null;
+            outboundObservationArmed = false;
+            if (wasPending)
+            {
+                observation = Failed(
+                    $"{reason} Observed {Volatile.Read(ref packetsObservedWhileArmed)} outbound packet(s) while armed, " +
+                    $"{Volatile.Read(ref sizeEligiblePacketsObserved)} with a compatible envelope size.");
+            }
         }
     }
 
     private TalkEventPacketTransportObservation Failed(string message)
     {
-        observation = new(
-            TalkEventPacketTransportState.Failed,
-            0,
-            false,
-            false,
-            Volatile.Read(ref packetsObservedWhileArmed),
-            Volatile.Read(ref sizeEligiblePacketsObserved),
-            message);
-        return observation;
+        lock (observationGate)
+        {
+            observation = new(
+                TalkEventPacketTransportState.Failed,
+                0,
+                false,
+                false,
+                Volatile.Read(ref packetsObservedWhileArmed),
+                Volatile.Read(ref sizeEligiblePacketsObserved),
+                message);
+            return observation;
+        }
+    }
+
+    private bool IsOutboundObservationArmed()
+    {
+        lock (observationGate)
+            return outboundObservationArmed;
     }
 
     public void Dispose()
@@ -140,6 +249,7 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             return;
         disposed = true;
         CancelPending("The talk-event packet observer was disposed.");
+        eventPlayHook.Dispose();
         sendPacketHook.Dispose();
     }
 
@@ -161,7 +271,14 @@ public sealed record TalkEventPacketTransportObservation(
     bool ConstructedPacket,
     int PacketsObservedWhileArmed,
     int SizeEligiblePacketsObserved,
-    string Message)
+    string Message,
+    bool InboundEventPlayObserved = false,
+    ulong InboundEventObjectId = 0,
+    uint InboundEventId = 0,
+    short InboundScene = 0,
+    ulong InboundSceneFlags = 0,
+    byte InboundSceneDataCount = 0,
+    uint[]? InboundSceneData = null)
 {
     public bool Pending => State == TalkEventPacketTransportState.AwaitingBuilderPacket;
     public bool Sent => State == TalkEventPacketTransportState.StockPacketSent;
