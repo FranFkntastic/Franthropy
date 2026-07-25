@@ -22,4 +22,15 @@ public sealed class CompanionWindowActivationStateTests
         Assert.False(state.Toggle(isOpen: true));
         Assert.False(state.ConsumeFocusRequest());
     }
+
+    [Fact]
+    public void RequestOpen_RequestsFocusEvenWhenWindowWasAlreadyOpen()
+    {
+        var state = new CompanionWindowActivationState();
+
+        state.RequestOpen();
+
+        Assert.True(state.ConsumeFocusRequest());
+        Assert.False(state.ConsumeFocusRequest());
+    }
 }
