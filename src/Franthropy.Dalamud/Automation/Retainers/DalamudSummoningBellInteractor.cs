@@ -353,7 +353,8 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             0,
             "The StartTalkEvent packet transport is unavailable.");
 
-    public unsafe NormalSummoningBellCaptureArmResult TryArmLoadedBellFlightRecorder()
+    public unsafe NormalSummoningBellCaptureArmResult TryArmLoadedBellFlightRecorder(
+        bool captureCompleteLifecycle = false)
     {
         var nearest = FindLoadedBell();
         if (nearest is null)
@@ -412,10 +413,16 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
                 nearest.InteractionDistance);
         }
 
-        var armed = talkPacketTransport.ArmFlightRecorder(nearest.Object.GameObjectId, eventId);
+        var armed = captureCompleteLifecycle
+            ? talkPacketTransport.ArmLifecycleRecorder(nearest.Object.GameObjectId, eventId)
+            : talkPacketTransport.ArmFlightRecorder(nearest.Object.GameObjectId, eventId);
         return new(
             armed.Pending,
-            armed.Pending ? "NormalBellFlightRecorderArmed" : "NormalBellFlightRecorderArmFailed",
+            armed.Pending
+                ? captureCompleteLifecycle
+                    ? "NormalBellLifecycleRecorderArmed"
+                    : "NormalBellFlightRecorderArmed"
+                : "NormalBellFlightRecorderArmFailed",
             armed.Message,
             nearest.Object.GameObjectId,
             eventId,

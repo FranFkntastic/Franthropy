@@ -19,15 +19,18 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
     private const int MinimumTalkPayloadLength = 12;
     private const int MaximumCapturedPayloadLength = 256;
     private const int MaximumCapturedSceneDataCount = 8;
-    private const int MaximumCapturedEventPlaySamples = 8;
-    private const int MaximumCapturedEventYieldSamples = 8;
-    private const int MaximumCapturedActorControlSamples = 16;
+    private const int MaximumCapturedEventPlaySamples = 64;
+    private const int MaximumCapturedEventYieldSamples = 64;
+    private const int MaximumCapturedActorControlSamples = 256;
     private const int MaximumCapturedRawInboundSamples = 32;
     private const double RawInboundCaptureWindowMilliseconds = 500;
     private const int MaximumFlightRecorderSamples = 512;
-    private const int MaximumFlightRecorderPacketBytes = 512;
+    private const int MaximumFlightRecorderPacketBytes = 2_048;
     private const int MaximumPlausiblePacketBytes = 64 * 1024;
     private const double FlightRecorderWindowMilliseconds = 30_000;
+    private const int MaximumLifecycleOutboundSamples = 512;
+    private const int MaximumLifecycleInboundSamples = 4_096;
+    private const double LifecycleRecorderWindowMilliseconds = 180_000;
 
     private readonly Hook<ZoneClient.Delegates.SendPacket> sendPacketHook;
     private readonly Hook<PacketDispatcher.Delegates.OnReceivePacket> receivePacketHook;
@@ -38,9 +41,16 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
     private CaptureTarget? activeTarget;
     private bool outboundObservationArmed;
     private bool flightRecorderArmed;
+    private bool lifecycleRecorderArmed;
     private long outboundSentTimestamp;
     private int packetsObservedWhileArmed;
     private int sizeEligiblePacketsObserved;
+    private int lifecycleOutboundObservedCount;
+    private int lifecycleInboundObservedCount;
+    private int lifecycleOutboundDroppedCount;
+    private int lifecycleInboundDroppedCount;
+    private readonly List<ZonePacketFlightRecorderSample> lifecycleOutboundSamples = [];
+    private readonly List<ZonePacketFlightRecorderSample> lifecycleInboundSamples = [];
     private TalkEventPacketTransportObservation observation =
         new(TalkEventPacketTransportState.Idle, 0, false, false, 0, 0, "The talk-event observer is idle.");
     private bool disposed;
@@ -86,15 +96,19 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
     }
 
     public TalkEventPacketTransportObservation ArmPassThrough(ulong actorId, uint eventId) =>
-        Arm(actorId, eventId, captureAllZoneTraffic: false);
+        Arm(actorId, eventId, captureAllZoneTraffic: false, captureLifecycle: false);
 
     public TalkEventPacketTransportObservation ArmFlightRecorder(ulong actorId, uint eventId) =>
-        Arm(actorId, eventId, captureAllZoneTraffic: true);
+        Arm(actorId, eventId, captureAllZoneTraffic: true, captureLifecycle: false);
+
+    public TalkEventPacketTransportObservation ArmLifecycleRecorder(ulong actorId, uint eventId) =>
+        Arm(actorId, eventId, captureAllZoneTraffic: true, captureLifecycle: true);
 
     private TalkEventPacketTransportObservation Arm(
         ulong actorId,
         uint eventId,
-        bool captureAllZoneTraffic)
+        bool captureAllZoneTraffic,
+        bool captureLifecycle)
     {
         if (disposed)
             return Failed("The talk-event packet observer has been disposed.");
@@ -106,9 +120,16 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
 
             Interlocked.Exchange(ref packetsObservedWhileArmed, 0);
             Interlocked.Exchange(ref sizeEligiblePacketsObserved, 0);
+            lifecycleOutboundObservedCount = 0;
+            lifecycleInboundObservedCount = 0;
+            lifecycleOutboundDroppedCount = 0;
+            lifecycleInboundDroppedCount = 0;
+            lifecycleOutboundSamples.Clear();
+            lifecycleInboundSamples.Clear();
             activeTarget = new(actorId, eventId);
             outboundObservationArmed = true;
             flightRecorderArmed = captureAllZoneTraffic;
+            lifecycleRecorderArmed = captureLifecycle;
             outboundSentTimestamp = 0;
             observation = new(
                 TalkEventPacketTransportState.AwaitingBuilderPacket,
@@ -117,10 +138,13 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
                 false,
                 0,
                 0,
-                captureAllZoneTraffic
+                captureLifecycle
+                    ? "Armed the passive complete bell-lifecycle recorder; waiting for the stock StartTalkEvent."
+                    : captureAllZoneTraffic
                     ? "Armed the passive normal-bell flight recorder; waiting for the stock StartTalkEvent."
                     : "Armed passive observers for the stock StartTalkEvent and matching inbound EventPlay.",
-                FlightRecorderArmed: captureAllZoneTraffic);
+                FlightRecorderArmed: captureAllZoneTraffic,
+                LifecycleRecorderArmed: captureLifecycle);
             return observation;
         }
     }
@@ -473,6 +497,10 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
             {
                 PacketsObservedWhileArmed = Volatile.Read(ref packetsObservedWhileArmed),
                 SizeEligiblePacketsObserved = Volatile.Read(ref sizeEligiblePacketsObserved),
+                LifecycleOutboundObservedCount = lifecycleOutboundObservedCount,
+                LifecycleInboundObservedCount = lifecycleInboundObservedCount,
+                LifecycleOutboundDroppedCount = lifecycleOutboundDroppedCount,
+                LifecycleInboundDroppedCount = lifecycleInboundDroppedCount,
             };
         }
     }
@@ -482,10 +510,14 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         lock (observationGate)
         {
             var wasPending = observation.State == TalkEventPacketTransportState.AwaitingBuilderPacket;
-            var wasRecording = flightRecorderArmed && observation.State == TalkEventPacketTransportState.StockPacketSent;
+            var wasRecording =
+                (flightRecorderArmed || lifecycleRecorderArmed) &&
+                observation.State == TalkEventPacketTransportState.StockPacketSent;
             activeTarget = null;
             outboundObservationArmed = false;
             flightRecorderArmed = false;
+            var lifecycleWasRecording = lifecycleRecorderArmed;
+            lifecycleRecorderArmed = false;
             if (wasPending)
             {
                 observation = Failed(
@@ -497,6 +529,13 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
                 observation = observation with
                 {
                     FlightRecorderStopped = true,
+                    LifecycleRecorderStopped = lifecycleWasRecording,
+                    LifecycleOutboundObservedCount = lifecycleOutboundObservedCount,
+                    LifecycleInboundObservedCount = lifecycleInboundObservedCount,
+                    LifecycleOutboundDroppedCount = lifecycleOutboundDroppedCount,
+                    LifecycleInboundDroppedCount = lifecycleInboundDroppedCount,
+                    LifecycleOutboundSamples = lifecycleOutboundSamples.ToArray(),
+                    LifecycleInboundSamples = lifecycleInboundSamples.ToArray(),
                     Message = reason,
                 };
             }
@@ -539,7 +578,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         uint argument4,
         bool argument5)
     {
-        if (!CanCaptureFlightRecorderPacket() || packet == 0)
+        if ((!CanCaptureFlightRecorderPacket() && !CanCaptureLifecyclePacket()) || packet == 0)
             return;
 
         try
@@ -549,7 +588,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
                 return;
 
             var declaredSize = checked((int)encodedSize + 0x10);
-            AppendFlightRecorderSample(new(
+            var sample = new ZonePacketFlightRecorderSample(
                 GetMillisecondsAfterOutbound(),
                 "outbound",
                 *(uint*)packet,
@@ -559,7 +598,10 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
                 argument4,
                 argument5,
                 declaredSize > MaximumFlightRecorderPacketBytes,
-                CaptureHex(packet, Math.Min(declaredSize, MaximumFlightRecorderPacketBytes))));
+                CaptureHex(packet, Math.Min(declaredSize, MaximumFlightRecorderPacketBytes)));
+            if (CanCaptureFlightRecorderPacket())
+                AppendFlightRecorderSample(sample);
+            AppendLifecycleRecorderSample(sample);
         }
         catch
         {
@@ -569,7 +611,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
 
     private void AppendInboundFlightRecorderSample(uint targetId, nint packet)
     {
-        if (!CanCaptureFlightRecorderPacket() || packet == 0)
+        if ((!CanCaptureFlightRecorderPacket() && !CanCaptureLifecyclePacket()) || packet == 0)
             return;
 
         try
@@ -579,7 +621,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
             if (declaredSize < sizeof(uint) || declaredSize > MaximumPlausiblePacketBytes)
                 return;
 
-            AppendFlightRecorderSample(new(
+            var sample = new ZonePacketFlightRecorderSample(
                 GetMillisecondsAfterOutbound(),
                 "inbound",
                 (ushort)(word0 >> 16),
@@ -589,7 +631,10 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
                 0,
                 false,
                 declaredSize > MaximumFlightRecorderPacketBytes,
-                CaptureHex(packet, Math.Min(declaredSize, MaximumFlightRecorderPacketBytes))));
+                CaptureHex(packet, Math.Min(declaredSize, MaximumFlightRecorderPacketBytes)));
+            if (CanCaptureFlightRecorderPacket())
+                AppendFlightRecorderSample(sample);
+            AppendLifecycleRecorderSample(sample);
         }
         catch
         {
@@ -602,6 +647,11 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         observation.State == TalkEventPacketTransportState.StockPacketSent &&
         observation.FlightRecorderSamples is not { Length: >= MaximumFlightRecorderSamples } &&
         GetMillisecondsAfterOutbound() <= FlightRecorderWindowMilliseconds;
+
+    private bool CanCaptureLifecyclePacket() =>
+        lifecycleRecorderArmed &&
+        observation.State == TalkEventPacketTransportState.StockPacketSent &&
+        GetMillisecondsAfterOutbound() <= LifecycleRecorderWindowMilliseconds;
 
     private void AppendFlightRecorderSample(ZonePacketFlightRecorderSample sample)
     {
@@ -618,6 +668,34 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
                 observation.FlightRecorderInboundPacketCount + (sample.Direction == "inbound" ? 1 : 0),
             FlightRecorderSamples = [.. samples, sample],
         };
+    }
+
+    private void AppendLifecycleRecorderSample(ZonePacketFlightRecorderSample sample)
+    {
+        if (!CanCaptureLifecyclePacket())
+            return;
+
+        if (sample.Direction == "outbound")
+        {
+            lifecycleOutboundObservedCount++;
+            if (lifecycleOutboundSamples.Count >= MaximumLifecycleOutboundSamples)
+            {
+                lifecycleOutboundDroppedCount++;
+                return;
+            }
+
+            lifecycleOutboundSamples.Add(sample);
+            return;
+        }
+
+        lifecycleInboundObservedCount++;
+        if (lifecycleInboundSamples.Count >= MaximumLifecycleInboundSamples)
+        {
+            lifecycleInboundDroppedCount++;
+            return;
+        }
+
+        lifecycleInboundSamples.Add(sample);
     }
 
     private static string CaptureHex(nint packet, int length) =>
@@ -679,7 +757,15 @@ public sealed record TalkEventPacketTransportObservation(
     int FlightRecorderPacketCount = 0,
     int FlightRecorderOutboundPacketCount = 0,
     int FlightRecorderInboundPacketCount = 0,
-    ZonePacketFlightRecorderSample[]? FlightRecorderSamples = null)
+    ZonePacketFlightRecorderSample[]? FlightRecorderSamples = null,
+    bool LifecycleRecorderArmed = false,
+    bool LifecycleRecorderStopped = false,
+    int LifecycleOutboundObservedCount = 0,
+    int LifecycleInboundObservedCount = 0,
+    int LifecycleOutboundDroppedCount = 0,
+    int LifecycleInboundDroppedCount = 0,
+    ZonePacketFlightRecorderSample[]? LifecycleOutboundSamples = null,
+    ZonePacketFlightRecorderSample[]? LifecycleInboundSamples = null)
 {
     public bool Pending => State == TalkEventPacketTransportState.AwaitingBuilderPacket;
     public bool Sent => State == TalkEventPacketTransportState.StockPacketSent;
