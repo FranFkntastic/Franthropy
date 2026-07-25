@@ -63,6 +63,33 @@ public sealed class DalamudItemAutocompletePresenterTests
         Assert.Equal(["Fire Shard"], changed.SearchResults.Select(item => item.Name));
     }
 
+    [Fact]
+    public void StateMoveSelection_WrapsAcrossSuggestionBounds()
+    {
+        var state = new DalamudItemAutocompleteState();
+
+        state.MoveSelection(-1, 3);
+
+        Assert.Equal(2, state.SelectedIndex);
+        state.MoveSelection(1, 3);
+        Assert.Equal(0, state.SelectedIndex);
+    }
+
+    [Fact]
+    public void StateTrySelect_AppliesHighlightedSuggestionAndResetsSelection()
+    {
+        var options = Options();
+        var state = new DalamudItemAutocompleteState();
+        state.MoveSelection(1, options.Count);
+
+        var selected = state.TrySelect(options);
+
+        Assert.True(selected);
+        Assert.Same(options[1], state.SelectedItem);
+        Assert.Equal(options[1].Name, state.SearchBuffer);
+        Assert.Equal(0, state.SelectedIndex);
+    }
+
     private static IReadOnlyList<DalamudItemOption> Options() =>
     [
         new(4, "Lightning Shard"),
