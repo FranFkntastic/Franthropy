@@ -5,6 +5,7 @@ using FFXIVClientStructs.FFXIV.Application.Network;
 using FFXIVClientStructs.FFXIV.Client.Game.Event;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using FFXIVClientStructs.FFXIV.Client.Network;
+using ClientFramework = FFXIVClientStructs.FFXIV.Client.System.Framework.Framework;
 
 namespace Franthropy.Dalamud.Automation.Retainers;
 
@@ -21,8 +22,11 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
     private const int MaximumCapturedEventPlaySamples = 8;
     private const int MaximumCapturedEventYieldSamples = 8;
     private const int MaximumCapturedActorControlSamples = 16;
+    private const int MaximumCapturedRawInboundSamples = 32;
+    private const double RawInboundCaptureWindowMilliseconds = 500;
 
     private readonly Hook<ZoneClient.Delegates.SendPacket> sendPacketHook;
+    private readonly Hook<PacketDispatcher.Delegates.OnReceivePacket> receivePacketHook;
     private readonly Hook<PacketDispatcher.Delegates.HandleEventPlayPacket> eventPlayHook;
     private readonly Hook<PacketDispatcher.Delegates.HandleEventYieldPacket> eventYieldHook;
     private readonly Hook<PacketDispatcher.Delegates.HandleActorControlPacket> actorControlHook;
@@ -57,6 +61,23 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             (nint)PacketDispatcher.MemberFunctionPointers.HandleActorControlPacket,
             HandleActorControlPacketDetour);
         actorControlHook.Enable();
+
+        var framework = ClientFramework.Instance();
+        var networkModuleProxy = framework == null
+            ? null
+            : framework->NetworkModuleProxy;
+        var receiverCallback = networkModuleProxy == null
+            ? null
+            : networkModuleProxy->ReceiverCallback;
+        if (receiverCallback == null)
+            throw new InvalidOperationException("The zone packet receiver callback is unavailable.");
+
+        var packetDispatcher = &receiverCallback->PacketDispatcher;
+        var onReceivePacketAddress = (*(nint**)packetDispatcher)[1];
+        receivePacketHook = interopProvider.HookFromAddress<PacketDispatcher.Delegates.OnReceivePacket>(
+            onReceivePacketAddress,
+            OnReceivePacketDetour);
+        receivePacketHook.Enable();
     }
 
     public TalkEventPacketTransportObservation ArmPassThrough(ulong actorId, uint eventId)
@@ -346,6 +367,48 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             isRecorded);
     }
 
+    private void OnReceivePacketDetour(
+        PacketDispatcher* packetDispatcher,
+        uint targetId,
+        nint packet)
+    {
+        try
+        {
+            lock (observationGate)
+            {
+                if (activeTarget is not null &&
+                    observation.State == TalkEventPacketTransportState.StockPacketSent)
+                {
+                    var millisecondsAfterOutbound = GetMillisecondsAfterOutbound();
+                    var samples = observation.InboundRawPacketSamples ?? [];
+                    var updatedSamples =
+                        millisecondsAfterOutbound <= RawInboundCaptureWindowMilliseconds &&
+                        samples.Length < MaximumCapturedRawInboundSamples &&
+                        packet != 0
+                            ? [.. samples, new InboundRawPacketSample(
+                                millisecondsAfterOutbound,
+                                targetId,
+                                *(uint*)packet,
+                                *((uint*)packet + 1),
+                                *((uint*)packet + 2),
+                                *((uint*)packet + 3))]
+                            : samples;
+                    observation = observation with
+                    {
+                        InboundRawPacketCount = observation.InboundRawPacketCount + 1,
+                        InboundRawPacketSamples = updatedSamples,
+                    };
+                }
+            }
+        }
+        catch
+        {
+            // Observation must never interfere with the client's generic receive path.
+        }
+
+        receivePacketHook.Original(packetDispatcher, targetId, packet);
+    }
+
     public TalkEventPacketTransportObservation Observe()
     {
         lock (observationGate)
@@ -410,6 +473,7 @@ public sealed unsafe class DalamudTalkEventPacketTransport : IDisposable
             return;
         disposed = true;
         CancelPending("The talk-event packet observer was disposed.");
+        receivePacketHook.Dispose();
         actorControlHook.Dispose();
         eventYieldHook.Dispose();
         eventPlayHook.Dispose();
@@ -448,7 +512,9 @@ public sealed record TalkEventPacketTransportObservation(
     int InboundEventYieldCount = 0,
     InboundEventYieldSample[]? InboundEventYieldSamples = null,
     int InboundActorControlCount = 0,
-    InboundActorControlSample[]? InboundActorControlSamples = null)
+    InboundActorControlSample[]? InboundActorControlSamples = null,
+    int InboundRawPacketCount = 0,
+    InboundRawPacketSample[]? InboundRawPacketSamples = null)
 {
     public bool Pending => State == TalkEventPacketTransportState.AwaitingBuilderPacket;
     public bool Sent => State == TalkEventPacketTransportState.StockPacketSent;
@@ -485,3 +551,11 @@ public sealed record InboundActorControlSample(
     uint Arg8,
     ulong TargetId,
     bool IsRecorded);
+
+public sealed record InboundRawPacketSample(
+    double MillisecondsAfterOutbound,
+    uint TargetId,
+    uint Word0,
+    uint Word1,
+    uint Word2,
+    uint Word3);
