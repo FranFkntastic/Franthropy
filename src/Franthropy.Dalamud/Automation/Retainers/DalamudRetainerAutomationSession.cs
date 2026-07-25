@@ -265,23 +265,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (addon is null || !addon->IsReady || !addon->IsVisible)
             return RetainerAutomationResult.Failed("RetainerListUnavailable", "Retainer list is not ready.");
 
-        const int first = 3;
-        const int stride = 10;
-        const int activeOffset = 8;
-        var entries = new List<RetainerListEntry>();
-        for (var index = 0; index < 10; index++)
-        {
-            var valueIndex = first + index * stride;
-            if (valueIndex + activeOffset >= addon->AtkValuesCount)
-                break;
-            var value = addon->AtkValues + valueIndex;
-            var rowName = value->Type is AtkValueType.String or AtkValueType.ManagedString or AtkValueType.WideString or AtkValueType.ConstString
-                ? value->GetValueAsString()
-                : string.Empty;
-            var activeValue = addon->AtkValues + valueIndex + activeOffset;
-            entries.Add(new(rowName, activeValue->Type == AtkValueType.Bool && activeValue->Byte != 0));
-        }
-
+        var entries = ReadRetainerListEntries(addon);
         var selectedIndex = RetainerUiAutomationText.FindRetainerListIndex(entries, name);
         if (selectedIndex is null)
             return RetainerAutomationResult.Failed("RetainerNotVisible", $"Retainer '{name}' was not visible as an active retainer-list row.");
@@ -357,7 +341,23 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
     private static unsafe List<RetainerListEntry> ReadRetainerListEntries(AtkUnitBase* addon)
     {
-        var entries = ReadRetainerListEntries(addon);
+        const int first = 3;
+        const int stride = 10;
+        const int activeOffset = 8;
+        var entries = new List<RetainerListEntry>();
+        for (var index = 0; index < 10; index++)
+        {
+            var valueIndex = first + index * stride;
+            if (valueIndex + activeOffset >= addon->AtkValuesCount)
+                break;
+            var value = addon->AtkValues + valueIndex;
+            var rowName = value->Type is AtkValueType.String or AtkValueType.ManagedString or AtkValueType.WideString or AtkValueType.ConstString
+                ? value->GetValueAsString()
+                : string.Empty;
+            var activeValue = addon->AtkValues + valueIndex + activeOffset;
+            entries.Add(new(rowName, activeValue->Type == AtkValueType.Bool && activeValue->Byte != 0));
+        }
+
         return entries;
     }
 

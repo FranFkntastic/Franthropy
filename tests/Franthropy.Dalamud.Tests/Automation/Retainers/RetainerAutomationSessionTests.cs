@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Reflection.Emit;
 using Dalamud.Plugin.Services;
 using Franthropy.Dalamud.Automation.Retainers;
 
@@ -42,6 +43,23 @@ public sealed class RetainerAutomationSessionTests
         Assert.Equal(2, RetainerUiAutomationText.FindFirstActiveRetainerListIndex(rows));
         Assert.Null(RetainerUiAutomationText.FindFirstActiveRetainerListIndex(
             [new RetainerListEntry("Inactive", false)]));
+    }
+
+    [Fact]
+    public void NativeRetainerRowReader_DoesNotCallItself()
+    {
+        var method = typeof(DalamudRetainerAutomationSession).GetMethod(
+            "ReadRetainerListEntries",
+            BindingFlags.NonPublic | BindingFlags.Static)!;
+        var il = method.GetMethodBody()!.GetILAsByteArray()!;
+
+        for (var index = 0; index <= il.Length - 5; index++)
+        {
+            var recursivelyCallsItself =
+                il[index] == (byte)OpCodes.Call.Value &&
+                BitConverter.ToInt32(il, index + 1) == method.MetadataToken;
+            Assert.False(recursivelyCallsItself);
+        }
     }
 
     [Theory]
