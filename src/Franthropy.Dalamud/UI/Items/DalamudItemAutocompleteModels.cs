@@ -11,6 +11,36 @@ public sealed class DalamudItemAutocompleteState
 
     public string SearchBuffer { get; set; } = string.Empty;
     public DalamudItemOption? SelectedItem { get; set; }
+    public int SelectedIndex { get; private set; }
+    public bool IsInputActive { get; internal set; }
+
+    public void ResetSelection() => SelectedIndex = 0;
+
+    public void MoveSelection(int delta, int itemCount)
+    {
+        if (itemCount <= 0)
+        {
+            SelectedIndex = 0;
+            return;
+        }
+
+        SelectedIndex = (SelectedIndex + delta) % itemCount;
+        if (SelectedIndex < 0)
+            SelectedIndex += itemCount;
+    }
+
+    public bool TrySelect(IReadOnlyList<DalamudItemOption> items)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        if (items.Count == 0)
+            return false;
+
+        SelectedIndex = Math.Clamp(SelectedIndex, 0, items.Count - 1);
+        SelectedItem = items[SelectedIndex];
+        SearchBuffer = SelectedItem.Name;
+        SelectedIndex = 0;
+        return true;
+    }
 
     public DalamudItemAutocompleteSnapshot Resolve(IReadOnlyList<DalamudItemOption> itemOptions)
     {

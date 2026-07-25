@@ -70,6 +70,21 @@ public static class DalamudItemAutocompleteRenderer
         ArgumentNullException.ThrowIfNull(state);
 
         var selectionChanged = false;
+        var previousSnapshot = state.Resolve(itemOptions);
+        var previousResults = previousSnapshot.SearchResults;
+        if (state.IsInputActive && previousResults.Count > 0)
+        {
+            if (ImGui.IsKeyPressed(ImGuiKey.DownArrow))
+                state.MoveSelection(1, previousResults.Count);
+            if (ImGui.IsKeyPressed(ImGuiKey.UpArrow))
+                state.MoveSelection(-1, previousResults.Count);
+            if ((ImGui.IsKeyPressed(ImGuiKey.Tab) || ImGui.IsKeyPressed(ImGuiKey.Enter)) &&
+                state.TrySelect(previousResults))
+            {
+                selectionChanged = true;
+            }
+        }
+
         var previous = state.SearchBuffer;
         var current = state.SearchBuffer;
         ImGui.SetNextItemWidth(-1);
@@ -77,6 +92,7 @@ public static class DalamudItemAutocompleteRenderer
             !string.Equals(previous, current, StringComparison.Ordinal))
         {
             state.SearchBuffer = current;
+            state.ResetSelection();
             if (state.SelectedItem is not null &&
                 !state.SelectedItem.Name.Equals(state.SearchBuffer.Trim(), StringComparison.OrdinalIgnoreCase))
             {
@@ -86,7 +102,9 @@ public static class DalamudItemAutocompleteRenderer
         }
 
         var inputActive = ImGui.IsItemActive();
+        state.IsInputActive = inputActive;
         var inputHovered = ImGui.IsItemHovered();
+        var suggestionAnchor = new Vector2(ImGui.GetItemRectMin().X, ImGui.GetItemRectMax().Y);
         var snapshot = state.Resolve(itemOptions);
         var resolved = snapshot.ResolvedItem;
         if (resolved is not null &&
@@ -101,19 +119,28 @@ public static class DalamudItemAutocompleteRenderer
         if (inputActive && results.Count > 0)
             ImGui.OpenPopup(popupId);
 
+        ImGui.SetNextWindowPos(suggestionAnchor, ImGuiCond.Always);
         ImGui.SetNextWindowSizeConstraints(new Vector2(260, 0), new Vector2(520, 260));
         if (ImGui.BeginPopup(
                 popupId,
                 ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoNav))
         {
-            foreach (var result in results)
+            if (!inputActive || results.Count == 0)
             {
+                ImGui.CloseCurrentPopup();
+                ImGui.EndPopup();
+                return selectionChanged;
+            }
+
+            for (var index = 0; index < results.Count; index++)
+            {
+                var result = results[index];
                 var label = DalamudItemAutocompletePresenter.FormatDisplayName(itemOptions, result);
-                if (!ImGui.Selectable($"{label}##{id}Item{result.ItemId}"))
+                if (!ImGui.Selectable($"{label}##{id}Item{result.ItemId}", state.SelectedIndex == index))
                     continue;
 
-                state.SelectedItem = result;
-                state.SearchBuffer = result.Name;
+                state.MoveSelection(index - state.SelectedIndex, results.Count);
+                state.TrySelect(results);
                 selectionChanged = true;
                 ImGui.CloseCurrentPopup();
             }
