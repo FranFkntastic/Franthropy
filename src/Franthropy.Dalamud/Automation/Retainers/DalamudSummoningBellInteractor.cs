@@ -69,7 +69,10 @@ public sealed record RemoteSummoningBellInteractionResult(
     InboundActorControlSample[]? InboundActorControlSamples = null,
     int InboundRawPacketCount = 0,
     InboundRawPacketSample[]? InboundRawPacketSamples = null,
-    PositionFrameShadowObservation? PositionFrameShadow = null)
+    PositionFrameShadowObservation? PositionFrameShadow = null,
+    int PreludeObservedCount = 0,
+    int PreludeDroppedCount = 0,
+    ZonePacketPreludeSample[]? PreludeSamples = null)
 {
     public bool Submitted => State == SummoningBellInteractionState.Submitted;
 }
