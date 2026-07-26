@@ -1,11 +1,11 @@
-using System.Diagnostics;
 using Franthropy.Dalamud.Equipment;
+using Franthropy.Dalamud.Performance;
 
 namespace Franthropy.Dalamud.Tests.Equipment;
 
 public sealed class EquipmentExactFrontierSolverTests
 {
-    private static readonly AdditiveUtilityModel UtilityModel = new();
+    private static readonly RepresentativeEquipmentUtilityModel UtilityModel = new();
 
     [Fact]
     public void Solve_PreservesNoPurchaseBaselineEvenWhenItIsDominated()
@@ -421,53 +421,16 @@ public sealed class EquipmentExactFrontierSolverTests
     }
 
     [Theory]
-    [InlineData("level-50-local", 4, 1, 750)]
-    [InlineData("level-100-data-center", 8, 2, 1500)]
-    [InlineData("level-100-region", 12, 3, 3000)]
-    public void Solve_RepresentativeScopeStaysWithinInteractiveBudget(
-        string scenario,
+    [InlineData(4, 1)]
+    [InlineData(8, 2)]
+    [InlineData(12, 3)]
+    public void Solve_RepresentativeScopePreservesBoundedFrontierInvariants(
         int candidatesPerPosition,
-        int worldCount,
-        int budgetMilliseconds)
+        int worldCount)
     {
-        var positions = new[]
-        {
-            EquipmentLoadoutPosition.MainHand, EquipmentLoadoutPosition.OffHand,
-            EquipmentLoadoutPosition.Head, EquipmentLoadoutPosition.Body, EquipmentLoadoutPosition.Hands,
-            EquipmentLoadoutPosition.Legs, EquipmentLoadoutPosition.Feet, EquipmentLoadoutPosition.Ears,
-            EquipmentLoadoutPosition.Neck, EquipmentLoadoutPosition.Wrists,
-            EquipmentLoadoutPosition.LeftRing, EquipmentLoadoutPosition.RightRing,
-        };
-        var offers = new List<EquipmentExactSolverOffer>();
-        var baseline = new Dictionary<EquipmentLoadoutPosition, EquipmentOfferAllocationKey?>();
-        uint itemId = 10_000;
-        foreach (var position in positions)
-        {
-            var slot = position is EquipmentLoadoutPosition.LeftRing or EquipmentLoadoutPosition.RightRing
-                ? EquipmentSlot.Ring
-                : Slot(position);
-            var baselineOffer = Offer(position, itemId++, 10, 0, source: EquipmentAcquisitionSourceKind.Owned, definitionSlot: slot);
-            offers.Add(baselineOffer);
-            baseline[position] = baselineOffer.AllocationKey;
-            for (var option = 1; option < candidatesPerPosition; option++)
-            {
-                offers.Add(Offer(
-                    position,
-                    itemId++,
-                    10 + option * 5,
-                    (ulong)(option * 1_000),
-                    definitionSlot: slot,
-                    world: $"world-{option % worldCount}"));
-            }
-        }
-        var stopwatch = Stopwatch.StartNew();
+        var request = EquipmentExactFrontierRepresentativeWorkload.Create(candidatesPerPosition, worldCount);
+        var result = new EquipmentExactFrontierSolver().Solve(request);
 
-        var result = Solve(offers, positions, baseline, maxRetainedRepresentatives: 4);
-
-        stopwatch.Stop();
-        Assert.True(
-            stopwatch.Elapsed < TimeSpan.FromMilliseconds(budgetMilliseconds),
-            $"{scenario} took {stopwatch.Elapsed}; peak={result.Diagnostics.PeakRetainedStateCount}, representatives={result.Diagnostics.CompleteSolutionCount}, retainedPaths={result.Diagnostics.RetainedCompletePathCount}, dominated={result.Diagnostics.DominatedStateCount}, compacted={result.Diagnostics.CompactedEquivalentStateCount}.");
         Assert.True(result.Diagnostics.PeakRetainedStateCount < 50_000);
         Assert.True(result.Diagnostics.DominatedStateCount > 0);
         Assert.True(result.Diagnostics.RetainedCompletePathCount >= result.Diagnostics.CompleteSolutionCount);
@@ -635,42 +598,6 @@ public sealed class EquipmentExactFrontierSolverTests
             .Distinct()
             .Order()
             .ToArray();
-    }
-
-    private sealed class AdditiveUtilityModel : IEquipmentExactSolverUtilityModel
-    {
-        private static readonly EquipmentUtilityProfileKey Profile = new("synthetic-additive", "1");
-        private static readonly EquipmentUtilityContext Context = new("solver-test", 19, 50, "Synthetic solver validation", []);
-
-        public EquipmentPartialUtilityDominance ComparePartial(
-            EquipmentSolverUtilityVector candidate,
-            EquipmentSolverUtilityVector other)
-        {
-            var candidateScore = candidate.Components.Sum(component => component.Units);
-            var otherScore = other.Components.Sum(component => component.Units);
-            return new(candidateScore >= otherScore, candidateScore > otherScore);
-        }
-
-        public EquipmentUtilityEvaluation Evaluate(EquipmentSolverUtilityVector completed)
-        {
-            var score = completed.Components.Sum(component => component.Units);
-            return new(
-                Profile,
-                Context,
-                score,
-                new(score, score, []),
-                UpgradeAssessment.ClearImprovement,
-                [],
-                completed.Components.Select(component => new EquipmentStatContribution(
-                    EquipmentStatSemantic.Unknown,
-                    checked((int)component.Units),
-                    1,
-                    component.Units,
-                    component.Key)).ToArray(),
-                [],
-                EquipmentEvaluationConfidence.High,
-                []);
-        }
     }
 
     private sealed class HalvedUtilityModel : IEquipmentExactSolverUtilityModel
