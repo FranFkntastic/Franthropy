@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Numerics;
 using System.Security.Cryptography;
+using FFXIVClientStructs.FFXIV.Application.Network;
 
 namespace Franthropy.Dalamud.Automation.Retainers;
 
@@ -16,6 +17,12 @@ public enum PositionFrameShadowState
     Cancelled,
 }
 
+public enum PositionFrameShadowMode
+{
+    PassThrough,
+    SubstituteOnce,
+}
+
 public sealed record PositionFrameShadowObservation(
     PositionFrameShadowState State,
     uint ExpectedOpcode,
@@ -28,7 +35,10 @@ public sealed record PositionFrameShadowObservation(
     bool OriginalSendAccepted,
     bool OriginalBufferUnchanged,
     string Message,
-    PositionFrameShadowAnalysis? Analysis = null)
+    PositionFrameShadowAnalysis? Analysis = null,
+    PositionFrameShadowMode Mode = PositionFrameShadowMode.PassThrough,
+    bool ReplacementTransmitted = false,
+    string? TransmittedSha256 = null)
 {
     public bool Armed =>
         State is PositionFrameShadowState.AwaitingStartTalk or
@@ -188,6 +198,27 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
         Vector3 expectedPosition,
         Vector3 hypotheticalPosition,
         uint expectedOpcode = 0x2C6)
+        => ArmPositionFrame(
+            expectedPosition,
+            hypotheticalPosition,
+            PositionFrameShadowMode.PassThrough,
+            expectedOpcode);
+
+    public PositionFrameShadowObservation ArmPositionFrameSubstitution(
+        Vector3 expectedPosition,
+        Vector3 hypotheticalPosition,
+        uint expectedOpcode = 0x2C6)
+        => ArmPositionFrame(
+            expectedPosition,
+            hypotheticalPosition,
+            PositionFrameShadowMode.SubstituteOnce,
+            expectedOpcode);
+
+    private PositionFrameShadowObservation ArmPositionFrame(
+        Vector3 expectedPosition,
+        Vector3 hypotheticalPosition,
+        PositionFrameShadowMode mode,
+        uint expectedOpcode)
     {
         lock (observationGate)
         {
@@ -213,8 +244,16 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
                 0,
                 false,
                 false,
-                "Waiting for the exact stock StartTalkEvent; all outbound packets remain pass-through.");
-            positionFrameShadowSession = new(target, expectedPosition, hypotheticalPosition, expectedOpcode);
+                mode == PositionFrameShadowMode.SubstituteOnce
+                    ? "Waiting for the exact stock StartTalkEvent; the first exact compact position frame will be substituted once."
+                    : "Waiting for the exact stock StartTalkEvent; all outbound packets remain pass-through.",
+                Mode: mode);
+            positionFrameShadowSession = new(
+                target,
+                expectedPosition,
+                hypotheticalPosition,
+                expectedOpcode,
+                mode);
             observation = observation with { PositionFrameShadow = armed };
             return armed;
         }
@@ -252,7 +291,11 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
                 var packetPointer = (byte*)packet;
                 var encodedSize = *(ulong*)(packetPointer + 8);
                 if (encodedSize > MaximumPlausiblePacketBytes - 0x10)
+                {
+                    if (active.StartTalkObservedTimestamp != 0)
+                        AbortPositionFrameShadow(active, "The first post-StartTalk packet had an implausible encoded size; substitution was cancelled.");
                     return null;
+                }
                 var declaredSize = checked((int)encodedSize + 0x10);
 
                 if (active.StartTalkObservedTimestamp == 0)
@@ -268,6 +311,14 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
                         *(uint*)(payload + 8) != active.Target.EventId)
                     {
                         IncrementPositionFrameShadowNonMatch(active);
+                        return null;
+                    }
+                    var opcode = *(uint*)packetPointer;
+                    if (opcode != active.ExpectedStartTalkOpcode)
+                    {
+                        AbortPositionFrameShadow(
+                            active,
+                            $"The exact bell actor/event appeared on opcode 0x{opcode:X}, not expected StartTalkEvent 0x{active.ExpectedStartTalkOpcode:X}; substitution was cancelled.");
                         return null;
                     }
 
@@ -287,28 +338,26 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
                     Stopwatch.GetElapsedTime(active.StartTalkObservedTimestamp).TotalMilliseconds;
                 if (millisecondsAfterStartTalk > PositionFrameShadowWindowMilliseconds)
                 {
-                    observation = observation with
-                    {
-                        PositionFrameShadow = observation.PositionFrameShadow! with
-                        {
-                            State = PositionFrameShadowState.TimedOut,
-                            MillisecondsAfterStartTalk = millisecondsAfterStartTalk,
-                            Message = "No matching compact position frame appeared inside the 25-ms shadow window; no packet was altered.",
-                        },
-                    };
-                    positionFrameShadowSession = null;
+                    AbortPositionFrameShadow(
+                        active,
+                        "The first post-StartTalk packet arrived outside the 25-ms window; substitution was cancelled.",
+                        PositionFrameShadowState.TimedOut,
+                        millisecondsAfterStartTalk);
                     return null;
                 }
 
-                if (declaredSize < PositionFrameShadowAnalyzer.CompactPacketSize)
+                if (declaredSize != PositionFrameShadowAnalyzer.CompactPacketSize)
                 {
-                    IncrementPositionFrameShadowNonMatch(active);
+                    AbortPositionFrameShadow(
+                        active,
+                        $"The first post-StartTalk packet had size 0x{declaredSize:X}, not exact compact size 0x{PositionFrameShadowAnalyzer.CompactPacketSize:X}; substitution was cancelled.",
+                        millisecondsAfterStartTalk: millisecondsAfterStartTalk);
                     return null;
                 }
 
                 var packetBytes = new ReadOnlySpan<byte>(
                     packetPointer,
-                    Math.Min(declaredSize, PositionFrameShadowAnalyzer.CompactPacketSize));
+                    PositionFrameShadowAnalyzer.CompactPacketSize);
                 var analysis = PositionFrameShadowAnalyzer.Analyze(
                     packetBytes,
                     active.ExpectedOpcode,
@@ -316,10 +365,26 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
                     active.HypotheticalPosition);
                 if (!analysis.Matched)
                 {
-                    IncrementPositionFrameShadowNonMatch(active);
+                    AbortPositionFrameShadow(
+                        active,
+                        $"{analysis.Message} This was the first post-StartTalk packet, so substitution was cancelled.",
+                        millisecondsAfterStartTalk: millisecondsAfterStartTalk,
+                        analysis: analysis);
+                    return null;
+                }
+                if (!active.OneShot.TryConsume())
+                {
+                    AbortPositionFrameShadow(
+                        active,
+                        "The position-frame one-shot had already been consumed; the packet remained pass-through.",
+                        millisecondsAfterStartTalk: millisecondsAfterStartTalk,
+                        analysis: analysis);
                     return null;
                 }
 
+                var replacementPacket = active.Mode == PositionFrameShadowMode.SubstituteOnce
+                    ? Convert.FromHexString(analysis.HypotheticalPacketHex)
+                    : null;
                 observation = observation with
                 {
                     PositionFrameShadow = observation.PositionFrameShadow! with
@@ -327,16 +392,65 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
                         State = PositionFrameShadowState.CapturedPendingSend,
                         MillisecondsAfterStartTalk = millisecondsAfterStartTalk,
                         Analysis = analysis,
-                        Message = "Captured an owned hypothetical clone; the original packet is still awaiting its unchanged stock send.",
+                        Message = replacementPacket is null
+                            ? "Captured an owned hypothetical clone; the original packet is still awaiting its unchanged stock send."
+                            : "Matched and consumed the exact one-shot; the owned hypothetical clone is awaiting one stock send.",
                     },
                 };
-                return new(active, analysis.OriginalSha256);
+                return new(active, analysis.OriginalSha256, replacementPacket);
             }
-            catch
+            catch (Exception exception)
             {
-                IncrementPositionFrameShadowNonMatch(active);
+                AbortPositionFrameShadow(
+                    active,
+                    $"Position-frame inspection failed ({exception.GetType().Name}); substitution was cancelled.");
                 return null;
             }
+        }
+    }
+
+    private bool SendPositionFramePacket(
+        ZoneClient* zoneClient,
+        PositionFrameShadowPendingCapture? pending,
+        nint originalPacket,
+        uint argument3,
+        uint argument4,
+        bool argument5)
+    {
+        if (pending?.ReplacementPacket is not { } replacement)
+            return sendPacketHook.Original(zoneClient, originalPacket, argument3, argument4, argument5);
+
+        fixed (byte* replacementPointer = replacement)
+        {
+            return sendPacketHook.Original(
+                zoneClient,
+                (nint)replacementPointer,
+                argument3,
+                argument4,
+                argument5);
+        }
+    }
+
+    private void AppendPositionFrameOutboundFlightRecorderSample(
+        PositionFrameShadowPendingCapture? pending,
+        nint originalPacket,
+        uint argument3,
+        uint argument4,
+        bool argument5)
+    {
+        if (pending?.ReplacementPacket is not { } replacement)
+        {
+            AppendOutboundFlightRecorderSample(originalPacket, argument3, argument4, argument5);
+            return;
+        }
+
+        fixed (byte* replacementPointer = replacement)
+        {
+            AppendOutboundFlightRecorderSample(
+                (nint)replacementPointer,
+                argument3,
+                argument4,
+                argument5);
         }
     }
 
@@ -378,8 +492,13 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
                     State = PositionFrameShadowState.Captured,
                     OriginalSendAccepted = accepted,
                     OriginalBufferUnchanged = originalUnchanged,
-                    Message =
-                        "Shadow proof complete: the hypothetical clone is owned locally, and the stock send received the original buffer unchanged.",
+                    ReplacementTransmitted = pending.ReplacementPacket is not null,
+                    TransmittedSha256 = pending.ReplacementPacket is null
+                        ? pending.OriginalSha256
+                        : current.Analysis?.HypotheticalSha256,
+                    Message = pending.ReplacementPacket is null
+                        ? "Shadow proof complete: the hypothetical clone is owned locally, and the stock send received the original buffer unchanged."
+                        : "One exact hypothetical position frame was passed to the stock send; the truthful source buffer remained unchanged.",
                 },
             };
             positionFrameShadowSession = null;
@@ -420,6 +539,34 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
         }
     }
 
+    private void AbortPositionFrameShadow(
+        PositionFrameShadowSession active,
+        string reason,
+        PositionFrameShadowState state = PositionFrameShadowState.Cancelled,
+        double millisecondsAfterStartTalk = 0,
+        PositionFrameShadowAnalysis? analysis = null)
+    {
+        if (positionFrameShadowSession != active)
+            return;
+
+        positionFrameShadowSession = null;
+        if (observation.PositionFrameShadow is not { } current)
+            return;
+
+        active.NonMatchingOutboundPacketCount++;
+        observation = observation with
+        {
+            PositionFrameShadow = current with
+            {
+                State = state,
+                NonMatchingOutboundPacketCount = active.NonMatchingOutboundPacketCount,
+                MillisecondsAfterStartTalk = millisecondsAfterStartTalk,
+                Analysis = analysis,
+                Message = reason,
+            },
+        };
+    }
+
     private PositionFrameShadowObservation PositionFrameShadowFailed(string message) =>
         new(
             PositionFrameShadowState.Cancelled,
@@ -438,17 +585,29 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
         CaptureTarget target,
         Vector3 expectedPosition,
         Vector3 hypotheticalPosition,
-        uint expectedOpcode)
+        uint expectedOpcode,
+        PositionFrameShadowMode mode)
     {
         public CaptureTarget Target { get; } = target;
         public Vector3 ExpectedPosition { get; } = expectedPosition;
         public Vector3 HypotheticalPosition { get; } = hypotheticalPosition;
         public uint ExpectedOpcode { get; } = expectedOpcode;
+        public uint ExpectedStartTalkOpcode { get; } = 0x259;
+        public PositionFrameShadowMode Mode { get; } = mode;
+        public PositionFrameOneShotLatch OneShot { get; } = new();
         public long StartTalkObservedTimestamp { get; set; }
         public int NonMatchingOutboundPacketCount { get; set; }
     }
 
     private sealed record PositionFrameShadowPendingCapture(
         PositionFrameShadowSession Session,
-        string OriginalSha256);
+        string OriginalSha256,
+        byte[]? ReplacementPacket);
+}
+
+internal sealed class PositionFrameOneShotLatch
+{
+    private int consumed;
+
+    public bool TryConsume() => Interlocked.Exchange(ref consumed, 1) == 0;
 }

@@ -98,6 +98,34 @@ public sealed class PositionFrameShadowAnalyzerTests
         Assert.Contains("does not match", result.Message);
     }
 
+    [Fact]
+    public void Analyze_RejectsWrongCompactSize()
+    {
+        var packet = CreateCompactFrame(0x2C6, new Vector3(1, 2, 3));
+        BinaryPrimitives.WriteUInt64LittleEndian(
+            packet.AsSpan(PositionFrameShadowAnalyzer.EncodedSizeOffset),
+            PositionFrameShadowAnalyzer.CompactPacketSize - 0x10 + 4);
+
+        var result = PositionFrameShadowAnalyzer.Analyze(
+            packet,
+            0x2C6,
+            new Vector3(1, 2, 3),
+            new Vector3(4, 5, 6));
+
+        Assert.False(result.Matched);
+        Assert.Contains("declared size", result.Message);
+    }
+
+    [Fact]
+    public void OneShotLatch_CanBeConsumedExactlyOnce()
+    {
+        var latch = new PositionFrameOneShotLatch();
+
+        Assert.True(latch.TryConsume());
+        Assert.False(latch.TryConsume());
+        Assert.False(latch.TryConsume());
+    }
+
     private static byte[] CreateCompactFrame(uint opcode, Vector3 position)
     {
         var packet = new byte[PositionFrameShadowAnalyzer.CompactPacketSize];

@@ -234,9 +234,19 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         }
 
         lock (observationGate)
-            AppendOutboundFlightRecorderSample(packet, argument3, argument4, argument5);
-        var originalSendAccepted =
-            sendPacketHook.Original(zoneClient, packet, argument3, argument4, argument5);
+            AppendPositionFrameOutboundFlightRecorderSample(
+                positionFrameShadowCapture,
+                packet,
+                argument3,
+                argument4,
+                argument5);
+        var originalSendAccepted = SendPositionFramePacket(
+            zoneClient,
+            positionFrameShadowCapture,
+            packet,
+            argument3,
+            argument4,
+            argument5);
         CompletePositionFrameShadowAfterSend(
             positionFrameShadowCapture,
             packet,

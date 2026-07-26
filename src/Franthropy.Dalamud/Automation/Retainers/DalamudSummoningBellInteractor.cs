@@ -68,7 +68,8 @@ public sealed record RemoteSummoningBellInteractionResult(
     int InboundActorControlCount = 0,
     InboundActorControlSample[]? InboundActorControlSamples = null,
     int InboundRawPacketCount = 0,
-    InboundRawPacketSample[]? InboundRawPacketSamples = null)
+    InboundRawPacketSample[]? InboundRawPacketSamples = null,
+    PositionFrameShadowObservation? PositionFrameShadow = null)
 {
     public bool Submitted => State == SummoningBellInteractionState.Submitted;
 }
@@ -218,7 +219,17 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
     /// positions to the player, invokes the stock interaction path, and passively
     /// observes the resulting StartTalkEvent.
     /// </summary>
-    public unsafe RemoteSummoningBellInteractionResult TryOpenLoadedWithScopedHitboxRadius()
+    public RemoteSummoningBellInteractionResult TryOpenLoadedWithScopedHitboxRadius() =>
+        TryOpenLoadedWithScopedHitboxRadius(null);
+
+    public RemoteSummoningBellInteractionResult TryOpenLoadedWithPositionFrameSubstitution(
+        Vector3 expectedTruthfulPosition,
+        Vector3 bellAdjacentPosition) =>
+        TryOpenLoadedWithScopedHitboxRadius(
+            new(expectedTruthfulPosition, bellAdjacentPosition));
+
+    private unsafe RemoteSummoningBellInteractionResult TryOpenLoadedWithScopedHitboxRadius(
+        PositionFrameSubstitutionRequest? substitution)
     {
         var nearest = FindLoadedBell();
         if (nearest is null)
@@ -235,6 +246,33 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
                 nearest.Object.GameObjectId,
                 nearest.Distance,
                 nearest.InteractionDistance);
+        }
+
+        if (substitution is not null)
+        {
+            var livePlayerPosition = objectTable.LocalPlayer!.Position;
+            if (Vector3.Distance(livePlayerPosition, substitution.ExpectedTruthfulPosition) >
+                PositionFrameShadowAnalyzer.PositionTolerance)
+            {
+                return new(
+                    SummoningBellInteractionState.Unavailable,
+                    "PositionFrameTruthfulPositionChanged",
+                    "The live player position no longer matches the prepared truthful position.",
+                    nearest.Object.GameObjectId,
+                    nearest.Distance,
+                    nearest.InteractionDistance);
+            }
+            if (Vector3.Distance(nearest.Object.Position, substitution.BellAdjacentPosition) >=
+                nearest.InteractionDistance)
+            {
+                return new(
+                    SummoningBellInteractionState.Unavailable,
+                    "PositionFrameHypotheticalPositionOutOfRange",
+                    "The prepared hypothetical position is not inside the bell's ordinary interaction radius.",
+                    nearest.Object.GameObjectId,
+                    nearest.Distance,
+                    nearest.InteractionDistance);
+            }
         }
 
         if (talkPacketTransport is null)
@@ -274,6 +312,30 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
                 "Scoped bell HitboxRadius, Position, and DefaultPosition plus stock TargetSystem.InteractWithObject",
                 BellEventId: eventId,
                 BellEventIdSource: eventIdSource);
+        }
+
+        PositionFrameShadowObservation? positionFrameShadow = null;
+        if (substitution is not null)
+        {
+            positionFrameShadow = talkPacketTransport.ArmPositionFrameSubstitution(
+                substitution.ExpectedTruthfulPosition,
+                substitution.BellAdjacentPosition);
+            if (!positionFrameShadow.Armed)
+            {
+                talkPacketTransport.CancelPending(
+                    "The position-frame one-shot could not be armed.");
+                return new(
+                    SummoningBellInteractionState.Unavailable,
+                    "PositionFrameSubstitutionArmFailed",
+                    positionFrameShadow.Message,
+                    nearest.Object.GameObjectId,
+                    nearest.Distance,
+                    nearest.InteractionDistance,
+                    "Scoped bell geometry plus exact one-shot position-frame substitution",
+                    BellEventId: eventId,
+                    BellEventIdSource: eventIdSource,
+                    PositionFrameShadow: positionFrameShadow);
+            }
         }
 
         var targetSystem = TargetSystem.Instance();
@@ -346,12 +408,18 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
 
         return new(
             SummoningBellInteractionState.Submitted,
-            "StockBellInteractionSubmitted",
-            $"Invoked the stock bell interaction with scoped radius {originalHitboxRadius:F1}->{temporaryHitboxRadius:F1} and live/default positions shadowed to the player; holding all shadows through the bounded response observation.",
+            substitution is null
+                ? "StockBellInteractionSubmitted"
+                : "StockBellPositionFrameSubstitutionSubmitted",
+            substitution is null
+                ? $"Invoked the stock bell interaction with scoped radius {originalHitboxRadius:F1}->{temporaryHitboxRadius:F1} and live/default positions shadowed to the player; holding all shadows through the bounded response observation."
+                : $"Invoked one stock bell interaction with scoped client geometry and armed one exact fail-closed compact position-frame substitution; holding the geometry shadows through the bounded response observation.",
             nearest.Object.GameObjectId,
             nearest.Distance,
             nearest.InteractionDistance,
-            "Scoped bell HitboxRadius, Position, and DefaultPosition plus stock TargetSystem.InteractWithObject",
+            substitution is null
+                ? "Scoped bell HitboxRadius, Position, and DefaultPosition plus stock TargetSystem.InteractWithObject"
+                : "Scoped bell geometry plus exact one-shot position-frame substitution",
             BellEventId: eventId,
             BellEventIdSource: eventIdSource,
             OriginalHitboxRadius: originalHitboxRadius,
@@ -364,7 +432,8 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             TemporaryBellZ: temporaryBellPosition.Z,
             OriginalDefaultBellX: originalDefaultBellPosition.X,
             OriginalDefaultBellY: originalDefaultBellPosition.Y,
-            OriginalDefaultBellZ: originalDefaultBellPosition.Z);
+            OriginalDefaultBellZ: originalDefaultBellPosition.Z,
+            PositionFrameShadow: positionFrameShadow);
     }
 
     public TalkEventPacketTransportObservation ObserveTalkPacketTransport() =>
@@ -398,6 +467,28 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             false,
             false,
             "The position-frame shadow transport is unavailable.");
+
+    public PositionFrameShadowObservation ArmPositionFrameSubstitution(
+        Vector3 expectedPosition,
+        Vector3 hypotheticalPosition,
+        uint expectedOpcode = 0x2C6) =>
+        talkPacketTransport?.ArmPositionFrameSubstitution(
+            expectedPosition,
+            hypotheticalPosition,
+            expectedOpcode) ??
+        new(
+            PositionFrameShadowState.Cancelled,
+            expectedOpcode,
+            0,
+            0,
+            PositionFrameShadowVector.From(expectedPosition),
+            PositionFrameShadowVector.From(hypotheticalPosition),
+            0,
+            0,
+            false,
+            false,
+            "The position-frame substitution transport is unavailable.",
+            Mode: PositionFrameShadowMode.SubstituteOnce);
 
     public PositionFrameShadowObservation ObservePositionFrameShadow() =>
         talkPacketTransport?.ObservePositionFrameShadow() ??
@@ -1006,6 +1097,10 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
     }
 
     private sealed record LoadedBell(IGameObject Object, float Distance, float InteractionDistance);
+
+    private sealed record PositionFrameSubstitutionRequest(
+        Vector3 ExpectedTruthfulPosition,
+        Vector3 BellAdjacentPosition);
 
     private sealed record RemoteGeometrySnapshot(
         ulong GameObjectId,
