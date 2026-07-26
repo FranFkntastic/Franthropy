@@ -24,6 +24,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
     private const int MaximumCapturedEventYieldSamples = 64;
     private const int MaximumCapturedActorControlSamples = 256;
     private const int MaximumCapturedRawInboundSamples = 32;
+    private const int MaximumCapturedEventTerminationSamples = 16;
     private const double RawInboundCaptureWindowMilliseconds = 500;
     private const int MaximumFlightRecorderSamples = 512;
     private const int MaximumFlightRecorderPacketBytes = 2_048;
@@ -34,12 +35,14 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
     private const double LifecycleRecorderWindowMilliseconds = 180_000;
     private const int MaximumPreludeSamples = 512;
     private const double PreludeRecorderWindowMilliseconds = 5_000;
+    private const nint EventTerminationReceiveRva = 0xB2DF50;
 
     private readonly Hook<ZoneClient.Delegates.SendPacket> sendPacketHook;
     private readonly Hook<PacketDispatcher.Delegates.OnReceivePacket> receivePacketHook;
     private readonly Hook<PacketDispatcher.Delegates.HandleEventPlayPacket> eventPlayHook;
     private readonly Hook<PacketDispatcher.Delegates.HandleEventYieldPacket> eventYieldHook;
     private readonly Hook<PacketDispatcher.Delegates.HandleActorControlPacket> actorControlHook;
+    private readonly Hook<EventTerminationReceiveDelegate> eventTerminationHook;
     private readonly object observationGate = new();
     private CaptureTarget? activeTarget;
     private bool outboundObservationArmed;
@@ -99,6 +102,13 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
             (nint)PacketDispatcher.MemberFunctionPointers.HandleActorControlPacket,
             HandleActorControlPacketDetour);
         actorControlHook.Enable();
+
+        var moduleBase = Process.GetCurrentProcess().MainModule?.BaseAddress ??
+            throw new InvalidOperationException("The game executable module is unavailable.");
+        eventTerminationHook = interopProvider.HookFromAddress<EventTerminationReceiveDelegate>(
+            moduleBase + EventTerminationReceiveRva,
+            HandleEventTerminationReceiveDetour);
+        eventTerminationHook.Enable();
 
         var framework = ClientFramework.Instance();
         var networkModuleProxy = framework == null
@@ -575,6 +585,47 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         receivePacketHook.Original(packetDispatcher, targetId, packet);
     }
 
+    private void HandleEventTerminationReceiveDetour(
+        uint eventId,
+        ulong actorId,
+        byte eventType,
+        uint detail,
+        uint extra)
+    {
+        try
+        {
+            lock (observationGate)
+            {
+                if (activeTarget is not null &&
+                    observation.State == TalkEventPacketTransportState.StockPacketSent)
+                {
+                    var samples = observation.InboundEventTerminationSamples ?? [];
+                    observation = observation with
+                    {
+                        InboundEventTerminationCount =
+                            observation.InboundEventTerminationCount + 1,
+                        InboundEventTerminationSamples =
+                            samples.Length < MaximumCapturedEventTerminationSamples
+                                ? [.. samples, new InboundEventTerminationSample(
+                                    GetMillisecondsAfterOutbound(),
+                                    eventId,
+                                    actorId,
+                                    eventType,
+                                    detail,
+                                    extra)]
+                                : samples,
+                    };
+                }
+            }
+        }
+        catch
+        {
+            // Observation must never interfere with event termination.
+        }
+
+        eventTerminationHook.Original(eventId, actorId, eventType, detail, extra);
+    }
+
     public TalkEventPacketTransportObservation Observe()
     {
         lock (observationGate)
@@ -905,6 +956,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         }
         StopWarmSessionRetention("The warm-session packet observer was disposed.");
         receivePacketHook.Dispose();
+        eventTerminationHook.Dispose();
         actorControlHook.Dispose();
         eventYieldHook.Dispose();
         eventPlayHook.Dispose();
@@ -946,6 +998,8 @@ public sealed record TalkEventPacketTransportObservation(
     InboundActorControlSample[]? InboundActorControlSamples = null,
     int InboundRawPacketCount = 0,
     InboundRawPacketSample[]? InboundRawPacketSamples = null,
+    int InboundEventTerminationCount = 0,
+    InboundEventTerminationSample[]? InboundEventTerminationSamples = null,
     bool FlightRecorderArmed = false,
     bool FlightRecorderStopped = false,
     int FlightRecorderPacketCount = 0,
@@ -1011,6 +1065,22 @@ public sealed record InboundRawPacketSample(
     uint Word4,
     ushort PacketSize,
     ushort Opcode);
+
+public sealed record InboundEventTerminationSample(
+    double MillisecondsAfterOutbound,
+    uint EventId,
+    ulong ActorId,
+    byte EventType,
+    uint Detail,
+    uint Extra);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void EventTerminationReceiveDelegate(
+    uint eventId,
+    ulong actorId,
+    byte eventType,
+    uint detail,
+    uint extra);
 
 public sealed record ZonePacketFlightRecorderSample(
     double MillisecondsAfterOutbound,

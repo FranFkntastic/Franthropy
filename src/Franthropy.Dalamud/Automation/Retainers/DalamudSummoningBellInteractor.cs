@@ -69,6 +69,8 @@ public sealed record RemoteSummoningBellInteractionResult(
     InboundActorControlSample[]? InboundActorControlSamples = null,
     int InboundRawPacketCount = 0,
     InboundRawPacketSample[]? InboundRawPacketSamples = null,
+    int InboundEventTerminationCount = 0,
+    InboundEventTerminationSample[]? InboundEventTerminationSamples = null,
     PositionFrameShadowObservation? PositionFrameShadow = null,
     int PreludeObservedCount = 0,
     int PreludeDroppedCount = 0,
