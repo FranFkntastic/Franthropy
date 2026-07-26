@@ -10,6 +10,16 @@ public sealed record RetainerAutomationResult(bool Success, string Code, string 
     public static RetainerAutomationResult Failed(string code, string message) => new(false, code, message);
 }
 
+public sealed record RetainerLocalUiObservation(
+    bool AgentAvailable,
+    bool AgentActive,
+    bool AddonReady,
+    bool AddonVisible,
+    bool OpenerAvailable,
+    uint AddonId,
+    ulong ActiveRetainerId,
+    uint RetainerObjectId);
+
 public sealed record RetainerAutomationOpenResult(
     bool Success,
     RetainerAutomationTarget? Target,

@@ -56,6 +56,64 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     /// <remarks>Read this property from the Dalamud framework thread.</remarks>
     public bool IsRetainerListReady => IsReady(RetainerList);
 
+    /// <remarks>Call from the Dalamud framework thread.</remarks>
+    public unsafe RetainerLocalUiObservation ObserveCurrentRetainerUi()
+    {
+        var module = AgentModule.Instance();
+        var agent = module == null ? null : module->GetAgentByInternalId(AgentId.Retainer);
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(SelectString, 1);
+        var manager = RetainerManager.Instance();
+        var current = manager == null ? null : manager->GetActiveRetainer();
+        return new(
+            agent != null,
+            agent != null && agent->IsAgentActive(),
+            addon != null && addon->IsReady,
+            addon != null && addon->IsReady && addon->IsVisible,
+            agent != null && agent->OpenerEventInterface != null,
+            agent == null ? 0 : agent->AddonId,
+            current == null ? 0 : current->RetainerId,
+            manager == null ? 0 : manager->RetainerObjectId);
+    }
+
+    /// <remarks>
+    /// Diagnostic primitive: hides only the current retainer agent's addon. It does not
+    /// invoke the command-menu callback or change the agent's active state.
+    /// Call from the Dalamud framework thread.
+    /// </remarks>
+    public unsafe RetainerAutomationResult HideCurrentRetainerAddonLocally()
+    {
+        var module = AgentModule.Instance();
+        var agent = module == null ? null : module->GetAgentByInternalId(AgentId.Retainer);
+        if (agent == null || !agent->IsAgentActive())
+            return RetainerAutomationResult.Failed("RetainerAgentUnavailable", "The active retainer agent is unavailable.");
+        if (!agent->IsAddonShown())
+            return RetainerAutomationResult.Failed("RetainerAddonNotShown", "The retainer command addon is not shown.");
+
+        agent->HideAddon();
+        return RetainerAutomationResult.Succeeded(
+            "RetainerAddonHiddenLocally",
+            "Requested a local-only hide through the active retainer agent.");
+    }
+
+    /// <remarks>
+    /// Diagnostic primitive paired with <see cref="HideCurrentRetainerAddonLocally"/>.
+    /// Call from the Dalamud framework thread.
+    /// </remarks>
+    public unsafe RetainerAutomationResult ShowCurrentRetainerAddonLocally()
+    {
+        var module = AgentModule.Instance();
+        var agent = module == null ? null : module->GetAgentByInternalId(AgentId.Retainer);
+        if (agent == null || !agent->IsAgentActive())
+            return RetainerAutomationResult.Failed("RetainerAgentUnavailable", "The active retainer agent is unavailable.");
+        if (agent->OpenerEventInterface == null)
+            return RetainerAutomationResult.Failed("RetainerOpenerUnavailable", "The active retainer agent no longer has an event opener.");
+
+        agent->ShowAddon();
+        return RetainerAutomationResult.Succeeded(
+            "RetainerAddonShownLocally",
+            "Requested a local-only show through the retained retainer agent.");
+    }
+
     public async Task<RetainerAutomationResult> EnsureRetainerListAsync(CancellationToken cancellationToken = default)
     {
         var state = await framework.RunOnTick(

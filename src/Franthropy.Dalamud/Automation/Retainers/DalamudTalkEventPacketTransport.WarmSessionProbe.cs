@@ -12,6 +12,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
     private const int MaximumWarmEventYieldSamples = 16;
     private const int MaximumWarmActorControlSamples = 32;
     private const int MaximumWarmRawInboundSamples = 64;
+    private const int MaximumWarmPostReplayContinuationSamples = 32;
 
     private WarmSessionProbeContext? activeWarmSessionProbe;
     private WarmSessionPacketTemplate? warmSelectionTemplate;
@@ -53,6 +54,8 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
                 false,
                 false,
                 null,
+                null,
+                0,
                 null,
                 0,
                 null,
@@ -244,6 +247,25 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
             {
                 if (activeWarmSessionProbe != context)
                     return false;
+
+                if (warmSessionObservation.ReplaySent)
+                {
+                    var samples = warmSessionObservation.PostReplayContinuationSamples ?? [];
+                    warmSessionObservation = warmSessionObservation with
+                    {
+                        PostReplayContinuationCount = warmSessionObservation.PostReplayContinuationCount + 1,
+                        PostReplayContinuationSamples = samples.Length < MaximumWarmPostReplayContinuationSamples
+                            ? [.. samples, new OutboundYieldEventSceneSample(
+                                GetWarmMillisecondsAfterReplay(),
+                                decoded.Opcode,
+                                decoded.EventId,
+                                decoded.SceneId,
+                                decoded.YieldId,
+                                decoded.ResultCount,
+                                decoded.RetainerId)]
+                            : samples,
+                    };
+                }
 
                 if ((decoded.SceneId == 0 || decoded.SceneId == 1) &&
                     decoded.ResultCount == YieldEventScene2PacketCodec.ExpectedResultCount &&
@@ -566,6 +588,8 @@ public sealed record WarmSessionRetentionProbeObservation(
     InboundActorControlSample[]? InboundActorControlSamples,
     int InboundRawPacketCount,
     InboundRawPacketSample[]? InboundRawPacketSamples,
+    int PostReplayContinuationCount,
+    OutboundYieldEventSceneSample[]? PostReplayContinuationSamples,
     string Message)
 {
     public static WarmSessionRetentionProbeObservation Idle { get; } = new(
@@ -591,5 +615,16 @@ public sealed record WarmSessionRetentionProbeObservation(
         null,
         0,
         null,
+        0,
+        null,
         "The warm-session retention observer is idle.");
 }
+
+public sealed record OutboundYieldEventSceneSample(
+    double MillisecondsAfterReplay,
+    uint Opcode,
+    uint EventId,
+    ushort SceneId,
+    byte YieldId,
+    byte ResultCount,
+    ulong RetainerId);
