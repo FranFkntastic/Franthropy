@@ -643,7 +643,12 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
                 false,
                 Volatile.Read(ref packetsObservedWhileArmed),
                 Volatile.Read(ref sizeEligiblePacketsObserved),
-                message);
+                message)
+            {
+                PreludeObservedCount = preludeObservedCount,
+                PreludeDroppedCount = preludeDroppedCount,
+                PreludeSamples = preludeSamples.ToArray(),
+            };
             return observation;
         }
     }
