@@ -204,6 +204,8 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
             return accepted;
         }
 
+        var positionFrameShadowCapture = TryObservePositionFrameShadowBeforeSend(packet);
+
         if (IsOutboundObservationArmed())
             Interlocked.Increment(ref packetsObservedWhileArmed);
 
@@ -233,7 +235,13 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
 
         lock (observationGate)
             AppendOutboundFlightRecorderSample(packet, argument3, argument4, argument5);
-        return sendPacketHook.Original(zoneClient, packet, argument3, argument4, argument5);
+        var originalSendAccepted =
+            sendPacketHook.Original(zoneClient, packet, argument3, argument4, argument5);
+        CompletePositionFrameShadowAfterSend(
+            positionFrameShadowCapture,
+            packet,
+            originalSendAccepted);
+        return originalSendAccepted;
     }
 
     private uint? TryObserve(nint packet)
@@ -569,6 +577,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
             activeTarget = null;
             outboundObservationArmed = false;
             flightRecorderArmed = false;
+            CancelPositionFrameShadow(reason);
             var lifecycleWasRecording = lifecycleRecorderArmed;
             lifecycleRecorderArmed = false;
             if (wasPending)
@@ -762,6 +771,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
             return;
         disposed = true;
         CancelPending("The talk-event packet observer was disposed.");
+        CancelPositionFrameShadow("The position-frame shadow was disposed.");
         CancelYieldProbe("The yield-event packet observer was disposed.");
         if (warmSessionObservation.TeardownSuppressed &&
             !warmSessionObservation.MatchingScene2Observed &&
@@ -825,7 +835,8 @@ public sealed record TalkEventPacketTransportObservation(
     int LifecycleOutboundDroppedCount = 0,
     int LifecycleInboundDroppedCount = 0,
     ZonePacketFlightRecorderSample[]? LifecycleOutboundSamples = null,
-    ZonePacketFlightRecorderSample[]? LifecycleInboundSamples = null)
+    ZonePacketFlightRecorderSample[]? LifecycleInboundSamples = null,
+    PositionFrameShadowObservation? PositionFrameShadow = null)
 {
     public bool Pending => State == TalkEventPacketTransportState.AwaitingBuilderPacket;
     public bool Sent => State == TalkEventPacketTransportState.StockPacketSent;

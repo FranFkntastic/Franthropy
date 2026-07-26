@@ -378,6 +378,42 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             0,
             "The StartTalkEvent packet transport is unavailable.");
 
+    public PositionFrameShadowObservation ArmPositionFrameShadow(
+        Vector3 expectedPosition,
+        Vector3 hypotheticalPosition,
+        uint expectedOpcode = 0x2C6) =>
+        talkPacketTransport?.ArmPositionFrameShadow(
+            expectedPosition,
+            hypotheticalPosition,
+            expectedOpcode) ??
+        new(
+            PositionFrameShadowState.Cancelled,
+            expectedOpcode,
+            0,
+            0,
+            PositionFrameShadowVector.From(expectedPosition),
+            PositionFrameShadowVector.From(hypotheticalPosition),
+            0,
+            0,
+            false,
+            false,
+            "The position-frame shadow transport is unavailable.");
+
+    public PositionFrameShadowObservation ObservePositionFrameShadow() =>
+        talkPacketTransport?.ObservePositionFrameShadow() ??
+        new(
+            PositionFrameShadowState.Cancelled,
+            0,
+            0,
+            0,
+            new(0, 0, 0),
+            new(0, 0, 0),
+            0,
+            0,
+            false,
+            false,
+            "The position-frame shadow transport is unavailable.");
+
     public unsafe NormalSummoningBellCaptureArmResult TryArmLoadedBellFlightRecorder(
         bool captureCompleteLifecycle = false)
     {
