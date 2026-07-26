@@ -32,6 +32,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
     private const int MaximumLifecycleOutboundSamples = 512;
     private const int MaximumLifecycleInboundSamples = 4_096;
     private const double LifecycleRecorderWindowMilliseconds = 180_000;
+    private const int MaximumNativeStackFrames = 96;
 
     private readonly Hook<ZoneClient.Delegates.SendPacket> sendPacketHook;
     private readonly Hook<PacketDispatcher.Delegates.OnReceivePacket> receivePacketHook;
@@ -39,6 +40,8 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
     private readonly Hook<PacketDispatcher.Delegates.HandleEventYieldPacket> eventYieldHook;
     private readonly Hook<PacketDispatcher.Delegates.HandleActorControlPacket> actorControlHook;
     private readonly object observationGate = new();
+    private readonly ulong gameModuleBase;
+    private readonly int gameModuleSize;
     private CaptureTarget? activeTarget;
     private bool outboundObservationArmed;
     private bool flightRecorderArmed;
@@ -60,6 +63,12 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         IGameInteropProvider interopProvider,
         ISigScanner? sigScanner = null)
     {
+        using (var process = Process.GetCurrentProcess())
+        {
+            gameModuleBase = (ulong)(nuint)(process.MainModule?.BaseAddress ?? 0);
+            gameModuleSize = process.MainModule?.ModuleMemorySize ?? 0;
+        }
+
         if (sigScanner is not null)
         {
             try
@@ -211,6 +220,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
 
         if (TryObserve(packet) is { } opcode)
         {
+            var nativeStack = CaptureNativeStack();
             var accepted = sendPacketHook.Original(zoneClient, packet, argument3, argument4, argument5);
             lock (observationGate)
             {
@@ -223,6 +233,9 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
                     Opcode = opcode,
                     PacketsObservedWhileArmed = Volatile.Read(ref packetsObservedWhileArmed),
                     SizeEligiblePacketsObserved = Volatile.Read(ref sizeEligiblePacketsObserved),
+                    GameModuleBase = gameModuleBase,
+                    GameModuleSize = gameModuleSize,
+                    StartTalkNativeStack = nativeStack,
                     Message = accepted
                         ? $"Observed and passed through one stock StartTalkEvent packet unchanged (opcode 0x{opcode:X})."
                         : $"Observed the stock StartTalkEvent packet, but the zone send primitive returned false (opcode 0x{opcode:X}).",
@@ -775,6 +788,37 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
             ? string.Empty
             : Convert.ToHexString(new ReadOnlySpan<byte>((void*)packet, length));
 
+    private static ulong[] CaptureNativeStack()
+    {
+        try
+        {
+            var frames = stackalloc nint[MaximumNativeStackFrames];
+            var captured = RtlCaptureStackBackTrace(
+                0,
+                MaximumNativeStackFrames,
+                frames,
+                null);
+            if (captured == 0)
+                return [];
+
+            var result = new ulong[captured];
+            for (var index = 0; index < captured; index++)
+                result[index] = (ulong)(nuint)frames[index];
+            return result;
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "RtlCaptureStackBackTrace")]
+    private static extern ushort RtlCaptureStackBackTrace(
+        uint framesToSkip,
+        uint framesToCapture,
+        nint* backTrace,
+        uint* backTraceHash);
+
     public void Dispose()
     {
         if (disposed)
@@ -846,7 +890,10 @@ public sealed record TalkEventPacketTransportObservation(
     int LifecycleInboundDroppedCount = 0,
     ZonePacketFlightRecorderSample[]? LifecycleOutboundSamples = null,
     ZonePacketFlightRecorderSample[]? LifecycleInboundSamples = null,
-    PositionFrameShadowObservation? PositionFrameShadow = null)
+    PositionFrameShadowObservation? PositionFrameShadow = null,
+    ulong GameModuleBase = 0,
+    int GameModuleSize = 0,
+    ulong[]? StartTalkNativeStack = null)
 {
     public bool Pending => State == TalkEventPacketTransportState.AwaitingBuilderPacket;
     public bool Sent => State == TalkEventPacketTransportState.StockPacketSent;
