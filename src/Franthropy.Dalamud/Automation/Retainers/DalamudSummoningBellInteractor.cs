@@ -537,7 +537,9 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             Message = "The YieldEventScene2 packet transport is unavailable.",
         };
 
-    public unsafe NativeRetainerVerbSubmission TryInvokeNativeRetainerVerb(NativeRetainerVerb verb)
+    public unsafe NativeRetainerVerbSubmission TryInvokeNativeRetainerVerb(
+        NativeRetainerVerb verb,
+        ulong verifiedRetainerId = 0)
     {
         var nearest = FindLoadedBell();
         if (nearest is null)
@@ -570,29 +572,32 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
                 nearest);
         }
 
-        var retainerId = 0UL;
+        var retainerId = verifiedRetainerId;
         if (verb == NativeRetainerVerb.CallRetainer)
         {
-            var manager = RetainerManager.Instance();
-            if (manager == null)
+            if (retainerId == 0)
             {
-                return NativeVerbUnavailable(
-                    verb,
-                    "RetainerManagerUnavailable",
-                    "The native retainer manager is unavailable.",
-                    nearest,
-                    eventId,
-                    eventIdSource,
-                    handler->Scene);
-            }
+                var manager = RetainerManager.Instance();
+                if (manager == null)
+                {
+                    return NativeVerbUnavailable(
+                        verb,
+                        "RetainerManagerUnavailable",
+                        "The native retainer manager is unavailable.",
+                        nearest,
+                        eventId,
+                        eventIdSource,
+                        handler->Scene);
+                }
 
-            for (var index = 0U; index < manager->GetRetainerCount(); index++)
-            {
-                var retainer = manager->GetRetainerBySortedIndex(index);
-                if (retainer == null || retainer->RetainerId == 0)
-                    continue;
-                retainerId = retainer->RetainerId;
-                break;
+                for (var index = 0U; index < manager->GetRetainerCount(); index++)
+                {
+                    var retainer = manager->GetRetainerBySortedIndex(index);
+                    if (retainer == null || retainer->RetainerId == 0)
+                        continue;
+                    retainerId = retainer->RetainerId;
+                    break;
+                }
             }
 
             if (retainerId == 0)
