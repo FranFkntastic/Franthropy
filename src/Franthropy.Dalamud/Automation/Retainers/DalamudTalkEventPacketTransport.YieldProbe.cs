@@ -1,7 +1,9 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using FFXIVClientStructs.FFXIV.Application.Network;
 using FFXIVClientStructs.FFXIV.Client.Game.Event;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
+using NativeEventHandler = FFXIVClientStructs.FFXIV.Client.Game.Event.EventHandler;
 
 namespace Franthropy.Dalamud.Automation.Retainers;
 
@@ -12,9 +14,19 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
     private const int MaximumYieldEventYieldSamples = 8;
     private const int MaximumYieldActorControlSamples = 16;
     private const int MaximumYieldRawInboundSamples = 32;
+    private const string NativeEventYieldSignature =
+        "40 53 48 83 EC 30 F6 81 90 00 00 00 01 48 8B D9 75 ?? 44 88 4C 24 20 4D 8B C8 44 0F B6 C2 0F B7 51 78 8B 49 20 E8 ?? ?? ?? ?? 80 8B 90 00 00 00 01";
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void NativeEventYieldDelegate(
+        NativeEventHandler* handler,
+        byte yieldId,
+        uint* results,
+        byte resultCount);
 
     private YieldProbeContext? activeYieldProbe;
     private YieldEventScenePacketTemplate? cachedYieldTemplate;
+    private NativeEventYieldDelegate? nativeEventYield;
     private long yieldSentTimestamp;
     private YieldEventSceneProbeObservation yieldObservation = YieldEventSceneProbeObservation.Idle;
 
@@ -141,6 +153,117 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
             };
             if (!accepted)
                 activeYieldProbe = null;
+            return yieldObservation;
+        }
+    }
+
+    public YieldEventSceneProbeObservation InvokeNativeRetainerVerb(
+        NativeEventHandler* handler,
+        ulong actorId,
+        uint eventId,
+        ulong retainerId,
+        NativeRetainerVerb verb)
+    {
+        if (disposed)
+            return FailYield("The native retainer-verb observer has been disposed.");
+        if (handler == null)
+            return FailYield("The loaded bell has no native event handler.");
+        if (nativeEventYield is null)
+            return FailYield("The current-build native event-yield signature could not be resolved.");
+        if (verb == NativeRetainerVerb.CallRetainer && retainerId == 0)
+            return FailYield("CallRetainer requires a live retainer ID.");
+
+        var mode = verb == NativeRetainerVerb.CallRetainer
+            ? YieldEventSceneProbeMode.NativeCallRetainer
+            : YieldEventSceneProbeMode.NativeSelectRetainer;
+        var yieldId = verb == NativeRetainerVerb.CallRetainer ? (byte)7 : (byte)13;
+        var resultCount = verb == NativeRetainerVerb.CallRetainer ? (byte)2 : (byte)0;
+        var result0 = verb == NativeRetainerVerb.CallRetainer ? (uint)(retainerId >> 32) : 0;
+        var result1 = verb == NativeRetainerVerb.CallRetainer ? (uint)retainerId : 0;
+        var scene = unchecked((ushort)handler->Scene);
+
+        lock (observationGate)
+        {
+            if (activeTarget is not null ||
+                activeYieldProbe is not null ||
+                activeWarmSessionProbe is not null)
+            {
+                return FailYield("Another event-packet observation is already active.");
+            }
+
+            activeYieldProbe = new(actorId, eventId, mode);
+            yieldSentTimestamp = Stopwatch.GetTimestamp();
+            yieldObservation = new(
+                YieldEventSceneProbeState.Sending,
+                mode,
+                actorId,
+                eventId,
+                0,
+                scene,
+                yieldId,
+                result0,
+                result1,
+                false,
+                false,
+                false,
+                cachedYieldTemplate is not null,
+                retainerId,
+                0,
+                0,
+                0,
+                0,
+                null,
+                0,
+                null,
+                0,
+                null,
+                null,
+                null,
+                $"Invoking the signature-resolved {verb} event verb once (scene {handler->Scene}, yield {yieldId}, results {resultCount}).");
+        }
+
+        var originalYieldFlags = *((byte*)handler + 0x90);
+        try
+        {
+            if (resultCount == 0)
+            {
+                nativeEventYield(handler, yieldId, null, 0);
+            }
+            else
+            {
+                var results = stackalloc uint[2];
+                results[0] = result0;
+                results[1] = result1;
+                nativeEventYield(handler, yieldId, results, resultCount);
+            }
+        }
+        catch (Exception ex)
+        {
+            return FailYield($"The signature-resolved {verb} invocation failed: {ex.Message}");
+        }
+        finally
+        {
+            // The native builder marks the handler as having yielded. These cold probes do
+            // not own an accepted Lua event lifecycle, so restore the exact pre-call byte.
+            *((byte*)handler + 0x90) = originalYieldFlags;
+        }
+
+        lock (observationGate)
+        {
+            if (activeYieldProbe is { Mode: var activeMode } &&
+                activeMode == mode &&
+                yieldObservation.State == YieldEventSceneProbeState.Sending)
+            {
+                activeYieldProbe = null;
+                yieldObservation = yieldObservation with
+                {
+                    State = YieldEventSceneProbeState.Failed,
+                    Message =
+                        $"The native {verb} builder returned without submitting an event-yield packet. " +
+                        $"Handler scene was {handler->Scene}.",
+                };
+            }
+
             return yieldObservation;
         }
     }
@@ -323,6 +446,116 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
         }
     }
 
+    private bool TryObserveNativeRetainerVerbOutbound(nint packet)
+    {
+        if (packet == 0)
+            return false;
+
+        YieldProbeContext? context;
+        lock (observationGate)
+            context = activeYieldProbe;
+        if (context is not
+            {
+                Mode: YieldEventSceneProbeMode.NativeCallRetainer or
+                    YieldEventSceneProbeMode.NativeSelectRetainer,
+            } ||
+            yieldObservation.State != YieldEventSceneProbeState.Sending)
+        {
+            return false;
+        }
+
+        try
+        {
+            var packetPointer = (byte*)packet;
+            var encodedSize = *(ulong*)(packetPointer + 8);
+            if (encodedSize < 0x10 + YieldEventScene2PacketCodec.PayloadSize ||
+                encodedSize > MaximumYieldPacketBytes - 0x10)
+            {
+                return false;
+            }
+
+            var declaredSize = checked((int)encodedSize + 0x10);
+            var packetBytes = new byte[declaredSize];
+            new ReadOnlySpan<byte>(packetPointer, declaredSize).CopyTo(packetBytes);
+            if (!YieldEventScene2PacketCodec.TryDecodeEnvelope(
+                    packetBytes,
+                    context.EventId,
+                    out var decoded))
+            {
+                return false;
+            }
+
+            var expectedYieldId = context.Mode == YieldEventSceneProbeMode.NativeCallRetainer
+                ? (byte)7
+                : (byte)13;
+            var expectedResultCount = context.Mode == YieldEventSceneProbeMode.NativeCallRetainer
+                ? (byte)2
+                : (byte)0;
+            if (decoded.YieldId != expectedYieldId ||
+                decoded.ResultCount != expectedResultCount)
+            {
+                return false;
+            }
+
+            lock (observationGate)
+            {
+                if (activeYieldProbe != context ||
+                    yieldObservation.State != YieldEventSceneProbeState.Sending)
+                {
+                    return false;
+                }
+
+                yieldObservation = yieldObservation with
+                {
+                    Opcode = decoded.Opcode,
+                    SceneId = decoded.SceneId,
+                    YieldId = decoded.YieldId,
+                    Result0 = decoded.Result0,
+                    Result1 = decoded.Result1,
+                    RetainerId = expectedResultCount == 2 ? decoded.RetainerId : 0,
+                    OutboundPacketHex = Convert.ToHexString(packetBytes),
+                    Message =
+                        $"The native {context.Mode} builder produced opcode 0x{decoded.Opcode:X}, " +
+                        $"scene {decoded.SceneId}, yield {decoded.YieldId}, results {decoded.ResultCount}.",
+                };
+            }
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void CompleteNativeRetainerVerbOutbound(bool accepted)
+    {
+        lock (observationGate)
+        {
+            if (activeYieldProbe is not
+                {
+                    Mode: YieldEventSceneProbeMode.NativeCallRetainer or
+                        YieldEventSceneProbeMode.NativeSelectRetainer,
+                })
+            {
+                return;
+            }
+
+            yieldObservation = yieldObservation with
+            {
+                State = accepted
+                    ? YieldEventSceneProbeState.PacketSent
+                    : YieldEventSceneProbeState.Failed,
+                Sent = accepted,
+                Message = accepted
+                    ? $"{yieldObservation.Message} The zone send primitive accepted the one native-built packet."
+                    : $"{yieldObservation.Message} The zone send primitive rejected the native-built packet.",
+            };
+            if (!accepted)
+                activeYieldProbe = null;
+        }
+    }
+
     private void ObserveYieldEventPlay(
         GameObjectId objectId,
         EventId eventId,
@@ -360,9 +593,14 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
                         sceneDataCount,
                         capturedSceneData)]
                     : samples;
+                var matchingScene = context.Mode is
+                    YieldEventSceneProbeMode.NativeCallRetainer or
+                    YieldEventSceneProbeMode.NativeSelectRetainer
+                        ? scene >= 0
+                        : scene == 2;
                 var matching = objectId.Id == context.ActorId &&
                                eventId.Id == context.EventId &&
-                               scene == 2;
+                               matchingScene;
                 yieldObservation = yieldObservation with
                 {
                     MatchingEventPlayObserved =
@@ -578,6 +816,14 @@ public enum YieldEventSceneProbeMode
     None,
     InSessionControl,
     SessionFreeReplay,
+    NativeCallRetainer,
+    NativeSelectRetainer,
+}
+
+public enum NativeRetainerVerb
+{
+    CallRetainer,
+    SelectRetainer,
 }
 
 public enum YieldEventSceneProbeState

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Application.Network;
@@ -55,8 +56,24 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         new(TalkEventPacketTransportState.Idle, 0, false, false, 0, 0, "The talk-event observer is idle.");
     private bool disposed;
 
-    public DalamudTalkEventPacketTransport(IGameInteropProvider interopProvider)
+    public DalamudTalkEventPacketTransport(
+        IGameInteropProvider interopProvider,
+        ISigScanner? sigScanner = null)
     {
+        if (sigScanner is not null)
+        {
+            try
+            {
+                nativeEventYield = Marshal.GetDelegateForFunctionPointer<NativeEventYieldDelegate>(
+                    sigScanner.ScanText(NativeEventYieldSignature));
+            }
+            catch
+            {
+                // The ordinary packet observers remain useful when the optional native
+                // event-yield builder cannot be resolved for the current game build.
+            }
+        }
+
         sendPacketHook = interopProvider.HookFromAddress<ZoneClient.Delegates.SendPacket>(
             (nint)ZoneClient.MemberFunctionPointers.SendPacket,
             SendPacketDetour);
@@ -178,6 +195,13 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
                 out var yieldSendResult))
         {
             return yieldSendResult;
+        }
+
+        if (TryObserveNativeRetainerVerbOutbound(packet))
+        {
+            var accepted = sendPacketHook.Original(zoneClient, packet, argument3, argument4, argument5);
+            CompleteNativeRetainerVerbOutbound(accepted);
+            return accepted;
         }
 
         if (IsOutboundObservationArmed())

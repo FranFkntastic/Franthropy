@@ -3,6 +3,7 @@ using Dalamud.Data;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
+using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using NativeEventHandler = FFXIVClientStructs.FFXIV.Client.Game.Event.EventHandler;
 using NativeGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
@@ -111,6 +112,20 @@ public sealed record WarmSessionRetentionArmResult(
     float Distance,
     float OrdinaryInteractionDistance);
 
+public sealed record NativeRetainerVerbSubmission(
+    bool Submitted,
+    string Code,
+    string Message,
+    NativeRetainerVerb Verb,
+    ulong BellGameObjectId,
+    uint BellEventId,
+    string BellEventIdSource,
+    short HandlerScene,
+    float Distance,
+    float OrdinaryInteractionDistance,
+    ulong RetainerId,
+    YieldEventSceneProbeObservation Transport);
+
 /// <summary>
 /// Finds and interacts with a nearby summoning bell through the normal game-object interaction path.
 /// Call this on the framework thread, then observe the retainer-list addon before continuing.
@@ -140,7 +155,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
         this.targetManager = targetManager;
         this.dataManager = dataManager;
         if (interopProvider is not null)
-            talkPacketTransport = new(interopProvider);
+            talkPacketTransport = new(interopProvider, sigScanner);
     }
 
     public unsafe SummoningBellInteractionResult TryInteract()
@@ -522,6 +537,98 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             Message = "The YieldEventScene2 packet transport is unavailable.",
         };
 
+    public unsafe NativeRetainerVerbSubmission TryInvokeNativeRetainerVerb(NativeRetainerVerb verb)
+    {
+        var nearest = FindLoadedBell();
+        if (nearest is null)
+        {
+            return NativeVerbUnavailable(
+                verb,
+                objectTable.LocalPlayer is null ? "PlayerUnavailable" : "NoLoadedSummoningBell",
+                objectTable.LocalPlayer is null
+                    ? "The local player is unavailable."
+                    : "No targetable summoning bell is loaded in the current object table.");
+        }
+
+        if (talkPacketTransport is null)
+        {
+            return NativeVerbUnavailable(
+                verb,
+                "NativeEventYieldTransportUnavailable",
+                "The native event-yield transport is unavailable.",
+                nearest);
+        }
+
+        var nativeBell = (NativeGameObject*)nearest.Object.Address;
+        var handler = ResolveEventHandler(nativeBell, out var eventId, out var eventIdSource);
+        if (handler == null || eventId == 0)
+        {
+            return NativeVerbUnavailable(
+                verb,
+                "SummoningBellEventHandlerUnavailable",
+                "The loaded summoning bell has no live native event handler.",
+                nearest);
+        }
+
+        var retainerId = 0UL;
+        if (verb == NativeRetainerVerb.CallRetainer)
+        {
+            var manager = RetainerManager.Instance();
+            if (manager == null)
+            {
+                return NativeVerbUnavailable(
+                    verb,
+                    "RetainerManagerUnavailable",
+                    "The native retainer manager is unavailable.",
+                    nearest,
+                    eventId,
+                    eventIdSource,
+                    handler->Scene);
+            }
+
+            for (var index = 0U; index < manager->GetRetainerCount(); index++)
+            {
+                var retainer = manager->GetRetainerBySortedIndex(index);
+                if (retainer == null || retainer->RetainerId == 0)
+                    continue;
+                retainerId = retainer->RetainerId;
+                break;
+            }
+
+            if (retainerId == 0)
+            {
+                return NativeVerbUnavailable(
+                    verb,
+                    "RetainerIdentityUnavailable",
+                    "No live retainer identity is available to the native CallRetainer verb.",
+                    nearest,
+                    eventId,
+                    eventIdSource,
+                    handler->Scene);
+            }
+        }
+
+        var transport = talkPacketTransport.InvokeNativeRetainerVerb(
+            handler,
+            nearest.Object.GameObjectId,
+            eventId,
+            retainerId,
+            verb);
+        return new(
+            transport.Sent,
+            transport.Sent ? "NativeRetainerVerbSubmitted" : "NativeRetainerVerbNotSubmitted",
+            transport.Message,
+            verb,
+            nearest.Object.GameObjectId,
+            eventId,
+            eventIdSource,
+            handler->Scene,
+            nearest.Distance,
+            nearest.InteractionDistance,
+            retainerId,
+            transport);
+    }
+
     public YieldEventSceneProbeObservation ObserveYieldEventSceneProbe() =>
         talkPacketTransport?.ObserveYieldProbe() ??
         YieldEventSceneProbeObservation.Idle with
@@ -760,6 +867,45 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
         return (0, "");
     }
 
+    private static unsafe NativeEventHandler* ResolveEventHandler(
+        NativeGameObject* gameObject,
+        out uint eventId,
+        out string source)
+    {
+        var directHandler = gameObject->EventHandler;
+        if (directHandler != null)
+        {
+            var directEventId = directHandler->GetEventId().Id;
+            if (directEventId != 0)
+            {
+                eventId = directEventId;
+                source = "GameObject.EventHandler.GetEventId";
+                return directHandler;
+            }
+        }
+
+        NativeEventHandler** handlers = stackalloc NativeEventHandler*[32];
+        var count = Math.Clamp(gameObject->GetEventHandlersImpl(handlers), 0, 32);
+        for (var index = 0; index < count; index++)
+        {
+            var handler = handlers[index];
+            if (handler == null)
+                continue;
+
+            var candidateEventId = handler->GetEventId().Id;
+            if (candidateEventId == 0)
+                continue;
+
+            eventId = candidateEventId;
+            source = $"GameObject.GetEventHandlersImpl[{index}].GetEventId";
+            return handler;
+        }
+
+        eventId = 0;
+        source = "";
+        return null;
+    }
+
     private LoadedBell? FindLoadedBell()
     {
         var player = objectTable.LocalPlayer;
@@ -785,6 +931,32 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
 
     private static RemoteSummoningBellInteractionResult RemoteUnavailable(string code, string message) =>
         new(SummoningBellInteractionState.Unavailable, code, message, 0, 0, 0);
+
+    private static NativeRetainerVerbSubmission NativeVerbUnavailable(
+        NativeRetainerVerb verb,
+        string code,
+        string message,
+        LoadedBell? bell = null,
+        uint eventId = 0,
+        string eventIdSource = "",
+        short handlerScene = -1) =>
+        new(
+            false,
+            code,
+            message,
+            verb,
+            bell?.Object.GameObjectId ?? 0,
+            eventId,
+            eventIdSource,
+            handlerScene,
+            bell?.Distance ?? 0,
+            bell?.InteractionDistance ?? 0,
+            0,
+            YieldEventSceneProbeObservation.Idle with
+            {
+                State = YieldEventSceneProbeState.Failed,
+                Message = message,
+            });
 
     public void Dispose()
     {
