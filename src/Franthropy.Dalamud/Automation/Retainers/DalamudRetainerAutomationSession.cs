@@ -70,29 +70,29 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             addon != null && addon->IsReady,
             addon != null && addon->IsReady && addon->IsVisible,
             agent != null && agent->OpenerEventInterface != null,
-            agent == null ? 0 : agent->AddonId,
+            addon == null ? 0u : addon->Id,
             current == null ? 0 : current->RetainerId,
             manager == null ? 0 : manager->RetainerObjectId);
     }
 
     /// <remarks>
-    /// Diagnostic primitive: hides only the current retainer agent's addon. It does not
-    /// invoke the command-menu callback or change the agent's active state.
+    /// Diagnostic primitive: hides only the live retainer command addon. SelectString is
+    /// not owned by the Retainer agent during accepted scene 2, so this deliberately
+    /// bypasses agent lifecycle methods and does not invoke the command-menu callback.
     /// Call from the Dalamud framework thread.
     /// </remarks>
     public unsafe RetainerAutomationResult HideCurrentRetainerAddonLocally()
     {
-        var module = AgentModule.Instance();
-        var agent = module == null ? null : module->GetAgentByInternalId(AgentId.Retainer);
-        if (agent == null || !agent->IsAgentActive())
-            return RetainerAutomationResult.Failed("RetainerAgentUnavailable", "The active retainer agent is unavailable.");
-        if (!agent->IsAddonShown())
-            return RetainerAutomationResult.Failed("RetainerAddonNotShown", "The retainer command addon is not shown.");
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(SelectString, 1);
+        if (addon == null || !addon->IsReady)
+            return RetainerAutomationResult.Failed("RetainerCommandAddonUnavailable", "The retainer command addon is unavailable.");
+        if (!addon->IsVisible)
+            return RetainerAutomationResult.Failed("RetainerCommandAddonNotVisible", "The retainer command addon is already hidden.");
 
-        agent->HideAddon();
+        addon->Hide(disableHideTransition: true, callCloseCallback: false, setShowHideFlags: 0);
         return RetainerAutomationResult.Succeeded(
-            "RetainerAddonHiddenLocally",
-            "Requested a local-only hide through the active retainer agent.");
+            "RetainerCommandAddonHiddenLocally",
+            "Requested a callback-free local hide on the live retainer command addon.");
     }
 
     /// <remarks>
@@ -101,17 +101,18 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     /// </remarks>
     public unsafe RetainerAutomationResult ShowCurrentRetainerAddonLocally()
     {
-        var module = AgentModule.Instance();
-        var agent = module == null ? null : module->GetAgentByInternalId(AgentId.Retainer);
-        if (agent == null || !agent->IsAgentActive())
-            return RetainerAutomationResult.Failed("RetainerAgentUnavailable", "The active retainer agent is unavailable.");
-        if (agent->OpenerEventInterface == null)
-            return RetainerAutomationResult.Failed("RetainerOpenerUnavailable", "The active retainer agent no longer has an event opener.");
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(SelectString, 1);
+        if (addon == null || !addon->IsReady)
+            return RetainerAutomationResult.Failed("RetainerCommandAddonUnavailable", "The retained retainer command addon is unavailable.");
+        if (addon->IsVisible)
+            return RetainerAutomationResult.Succeeded(
+                "RetainerCommandAddonAlreadyVisible",
+                "The retained retainer command addon is already visible.");
 
-        agent->ShowAddon();
+        addon->Show(disableShowTransition: true, unsetShowHideFlags: 0);
         return RetainerAutomationResult.Succeeded(
-            "RetainerAddonShownLocally",
-            "Requested a local-only show through the retained retainer agent.");
+            "RetainerCommandAddonShownLocally",
+            "Requested a local-only show on the retained retainer command addon.");
     }
 
     public async Task<RetainerAutomationResult> EnsureRetainerListAsync(CancellationToken cancellationToken = default)
