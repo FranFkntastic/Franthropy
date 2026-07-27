@@ -104,6 +104,7 @@ public static class DalamudItemAutocompleteRenderer
         var inputActive = ImGui.IsItemActive();
         state.IsInputActive = inputActive;
         var inputHovered = ImGui.IsItemHovered();
+        var ownerViewportId = ImGui.GetWindowViewport().ID;
         var suggestionAnchor = new Vector2(ImGui.GetItemRectMin().X, ImGui.GetItemRectMax().Y);
         var snapshot = state.Resolve(itemOptions);
         var resolved = snapshot.ResolvedItem;
@@ -120,6 +121,7 @@ public static class DalamudItemAutocompleteRenderer
             ImGui.OpenPopup(popupId);
 
         ImGui.SetNextWindowPos(suggestionAnchor, ImGuiCond.Always);
+        ImGui.SetNextWindowViewport(ownerViewportId);
         ImGui.SetNextWindowSizeConstraints(new Vector2(260, 0), new Vector2(520, 260));
         if (ImGui.BeginPopup(
                 popupId,
