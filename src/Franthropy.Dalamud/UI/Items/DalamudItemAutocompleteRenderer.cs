@@ -1,6 +1,7 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Plugin.Services;
+using Franthropy.Dalamud.UI.Windows;
 using LuminaItem = Lumina.Excel.Sheets.Item;
 
 namespace Franthropy.Dalamud.UI.Items;
@@ -104,7 +105,7 @@ public static class DalamudItemAutocompleteRenderer
         var inputActive = ImGui.IsItemActive();
         state.IsInputActive = inputActive;
         var inputHovered = ImGui.IsItemHovered();
-        var ownerViewportId = ImGui.GetWindowViewport().ID;
+        var ownerSurface = DalamudOwnedWindowSurface.Capture();
         var suggestionAnchor = new Vector2(ImGui.GetItemRectMin().X, ImGui.GetItemRectMax().Y);
         var snapshot = state.Resolve(itemOptions);
         var resolved = snapshot.ResolvedItem;
@@ -121,12 +122,13 @@ public static class DalamudItemAutocompleteRenderer
             ImGui.OpenPopup(popupId);
 
         ImGui.SetNextWindowPos(suggestionAnchor, ImGuiCond.Always);
-        ImGui.SetNextWindowViewport(ownerViewportId);
+        ownerSurface.ApplyToNextWindow();
         ImGui.SetNextWindowSizeConstraints(new Vector2(260, 0), new Vector2(520, 260));
         if (ImGui.BeginPopup(
                 popupId,
                 ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoNav))
         {
+            ownerSurface.KeepCurrentWindowAboveOwner();
             if (!inputActive || results.Count == 0)
             {
                 ImGui.CloseCurrentPopup();

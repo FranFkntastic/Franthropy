@@ -1,9 +1,9 @@
 namespace Franthropy.Dalamud.UI.Windows;
 
 /// <summary>
-/// Tracks the one-frame focus request required when a companion window is opened
-/// from another ImGui window. Keeping this state explicit prevents a newly opened
-/// companion from remaining behind the window that launched it.
+/// Tracks the one-frame keyboard-focus request made when a companion window is
+/// opened from another ImGui window. Display ownership is maintained separately
+/// by <see cref="DalamudOwnedWindowSurface"/>.
 /// </summary>
 public sealed class CompanionWindowActivationState
 {
