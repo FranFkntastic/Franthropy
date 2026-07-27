@@ -94,6 +94,7 @@
     <Compile Remove="UI\Settings\DalamudSettingsTreeRenderer.cs" />
     <Compile Remove="UI\Items\DalamudItemAutocompleteRenderer.cs" />
     <Compile Remove="UI\Filtering\DalamudFilterAutocompleteRenderer.cs" />
+    <Compile Remove="UI\Windows\DalamudOwnedWindowSurface.cs" />
     <Compile Remove="AgentBridge\AgentBridgeUiReviewRegistryImGuiExtensions.cs" />
     <Compile Remove="AgentBridge\AgentBridgeViewportCaptureService.cs" />
     <Compile Remove="AgentBridge\DalamudRenderedUiTextActionDispatcher.cs" />

@@ -1,5 +1,6 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Franthropy.Dalamud.UI.Windows;
 using Franthropy.Filtering.Completion;
 using Franthropy.Filtering.Semantics;
 
@@ -69,6 +70,7 @@ public static class DalamudFilterAutocompleteRenderer
 
         var inputActive = ImGui.IsItemActive();
         state.IsInputActive = inputActive;
+        var ownerSurface = DalamudOwnedWindowSurface.Capture();
         var suggestionAnchor = new Vector2(ImGui.GetItemRectMin().X, ImGui.GetItemRectMax().Y);
         completion = FilterCompletionService.Complete(
             context,
@@ -81,9 +83,11 @@ public static class DalamudFilterAutocompleteRenderer
             ImGui.OpenPopup(popupId);
 
         ImGui.SetNextWindowPos(suggestionAnchor, ImGuiCond.Always);
+        ownerSurface.ApplyToNextWindow();
         ImGui.SetNextWindowSizeConstraints(new Vector2(Math.Max(280, width), 0), new Vector2(620, 300));
         if (ImGui.BeginPopup(popupId, ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoNav))
         {
+            ownerSurface.KeepCurrentWindowAboveOwner();
             for (var index = 0; index < items.Length; index++)
             {
                 var item = items[index];
