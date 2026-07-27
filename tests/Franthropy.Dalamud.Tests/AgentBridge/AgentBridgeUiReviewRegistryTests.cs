@@ -122,4 +122,31 @@ public sealed class AgentBridgeUiReviewRegistryTests
         Assert.Equal("Potion", selectedItem);
         Assert.Equal("operation-1", accepted.Action?.OperationId);
     }
+
+    [Fact]
+    public void ReviewedActionMetadata_BuildsStableRuntimeCatalog()
+    {
+        var registry = new AgentBridgeUiReviewRegistry();
+        registry.BeginFrame();
+        registry.Register(
+            "stock.retrieve",
+            "Retrieve item",
+            AgentBridgeUiControlKind.Input,
+            Vector2.Zero,
+            new(100, 30),
+            true,
+            false,
+            null,
+            arguments: null,
+            surfaceId: "stock.main",
+            mutating: true,
+            completionOperationKind: "inventory-transfer",
+            _ => AgentBridgeUiActionResult.Ok("Queued."));
+        registry.EndFrame();
+
+        var action = Assert.Single(registry.ActionCatalog());
+        Assert.Equal("stock.main", action.SurfaceId);
+        Assert.Equal("inventory-transfer", action.CompletionOperationKind);
+        Assert.True(registry.CatalogRevision > 1);
+    }
 }

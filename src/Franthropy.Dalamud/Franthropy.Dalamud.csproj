@@ -94,6 +94,8 @@
     <Compile Remove="UI\Windows\DalamudOwnedWindowSurface.cs" />
     <Compile Remove="AgentBridge\AgentBridgeUiReviewRegistryImGuiExtensions.cs" />
     <Compile Remove="AgentBridge\AgentBridgeViewportCaptureService.cs" />
+    <Compile Remove="AgentBridge\ReflectedPluginWindowSurfaceInspector.cs" />
+    <Compile Remove="AgentBridge\ReflectedPluginWindowPresentationManager.cs" />
     <Compile Remove="AgentBridge\DalamudRenderedUiTextActionDispatcher.cs" />
     <Compile Remove="UI\Plots\DalamudPlotRenderer.cs" />
     <Compile Remove="UI\Tables\DalamudTableSelectionRenderer.cs" />

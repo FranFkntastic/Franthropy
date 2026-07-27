@@ -16,13 +16,26 @@ public sealed class AgentBridgeUiReviewRegistry
     private Dictionary<string, Entry> pending = new(StringComparer.Ordinal);
     private Dictionary<string, Entry> current = new(StringComparer.Ordinal);
     private readonly Dictionary<LeaseKey, ReviewedEntry> reviewed = [];
+    private readonly Dictionary<string, AgentBridgeActionDescriptor> actionCatalog = new(StringComparer.Ordinal);
     private long frameId;
+    private long catalogRevision = 1;
     private DateTimeOffset renderedAtUtc = DateTimeOffset.MinValue;
     private bool frameOpen;
 
     public AgentBridgeUiReviewRegistry(TimeSpan? validity = null)
     {
         this.validity = validity is { } configured && configured > TimeSpan.Zero ? configured : DefaultValidity;
+    }
+
+    public long CatalogRevision
+    {
+        get { lock (gate) return catalogRevision; }
+    }
+
+    public IReadOnlyList<AgentBridgeActionDescriptor> ActionCatalog()
+    {
+        lock (gate)
+            return actionCatalog.Values.OrderBy(action => action.Id, StringComparer.Ordinal).ToArray();
     }
 
     public void BeginFrame()
@@ -76,6 +89,35 @@ public sealed class AgentBridgeUiReviewRegistry
         string? value,
         AgentBridgeActionArgumentSchema? arguments,
         Func<JsonElement?, AgentBridgeUiActionResult> invoke)
+        => Register(
+            id,
+            label,
+            kind,
+            min,
+            max,
+            enabled,
+            selected,
+            value,
+            arguments,
+            surfaceId: null,
+            mutating: true,
+            completionOperationKind: null,
+            invoke);
+
+    public void Register(
+        string id,
+        string label,
+        AgentBridgeUiControlKind kind,
+        Vector2 min,
+        Vector2 max,
+        bool enabled,
+        bool selected,
+        string? value,
+        AgentBridgeActionArgumentSchema? arguments,
+        string? surfaceId,
+        bool mutating,
+        string? completionOperationKind,
+        Func<JsonElement?, AgentBridgeUiActionResult> invoke)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentException.ThrowIfNullOrWhiteSpace(label);
@@ -100,6 +142,22 @@ public sealed class AgentBridgeUiReviewRegistry
                     value,
                     arguments), invoke)))
                 throw new InvalidOperationException($"Review control '{id}' was registered more than once in the same frame.");
+            if (!string.IsNullOrWhiteSpace(surfaceId))
+            {
+                var descriptor = new AgentBridgeActionDescriptor(
+                    id,
+                    label,
+                    surfaceId,
+                    kind,
+                    mutating,
+                    arguments,
+                    completionOperationKind);
+                if (!actionCatalog.TryGetValue(id, out var existing) || !Equivalent(existing, descriptor))
+                {
+                    actionCatalog[id] = descriptor;
+                    catalogRevision++;
+                }
+            }
         }
     }
 
@@ -221,6 +279,25 @@ public sealed class AgentBridgeUiReviewRegistry
 
     private static bool Equivalent(IReadOnlyDictionary<string, Entry> left, IReadOnlyDictionary<string, Entry> right) =>
         left.Count == right.Count && left.All(pair => right.TryGetValue(pair.Key, out var other) && pair.Value.Control == other.Control);
+
+    private static bool Equivalent(AgentBridgeActionDescriptor left, AgentBridgeActionDescriptor right) =>
+        left with { Arguments = null } == right with { Arguments = null } &&
+        Equivalent(left.Arguments, right.Arguments);
+
+    private static bool Equivalent(AgentBridgeActionArgumentSchema? left, AgentBridgeActionArgumentSchema? right)
+    {
+        if (ReferenceEquals(left, right))
+            return true;
+        if (left is null || right is null ||
+            left.AllowAdditionalProperties != right.AllowAdditionalProperties ||
+            left.Properties.Count != right.Properties.Count)
+            return false;
+        return left.Properties.Zip(right.Properties).All(pair =>
+            pair.First with { AllowedValues = null } == pair.Second with { AllowedValues = null } &&
+            (ReferenceEquals(pair.First.AllowedValues, pair.Second.AllowedValues) ||
+             pair.First.AllowedValues is not null && pair.Second.AllowedValues is not null &&
+             pair.First.AllowedValues.SequenceEqual(pair.Second.AllowedValues, StringComparer.Ordinal)));
+    }
 
     private static bool IsFinite(Vector2 value) => float.IsFinite(value.X) && float.IsFinite(value.Y);
 

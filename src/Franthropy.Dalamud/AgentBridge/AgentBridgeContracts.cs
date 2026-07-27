@@ -69,6 +69,85 @@ public sealed record AgentBridgeActionDescriptor(
     AgentBridgeActionArgumentSchema? Arguments = null,
     string? CompletionOperationKind = null);
 
+/// <summary>How a discoverable plugin UI surface was found.</summary>
+public enum AgentBridgeSurfaceProvenance
+{
+    PluginDeclared,
+    ReviewedControlObserved,
+    DalamudPublicApi,
+    ReflectedWindowSystem,
+}
+
+/// <summary>The strongest operation the bridge is permitted to perform against a surface.</summary>
+public enum AgentBridgeSurfaceAuthority
+{
+    ReadOnly,
+    ReversiblePresentation,
+    ReviewedSemanticAction,
+}
+
+public enum AgentBridgePluginSurfaceKind
+{
+    MainUi,
+    ConfigurationUi,
+    Window,
+}
+
+/// <summary>A bounded, serialized observation of a plugin-owned UI surface.</summary>
+public sealed record AgentBridgePluginSurfaceDescriptor(
+    string Id,
+    string PluginInternalName,
+    string PluginName,
+    string Label,
+    AgentBridgePluginSurfaceKind Kind,
+    AgentBridgeSurfaceProvenance Provenance,
+    AgentBridgeSurfaceAuthority Authority,
+    bool Available,
+    string? RuntimeInstanceId = null,
+    string? WindowNamespace = null,
+    string? WindowName = null,
+    bool? IsOpen = null,
+    bool? IsFocused = null,
+    bool? IsCollapsed = null,
+    float? PositionX = null,
+    float? PositionY = null,
+    float? Width = null,
+    float? Height = null);
+
+/// <summary>Read-only inventory for one installed plugin and its discoverable UI entry points.</summary>
+public sealed record AgentBridgePluginDescriptor(
+    string InternalName,
+    string Name,
+    string Version,
+    bool IsLoaded,
+    bool IsDev,
+    bool HasMainUi,
+    bool HasConfigUi,
+    string? RuntimeInstanceId,
+    IReadOnlyList<AgentBridgePluginSurfaceDescriptor> Surfaces);
+
+public sealed record AgentBridgePluginSurfaceCatalog(
+    DateTimeOffset CapturedAtUtc,
+    long CatalogRevision,
+    IReadOnlyList<AgentBridgePluginDescriptor> Plugins);
+
+public sealed record AgentBridgePluginSurfacePresentationReceipt(
+    string TransactionId,
+    string PluginInternalName,
+    string SurfaceId,
+    string RuntimeInstanceId,
+    DateTimeOffset RequestedAtUtc,
+    DateTimeOffset ReadyAtUtc,
+    DateTimeOffset ExpiresAtUtc,
+    AgentBridgePluginSurfaceDescriptor Before,
+    AgentBridgePluginSurfaceDescriptor Presented);
+
+public sealed record AgentBridgePluginSurfacePresentationResult(
+    bool Success,
+    string Message,
+    string? TransactionId = null,
+    AgentBridgePluginSurfaceDescriptor? Restored = null);
+
 public enum AgentBridgeActionArgumentKind
 {
     String,
@@ -149,7 +228,8 @@ public sealed record AgentBridgeManifest(
     IReadOnlyList<AgentBridgeCapabilityDescriptor> Capabilities,
     IReadOnlyList<AgentBridgeReviewSurfaceDescriptor> ReviewSurfaces,
     IReadOnlyList<AgentBridgeCaptureSurfaceDescriptor> CaptureSurfaces,
-    IReadOnlyList<AgentBridgeActionDescriptor> Actions);
+    IReadOnlyList<AgentBridgeActionDescriptor> Actions,
+    long CatalogRevision = 1);
 
 public enum AgentBridgeOperationState
 {
@@ -197,6 +277,8 @@ public sealed record AgentBridgeCaptureReceipt
     public required string Sha256 { get; init; }
     public required int ProcessId { get; init; }
     public required string Scope { get; init; }
+    public string? CaptureMethod { get; init; }
+    public uint? ViewportId { get; init; }
 }
 
 /// <summary>Current-user DPAPI helpers. Callers own the returned buffers and must clear secret bytes when finished.</summary>
