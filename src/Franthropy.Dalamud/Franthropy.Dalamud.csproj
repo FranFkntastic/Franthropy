@@ -99,6 +99,8 @@
     <Compile Remove="AgentBridge\DalamudRenderedUiTextActionDispatcher.cs" />
     <Compile Remove="UI\Plots\DalamudPlotRenderer.cs" />
     <Compile Remove="UI\Tables\DalamudTableSelectionRenderer.cs" />
+    <Compile Remove="Diagnostics\DalamudConditionTrustProbe.cs" />
+    <Compile Remove="Diagnostics\DalamudRenderControl.cs" />
     <Compile Remove="Travel\DalamudLifestreamObjectInteractor.cs" />
     <Compile Remove="Travel\DalamudLifestreamPropertyTravel.cs" />
     <Compile Remove="Travel\DalamudLifestreamLogin.cs" />
