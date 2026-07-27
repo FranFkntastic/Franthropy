@@ -129,7 +129,10 @@ public static class DalamudItemAutocompleteRenderer
                 ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoNav))
         {
             ownerSurface.KeepCurrentWindowAboveOwner();
-            if (!inputActive || results.Count == 0)
+            var popupHovered = ImGui.IsWindowHovered(
+                ImGuiHoveredFlags.RootAndChildWindows |
+                ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+            if ((!inputActive && !popupHovered) || results.Count == 0)
             {
                 ImGui.CloseCurrentPopup();
                 ImGui.EndPopup();
