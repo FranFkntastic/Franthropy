@@ -81,6 +81,7 @@
     <Compile Remove="Automation\Retainers\DalamudSummoningBellInteractor.cs" />
     <Compile Remove="Automation\Retainers\DalamudRetainerAutomationSession.cs" />
     <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.cs" />
+    <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.PositionFrameShadow.cs" />
     <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.WarmSessionProbe.cs" />
     <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.YieldProbe.cs" />
     <Compile Remove="Automation\Retainers\RetainerAutomationContracts.cs" />

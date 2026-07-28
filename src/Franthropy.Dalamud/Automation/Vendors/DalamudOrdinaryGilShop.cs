@@ -12,23 +12,50 @@ namespace Franthropy.Dalamud.Automation.Vendors;
 
 public sealed class DalamudGilVendorAccessReader
 {
+    private static readonly TimeSpan AssessmentLifetime = TimeSpan.FromSeconds(1);
     private readonly IClientState clientState;
     private readonly IPlayerState playerState;
     private readonly IObjectTable objectTable;
+    private readonly Func<DateTimeOffset> utcNow;
+    private readonly Dictionary<(uint NpcId, uint ShopId, uint TerritoryId), CachedAssessment> assessments = [];
+    private IReadOnlySet<uint>? cachedAetherytes;
+    private DateTimeOffset aetherytesObservedAt;
+    private uint cachedTerritory;
 
     public DalamudGilVendorAccessReader(
         IClientState clientState,
         IPlayerState playerState,
-        IObjectTable objectTable)
+        IObjectTable objectTable,
+        Func<DateTimeOffset>? utcNow = null)
     {
         this.clientState = clientState;
         this.playerState = playerState;
         this.objectTable = objectTable;
+        this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
 
     public GilVendorAccessAssessment Assess(GilVendorOffer offer)
     {
         ArgumentNullException.ThrowIfNull(offer);
+        if (cachedTerritory != clientState.TerritoryType)
+        {
+            cachedTerritory = clientState.TerritoryType;
+            assessments.Clear();
+        }
+        var key = (offer.NpcId, offer.ShopId, offer.TerritoryId);
+        if (assessments.TryGetValue(key, out var cached) &&
+            utcNow() - cached.ObservedAt < AssessmentLifetime)
+        {
+            return cached.Assessment;
+        }
+
+        var assessment = AssessCore(offer);
+        assessments[key] = new(utcNow(), assessment);
+        return assessment;
+    }
+
+    private GilVendorAccessAssessment AssessCore(GilVendorOffer offer)
+    {
         if (!playerState.IsLoaded)
             return new(GilVendorAccessState.Unknown, "PlayerStateUnavailable", "Character access state is not loaded.");
 
@@ -39,12 +66,27 @@ public sealed class DalamudGilVendorAccessReader
                 : new(GilVendorAccessState.Probeable, "CurrentTerritory", "The vendor is in the current territory and will be verified before spending.");
         }
 
-        if (!TryReadAttunedAetherytes(out var attuned))
+        if (!TryReadCachedAttunedAetherytes(out var attuned))
             return new(GilVendorAccessState.Unknown, "TeleportListUnavailable", "The character's live teleport destinations are unavailable.");
         var route = offer.RouteAetheryteIds.FirstOrDefault(attuned.Contains);
         return route == 0
             ? new(GilVendorAccessState.Unavailable, "NoAttunedRoute", "No attuned destination reaches this vendor territory.")
             : new(GilVendorAccessState.Probeable, "AttunedRoute", "An attuned destination can reach this vendor.", route);
+    }
+
+    private bool TryReadCachedAttunedAetherytes(out IReadOnlySet<uint> aetherytes)
+    {
+        if (cachedAetherytes is not null &&
+            utcNow() - aetherytesObservedAt < AssessmentLifetime)
+        {
+            aetherytes = cachedAetherytes;
+            return true;
+        }
+        if (!TryReadAttunedAetherytes(out aetherytes))
+            return false;
+        cachedAetherytes = aetherytes;
+        aetherytesObservedAt = utcNow();
+        return true;
     }
 
     public IGameObject? FindLiveNpc(GilVendorOffer offer)
@@ -83,6 +125,10 @@ public sealed class DalamudGilVendorAccessReader
         aetherytes = result;
         return true;
     }
+
+    private sealed record CachedAssessment(
+        DateTimeOffset ObservedAt,
+        GilVendorAccessAssessment Assessment);
 }
 
 public sealed class DalamudOrdinaryGilShop
