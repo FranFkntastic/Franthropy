@@ -80,6 +80,10 @@
     <Compile Remove="Automation\Inventory\DalamudItemContextActionUiTransaction.cs" />
     <Compile Remove="Automation\Retainers\DalamudSummoningBellInteractor.cs" />
     <Compile Remove="Automation\Retainers\DalamudRetainerAutomationSession.cs" />
+    <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.cs" />
+    <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.PositionFrameShadow.cs" />
+    <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.WarmSessionProbe.cs" />
+    <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.YieldProbe.cs" />
     <Compile Remove="Automation\Retainers\RetainerAutomationContracts.cs" />
     <Compile Remove="Automation\Ui\RenderedItemDetailTooltipRequest.cs" />
     <Compile Remove="Automation\Inventory\DalamudInventoryStackScanner.cs" />
@@ -98,12 +102,15 @@
     <Compile Remove="AgentBridge\ReflectedPluginWindowPresentationManager.cs" />
     <Compile Remove="AgentBridge\DalamudRenderedUiTextActionDispatcher.cs" />
     <Compile Remove="UI\Plots\DalamudPlotRenderer.cs" />
+    <Compile Remove="UI\Tables\DalamudTableProjection.cs" />
     <Compile Remove="UI\Tables\DalamudTableSelectionRenderer.cs" />
     <Compile Remove="Diagnostics\DalamudConditionTrustProbe.cs" />
     <Compile Remove="Diagnostics\DalamudRenderControl.cs" />
     <Compile Remove="Travel\DalamudLifestreamObjectInteractor.cs" />
     <Compile Remove="Travel\DalamudLifestreamPropertyTravel.cs" />
     <Compile Remove="Travel\DalamudLifestreamLogin.cs" />
+    <Compile Remove="Automation\Vendors\DalamudGilVendorCatalogBuilder.cs" />
+    <Compile Remove="Automation\Vendors\DalamudOrdinaryGilShop.cs" />
   </ItemGroup>
 
 </Project>

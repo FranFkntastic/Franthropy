@@ -25,6 +25,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\..\benchmarks\Franthropy.Dalamud.Benchmarks\EquipmentExactFrontierRepresentativeWorkload.cs"
+             Link="Equipment\EquipmentExactFrontierRepresentativeWorkload.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="Dalamud">
       <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\Dalamud.dll</HintPath>
       <Private>true</Private>
