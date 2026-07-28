@@ -93,7 +93,7 @@ public sealed class FfxivFilterCatalogTests
             .UseDefaultText(Vocabulary.ItemName, _ => Evidence.Known("Owned Blade"))
             .Build("ffxiv.item-instances", "1");
 
-        var compilation = FilterCompiler.Compile<Instance>("-owned", context);
+        var compilation = FilterCompiler.Compile<Instance>("NOT owned", context);
 
         Assert.True(compilation.IsValid);
         Assert.False(compilation.Matches(new Instance(Cuirass, 1, [], FfxivItemQuality.NQ, 1, FfxivStorageLocation.Inventory)));

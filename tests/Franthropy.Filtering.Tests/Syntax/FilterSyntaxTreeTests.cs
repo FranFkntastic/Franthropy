@@ -155,14 +155,41 @@ public sealed class FilterSyntaxTreeTests
     [Fact]
     public void Formatter_PreservesHumanSpellingAndPrecedence()
     {
-        var tree = FilterSyntaxTree.Parse("-unique (job:WHM||job:SCH) ilvl>=660");
+        var tree = FilterSyntaxTree.Parse("-unique:true (job:WHM||job:SCH) ilvl>=660");
 
         var formatted = FilterFormatter.Format(tree);
         var reparsed = FilterSyntaxTree.Parse(formatted);
 
-        Assert.Equal("-unique (job:WHM || job:SCH) ilvl>=660", formatted);
+        Assert.Equal("-unique:true (job:WHM || job:SCH) ilvl>=660", formatted);
         Assert.False(reparsed.HasErrors);
         Assert.Equal(formatted, FilterFormatter.Format(reparsed));
+    }
+
+    [Theory]
+    [InlineData("-class")]
+    [InlineData("shark-class")]
+    [InlineData("modified-shark-class")]
+    public void HyphenatedPlainText_RemainsOneLiteralSearchTerm(string expression)
+    {
+        var tree = FilterSyntaxTree.Parse(expression);
+
+        Assert.False(tree.HasErrors);
+        var freeText = Assert.IsType<FilterFreeTextSyntax>(tree.Root.Expression);
+        Assert.Equal(expression, freeText.Text.Value);
+        Assert.Equal(expression, FilterFormatter.Format(tree));
+    }
+
+    [Theory]
+    [InlineData("-name:iron")]
+    [InlineData("-is:equipped")]
+    [InlineData("-unknown(price)")]
+    [InlineData("-(iron OR steel)")]
+    public void MinusStillNegatesStructuredExpressions(string expression)
+    {
+        var tree = FilterSyntaxTree.Parse(expression);
+
+        Assert.False(tree.HasErrors);
+        Assert.IsType<FilterUnaryExpressionSyntax>(tree.Root.Expression);
     }
 
     [Theory]

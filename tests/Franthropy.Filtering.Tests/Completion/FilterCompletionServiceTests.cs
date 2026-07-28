@@ -29,9 +29,9 @@ public sealed class FilterCompletionServiceTests
     }
 
     [Fact]
-    public void Complete_PreservesUnaryNegationWhileReplacingTheFieldPrefix()
+    public void Complete_PreservesExplicitUnaryNegationWhileReplacingTheFieldPrefix()
     {
-        var result = FilterCompletionService.Complete(Context, new("test", "-qua", 4));
+        var result = FilterCompletionService.Complete(Context, new("test", "!qua", 4));
 
         var field = Assert.Single(result.Items, item => item.Kind == FilterCompletionKind.Field && item.Label == "quality");
         Assert.Equal(new(1, 3), field.ReplacementSpan);
