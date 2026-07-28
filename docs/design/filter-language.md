@@ -107,7 +107,7 @@ darksteel ilvl>=50 acquisition.source:craft
 slot:ring (job:WHM | job:SCH) -is:equipped
 offer.source:vendor price<5000
 world:Siren quantity>=20 is:hq
--darksteel location:(inventory | retainer) condition<100
+NOT darksteel location:(inventory | retainer) condition<100
 acquisition.source:vendor is:nq
 ```
 
@@ -120,7 +120,8 @@ The first expression means that the default text fields contain `darksteel`, ite
 | `a b` | `a AND b` |
 | `a AND b`, `a && b` | both expressions must match |
 | `a OR b`, `a \| b` | either expression may match |
-| `NOT a`, `!a`, `-a` | negate an expression; `-darksteel` excludes the default-name match |
+| `NOT a`, `!a` | negate any expression; `NOT darksteel` excludes the default-name match |
+| `-field:value`, `-(...)` | compact negation for structured expressions; a hyphen in plain text remains literal |
 | `( ... )` | explicit grouping |
 | `field:value` | concise, type-appropriate direct match; text and explicitly searchable name fields use record-level fuzzy containment, while other typed and named values resolve exactly |
 | `field=value`, `field!=value` | fuzzy match or its negation; finite vocabularies accept a partial only when it resolves uniquely |
@@ -170,7 +171,9 @@ The normative grammar will live beside parser tests; this sketch defines the int
 query          = or-expression , EOF ;
 or-expression  = and-expression , { OR , and-expression } ;
 and-expression = unary-expression , { ( AND | implicit-AND ) , unary-expression } ;
-unary-expression = [ NOT | "!" | "-" ] , primary ;
+unary-expression = [ NOT | "!" ] , primary
+                 | "-" , structured-primary
+                 | primary ;
 primary        = "(" , or-expression , ")"
                | function-call
                | field-expression
@@ -183,6 +186,8 @@ range          = [ scalar ] , ".." , [ scalar ] ;
 value-list     = "(" , scalar , { "|" , scalar } , ")" ;
 function-call  = ( "known" | "unknown" ) , "(" , field-name , ")" ;
 ```
+
+The compact `-` form is recognized only before a structured field expression, function call, quoted value, or parenthesized expression. In ordinary text, hyphens remain part of the search term, so `-class`, `shark-class`, and `modified-shark-class` all use literal substring matching.
 
 The shape `qualifier:domain:specifier` is reserved for future parameterized namespaces, following forms such as `stat:range:>=50`. V1 parses that shape and emits a focused reserved-syntax diagnostic; it does not assign ceremonial meanings such as `is:quality:hq`. This reservation prevents a consumer from claiming an incompatible ad hoc interpretation before a real nested domain exists.
 
@@ -216,7 +221,7 @@ Field access returns `Known(value)` or `Unknown(reason)`. Unknown is distinct fr
 - **Unavailable** is a compile-time context error: this record type cannot answer the field.
 - **Unknown** is a per-record value: the context supports the field, but this observation lacks evidence.
 
-Evaluation uses three-valued logic (`true`, `false`, `unknown`). Only `true` records pass the filter. Negating an unknown result remains unknown, so `-tradable` cannot accidentally include items whose tradability was never observed. Users can deliberately select incomplete records with `unknown(tradable)`.
+Evaluation uses three-valued logic (`true`, `false`, `unknown`). Only `true` records pass the filter. Negating an unknown result remains unknown, so `NOT tradable:true` cannot accidentally include items whose tradability was never observed. Users can deliberately select incomplete records with `unknown(tradable)`.
 
 This matters especially for market snapshots, retainer observations, and partially loaded game data: absence of evidence must not become evidence of the opposite state.
 

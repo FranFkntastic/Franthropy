@@ -95,12 +95,26 @@ public sealed class FilterCompilerTests
     }
 
     [Fact]
-    public void BareWordsAndNegation_AlwaysUseDefaultTextSemantics()
+    public void BareWordsAndExplicitNegation_UseDefaultTextSemantics()
     {
         Assert.False(FilterCompiler.Compile<Item>("unique", Context).Matches(Sample));
-        Assert.True(FilterCompiler.Compile<Item>("-unique", Context).Matches(Sample));
-        Assert.True(FilterCompiler.Compile<Item>("-iron", Context).Matches(Sample));
-        Assert.False(FilterCompiler.Compile<Item>("-iron", Context).Matches(Sample with { Name = "Iron Ingot" }));
+        Assert.True(FilterCompiler.Compile<Item>("!unique", Context).Matches(Sample));
+        Assert.True(FilterCompiler.Compile<Item>("NOT iron", Context).Matches(Sample));
+        Assert.False(FilterCompiler.Compile<Item>("NOT iron", Context).Matches(Sample with { Name = "Iron Ingot" }));
+    }
+
+    [Theory]
+    [InlineData("-class")]
+    [InlineData("shark-class")]
+    [InlineData("ark-cla")]
+    public void HyphenatedFreeText_MatchesLiteralItemNameSubstrings(string expression)
+    {
+        var item = Sample with { Name = "Shark-class Pressure Hull" };
+        var compilation = FilterCompiler.Compile<Item>(expression, Context);
+
+        Assert.True(compilation.IsValid);
+        Assert.True(compilation.Matches(item));
+        Assert.False(compilation.Matches(item with { Name = "Shark Pressure Hull" }));
     }
 
     [Fact]
