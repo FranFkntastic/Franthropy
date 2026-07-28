@@ -96,9 +96,19 @@ public sealed class DalamudTableProjection<TRow>
         }
     }
 
-    public void DrawRow(TRow row)
+    public void DrawRow(
+        TRow row,
+        Vector4? background = null,
+        float minimumHeight = 0f)
     {
-        ImGui.TableNextRow();
+        ImGui.TableNextRow(ImGuiTableRowFlags.None, minimumHeight);
+        if (background is { } rowBackground)
+        {
+            ImGui.TableSetBgColor(
+                ImGuiTableBgTarget.RowBg0,
+                ImGui.GetColorU32(rowBackground));
+        }
+
         foreach (var column in columns)
         {
             ImGui.TableNextColumn();

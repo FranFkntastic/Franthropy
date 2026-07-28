@@ -51,16 +51,25 @@ public static class DalamudUiChrome
         Action? drawActions = null,
         float actionWidth = 0f)
     {
-        var markerSize = new Vector2(3f, ImGui.GetTextLineHeight() + 4f);
-        var markerMinimum = ImGui.GetCursorScreenPos();
-        ImGui.Dummy(markerSize);
-        ImGui.GetWindowDrawList().AddRectFilled(
-            markerMinimum,
-            markerMinimum + markerSize,
+        var minimum = ImGui.GetCursorScreenPos();
+        var height = ImGui.GetFrameHeight() + 4f;
+        var maximum = new Vector2(
+            minimum.X + ImGui.GetContentRegionAvail().X,
+            minimum.Y + height);
+        var drawList = ImGui.GetWindowDrawList();
+        drawList.AddRectFilled(
+            minimum,
+            maximum,
+            ImGui.GetColorU32(palette.SurfaceRaised),
+            2f);
+        drawList.AddRectFilled(
+            minimum,
+            new Vector2(minimum.X + 4f, maximum.Y),
             ImGui.GetColorU32(palette.Accent),
-            1.5f);
+            2f);
 
-        ImGui.SameLine();
+        ImGui.SetCursorScreenPos(new Vector2(minimum.X + 11f, minimum.Y + 2f));
+        ImGui.AlignTextToFramePadding();
         ImGui.TextColored(palette.Text, title);
         if (!string.IsNullOrWhiteSpace(detail))
         {
@@ -79,9 +88,8 @@ public static class DalamudUiChrome
             drawActions();
         }
 
-        ImGui.PushStyleColor(ImGuiCol.Separator, palette.Border);
-        ImGui.Separator();
-        ImGui.PopStyleColor();
+        ImGui.SetCursorScreenPos(new Vector2(minimum.X, maximum.Y));
+        ImGui.Dummy(new Vector2(0f, 3f));
     }
 
     public static void DrawStatusBand(
