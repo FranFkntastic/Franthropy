@@ -5,6 +5,7 @@ using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
+using Franthropy.Dalamud.Diagnostics;
 using NativeEventHandler = FFXIVClientStructs.FFXIV.Client.Game.Event.EventHandler;
 using NativeGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
 using Lumina.Excel.Sheets;
@@ -148,6 +149,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
     private readonly ITargetManager targetManager;
     private readonly IDataManager dataManager;
     private readonly DalamudTalkEventPacketTransport? talkPacketTransport;
+    private readonly string talkPacketTransportUnavailableReason = "The StartTalkEvent packet transport is unavailable.";
     private RemoteGeometrySnapshot? remoteGeometrySnapshot;
 
     public DalamudSummoningBellInteractor(
@@ -161,7 +163,16 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
         this.targetManager = targetManager;
         this.dataManager = dataManager;
         if (interopProvider is not null)
-            talkPacketTransport = new(interopProvider, sigScanner);
+        {
+            try
+            {
+                talkPacketTransport = new(interopProvider, sigScanner);
+            }
+            catch (GamePatchCompatibilityException exception)
+            {
+                talkPacketTransportUnavailableReason = exception.Message;
+            }
+        }
     }
 
     public unsafe SummoningBellInteractionResult TryInteract()
@@ -285,7 +296,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             return new(
                 SummoningBellInteractionState.Unavailable,
                 "TalkPacketTransportUnavailable",
-                "The StartTalkEvent packet transport is unavailable.",
+                talkPacketTransportUnavailableReason,
                 nearest.Object.GameObjectId,
                 nearest.Distance,
                 nearest.InteractionDistance);
@@ -450,7 +461,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             false,
             0,
             0,
-            "The StartTalkEvent packet transport is unavailable.");
+            talkPacketTransportUnavailableReason);
 
     public PositionFrameShadowObservation ArmPositionFrameShadow(
         Vector3 expectedPosition,
@@ -547,7 +558,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             return new(
                 false,
                 "TalkPacketTransportUnavailable",
-                "The normal-bell packet flight recorder is unavailable.",
+                talkPacketTransportUnavailableReason,
                 nearest.Object.GameObjectId,
                 0,
                 string.Empty,
@@ -624,7 +635,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             return new(
                 false,
                 "YieldPacketTransportUnavailable",
-                "The YieldEventScene2 packet transport is unavailable.",
+                talkPacketTransportUnavailableReason,
                 nearest.Object.GameObjectId,
                 0,
                 string.Empty,
@@ -689,7 +700,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             return NativeVerbUnavailable(
                 verb,
                 "NativeEventYieldTransportUnavailable",
-                "The native event-yield transport is unavailable.",
+                talkPacketTransportUnavailableReason,
                 nearest);
         }
 
@@ -816,7 +827,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             return new(
                 false,
                 "WarmSessionPacketTransportUnavailable",
-                "The warm-session packet transport is unavailable.",
+                talkPacketTransportUnavailableReason,
                 nearest.Object.GameObjectId,
                 0,
                 string.Empty,

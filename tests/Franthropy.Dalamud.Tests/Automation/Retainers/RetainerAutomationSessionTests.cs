@@ -142,7 +142,8 @@ public sealed class RetainerAutomationSessionTests
             CreateProxy<IPluginLog>(unused),
             CreateProxy<IObjectTable>(unused),
             CreateProxy<ITargetManager>(unused),
-            CreateProxy<ISigScanner>(unused));
+            CreateProxy<ISigScanner>(unused),
+            "2026.06.18.0000.0000");
 
         var open = session.OpenInventoryAsync(cancellation.Token);
 

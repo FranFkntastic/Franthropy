@@ -5,6 +5,7 @@ using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Franthropy.Dalamud.Automation.Inventory;
+using Franthropy.Dalamud.Diagnostics;
 using Lumina.Excel.Sheets;
 
 namespace Franthropy.Dalamud.Automation.Retainers;
@@ -19,6 +20,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private const string SelectString = "SelectString";
     private const string InventoryLarge = "InventoryRetainerLarge";
     private const string InventorySmall = "InventoryRetainer";
+    private const string ApprovedGameVersion = "2026.06.18.0000.0000";
+    private const string PatchContractId = "franthropy.retainer-ui-callbacks";
     private static readonly IReadOnlyList<InventoryType> PlayerOrdinaryItemContainers =
     [
         InventoryType.Inventory1,
@@ -33,6 +36,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private readonly DalamudRetainerCrystalTransfer crystals;
     private readonly DalamudRetainerItemTransfer items;
     private readonly DalamudRetainerItemRetrieval retrievals;
+    private readonly string? currentGameVersion;
     private RetainerAutomationTarget? active;
 
     public DalamudRetainerAutomationSession(
@@ -43,6 +47,19 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         IObjectTable objects,
         ITargetManager targets,
         ISigScanner sigScanner)
+        : this(framework, gameGui, dataManager, log, objects, targets, sigScanner, null)
+    {
+    }
+
+    internal DalamudRetainerAutomationSession(
+        IFramework framework,
+        IGameGui gameGui,
+        IDataManager dataManager,
+        IPluginLog log,
+        IObjectTable objects,
+        ITargetManager targets,
+        ISigScanner sigScanner,
+        string? currentGameVersion)
     {
         this.framework = framework;
         this.gameGui = gameGui;
@@ -51,6 +68,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         crystals = new(sigScanner, gameGui, framework, log);
         items = new(sigScanner, gameGui, framework, log);
         retrievals = new(sigScanner, gameGui, framework, log);
+        this.currentGameVersion = currentGameVersion;
     }
 
     /// <remarks>Read this property from the Dalamud framework thread.</remarks>
@@ -117,6 +135,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
     public async Task<RetainerAutomationResult> EnsureRetainerListAsync(CancellationToken cancellationToken = default)
     {
+        var compatibility = EvaluatePatchCompatibility();
+        if (!compatibility.IsApproved)
+            return RetainerAutomationResult.Failed(GamePatchCompatibility.FailureCode, compatibility.Message);
+
         var state = await framework.RunOnTick(
             () => (List: IsReady(RetainerList), Inventory: IsInventoryReady(), Menu: IsCommandMenuReady()),
             cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -147,6 +169,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
     public async Task<RetainerAutomationResult> OpenRetainerAsync(RetainerAutomationTarget target, CancellationToken cancellationToken = default)
     {
+        var compatibility = EvaluatePatchCompatibility();
+        if (!compatibility.IsApproved)
+            return RetainerAutomationResult.Failed(GamePatchCompatibility.FailureCode, compatibility.Message);
+
         active = null;
         if (target.RetainerId == 0 || string.IsNullOrWhiteSpace(target.RetainerName))
             return RetainerAutomationResult.Failed("RetainerIdentityRequired", "A stable retainer ID and name are required.");
@@ -167,6 +193,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
     public async Task<RetainerAutomationOpenResult> OpenFirstAvailableRetainerAsync(CancellationToken cancellationToken = default)
     {
+        var compatibility = EvaluatePatchCompatibility();
+        if (!compatibility.IsApproved)
+            return RetainerAutomationOpenResult.Failed(GamePatchCompatibility.FailureCode, compatibility.Message);
+
         active = null;
         var selected = await framework.RunOnTick(SelectFirstAvailableRetainer, cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!selected.Result.Success || string.IsNullOrWhiteSpace(selected.RetainerName))
@@ -190,6 +220,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
     public async Task<RetainerAutomationResult> OpenInventoryAsync(CancellationToken cancellationToken = default)
     {
+        var compatibility = EvaluatePatchCompatibility();
+        if (!compatibility.IsApproved)
+            return RetainerAutomationResult.Failed(GamePatchCompatibility.FailureCode, compatibility.Message);
+
         var selected = await framework.RunOnTick(() => SelectCommand(2378), cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!selected.Success)
             return selected;
@@ -305,6 +339,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
         active = null;
     }
+
+    private GamePatchCompatibility EvaluatePatchCompatibility() =>
+        GamePatchCompatibilityGate.Evaluate(PatchContractId, ApprovedGameVersion, currentGameVersion);
 
     private async Task<bool> WaitUntilAsync(Func<bool> predicate, CancellationToken cancellationToken)
     {

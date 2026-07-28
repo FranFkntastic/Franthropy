@@ -4,6 +4,7 @@ using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Franthropy.Dalamud.Automation.Inventory;
+using Franthropy.Dalamud.Diagnostics;
 
 namespace Franthropy.Dalamud.Automation.Retainers;
 
@@ -15,6 +16,8 @@ public sealed class DalamudRetainerItemTransfer
 {
     private const string InputNumericAddon = "InputNumeric";
     private const string RetainerItemCommandSignature = "48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 57 48 83 EC 30 48 8B 5C 24 ?? 41 8B F0";
+    private const string ApprovedGameVersion = "2026.06.18.0000.0000";
+    private const string PatchContractId = "franthropy.retainer-item-command";
     private static readonly IReadOnlySet<InventoryType> PlayerItemContainers = new HashSet<InventoryType>
     {
         InventoryType.Inventory1,
@@ -102,6 +105,10 @@ public sealed class DalamudRetainerItemTransfer
         DalamudInventoryStack stack,
         int requestedQuantity)
     {
+        var compatibility = GamePatchCompatibilityGate.Evaluate(PatchContractId, ApprovedGameVersion);
+        if (!compatibility.IsApproved)
+            return PendingRetainerItemTransfer.Fail(GamePatchCompatibility.FailureCode, compatibility.Message);
+
         if (!PlayerItemContainers.Contains(stack.Container) || requestedQuantity <= 0)
         {
             return PendingRetainerItemTransfer.Fail(

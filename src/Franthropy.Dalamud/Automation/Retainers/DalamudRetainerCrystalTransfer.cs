@@ -4,6 +4,7 @@ using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Franthropy.Dalamud.Automation.Inventory;
+using Franthropy.Dalamud.Diagnostics;
 
 namespace Franthropy.Dalamud.Automation.Retainers;
 
@@ -34,6 +35,8 @@ public sealed class DalamudRetainerCrystalTransfer
 {
     private const string InputNumericAddon = "InputNumeric";
     private const string RetainerItemCommandSignature = "48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 57 48 83 EC 30 48 8B 5C 24 ?? 41 8B F0";
+    private const string ApprovedGameVersion = "2026.06.18.0000.0000";
+    private const string PatchContractId = "franthropy.retainer-item-command";
 
     private readonly ISigScanner sigScanner;
     private readonly IGameGui gameGui;
@@ -124,6 +127,10 @@ public sealed class DalamudRetainerCrystalTransfer
         DalamudInventoryStack stack,
         int requestedQuantity)
     {
+        var compatibility = GamePatchCompatibilityGate.Evaluate(PatchContractId, ApprovedGameVersion);
+        if (!compatibility.IsApproved)
+            return PendingRetainerCrystalTransfer.Fail(GamePatchCompatibility.FailureCode, compatibility.Message);
+
         if (stack.Container != InventoryType.Crystals ||
             requestedQuantity <= 0 ||
             !ElementalCurrencyCatalog.IsElementalCurrency(stack.ItemId))

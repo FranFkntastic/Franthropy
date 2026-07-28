@@ -6,6 +6,7 @@ using FFXIVClientStructs.FFXIV.Application.Network;
 using FFXIVClientStructs.FFXIV.Client.Game.Event;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using FFXIVClientStructs.FFXIV.Client.Network;
+using Franthropy.Dalamud.Diagnostics;
 using ClientFramework = FFXIVClientStructs.FFXIV.Client.System.Framework.Framework;
 
 namespace Franthropy.Dalamud.Automation.Retainers;
@@ -36,6 +37,8 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
     private const int MaximumPreludeSamples = 512;
     private const double PreludeRecorderWindowMilliseconds = 5_000;
     private const nint EventTerminationReceiveRva = 0xB2DF50;
+    private const string ApprovedGameVersion = "2026.06.18.0000.0000";
+    private const string PatchContractId = "franthropy.talk-event-packet-transport";
 
     private readonly Hook<ZoneClient.Delegates.SendPacket> sendPacketHook;
     private readonly Hook<PacketDispatcher.Delegates.OnReceivePacket> receivePacketHook;
@@ -69,6 +72,8 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         IGameInteropProvider interopProvider,
         ISigScanner? sigScanner = null)
     {
+        GamePatchCompatibilityGate.Require(PatchContractId, ApprovedGameVersion);
+
         if (sigScanner is not null)
         {
             try

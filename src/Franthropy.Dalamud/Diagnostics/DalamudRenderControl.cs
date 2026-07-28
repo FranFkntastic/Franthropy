@@ -14,6 +14,8 @@ namespace Franthropy.Dalamud.Diagnostics;
 public sealed unsafe class DalamudRenderControl : IDisposable
 {
     private static readonly IntPtr ActiveRenderFlagOffset = new(0x38358);
+    private const string ApprovedGameVersion = "2026.06.18.0000.0000";
+    private const string PatchContractId = "franthropy.render-manager-active-flag";
 
     private readonly IPluginLog log;
     private bool disabledByThisService;
@@ -112,6 +114,13 @@ public sealed unsafe class DalamudRenderControl : IDisposable
         manager = null;
         flagPointer = null;
         error = string.Empty;
+
+        var compatibility = GamePatchCompatibilityGate.Evaluate(PatchContractId, ApprovedGameVersion);
+        if (!compatibility.IsApproved)
+        {
+            error = compatibility.Message;
+            return false;
+        }
 
         try
         {
