@@ -244,6 +244,70 @@ public sealed class DalamudRenderedUiTextActionDispatcher
     }
 
     /// <summary>
+    /// Activates one verified row index through the addon's standard list-item event machinery.
+    /// The caller owns the semantic proof that the index still identifies the intended object.
+    /// </summary>
+    public unsafe RenderedUiTextActionResult TryActivateListRowIndex(string addonName, int rowIndex)
+    {
+        if (string.IsNullOrWhiteSpace(addonName) || rowIndex < 0)
+            return Fail("InvalidRenderedListAction", "Addon name and a non-negative row index are required.", addonName);
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
+        if (addon == null)
+            addon = FindVisibleLoadedAddon(addonName);
+        if (addon == null || addon->RootNode == null || !addon->RootNode->IsVisible() || !addon->IsReady)
+            return Fail("RenderedAddonUnavailable", $"The rendered {addonName} addon is unavailable.", addonName);
+
+        var matches = new List<(nint ListNode, nint RowNode)>();
+        FindListRows(&addon->UldManager, rowIndex, matches, new HashSet<nint>());
+        matches = [.. matches.GroupBy(match => match.ListNode).Select(group => group.First())];
+        if (matches.Count != 1)
+        {
+            var candidates = new List<string>();
+            foreach (var match in matches)
+            {
+                var candidateListNode = (AtkComponentNode*)match.ListNode;
+                var candidateList = (AtkComponentList*)candidateListNode->Component;
+                candidates.Add($"node {candidateListNode->AtkResNode.NodeId}, length {candidateList->ListLength}");
+            }
+            return Fail(
+                matches.Count == 0 ? "RenderedListRowNotFound" : "RenderedListRowAmbiguous",
+                matches.Count == 0
+                    ? $"No visible standard list row exists at index {rowIndex}."
+                    : $"More than one visible standard list exposes row index {rowIndex}: {string.Join("; ", candidates)}.",
+                addonName);
+        }
+
+        var listNode = (AtkComponentNode*)matches[0].ListNode;
+        var rowNode = (AtkComponentNode*)matches[0].RowNode;
+        var list = (AtkComponentList*)listNode->Component;
+        var row = (AtkComponentListItemRenderer*)rowNode->Component;
+        list->SelectItem(rowIndex, true);
+        if (list->SelectedItemIndex != rowIndex)
+            return Fail("RenderedListSelectionRejected", "The rendered list rejected the requested row selection.", addonName);
+
+        var eventData = new AtkEventData();
+        var mouseData = new AtkEventData.AtkMouseData();
+        list->PopulateAtkListItemData(
+            &eventData.ListItemData,
+            &mouseData,
+            checked((uint)rowIndex),
+            AtkEventType.ListItemClick);
+        if (!list->DispatchEvent(
+                AtkEventType.ListItemClick,
+                null,
+                &eventData,
+                checked((uint)rowIndex),
+                false))
+            return Fail("RenderedListEventRejected", "The rendered list rejected its standard item-click event.", addonName);
+        return new(
+            true,
+            "RenderedListRowActivated",
+            $"Activated the verified rendered list row at index {row->ListItemIndex} through its owning list.",
+            addonName,
+            null);
+    }
+
+    /// <summary>
     /// Activates one retainer through the RetainerList addon's supported callback contract after
     /// proving that its name is rendered exactly once and resolving the owning list row. This is
     /// deliberately narrower than an arbitrary addon callback API: rendered UI supplies identity,
@@ -477,6 +541,42 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             return false;
         registered->Listener->ReceiveEvent(eventType, (int)registered->Param, registered, &data);
         return true;
+    }
+
+    private static unsafe void FindListRows(
+        AtkUldManager* manager,
+        int rowIndex,
+        List<(nint ListNode, nint RowNode)> matches,
+        HashSet<nint> visited)
+    {
+        if (manager == null || manager->NodeList == null || !visited.Add((nint)manager))
+            return;
+
+        for (var index = 0; index < manager->NodeListCount; index++)
+        {
+            var node = manager->NodeList[index];
+            var componentNode = node == null ? null : node->GetAsAtkComponentNode();
+            if (componentNode == null || componentNode->Component == null)
+                continue;
+
+            if (componentNode->Component->GetComponentType() == ComponentType.List && IsEffectivelyVisible(node))
+            {
+                var listManager = &componentNode->Component->UldManager;
+                for (var childIndex = 0; childIndex < listManager->NodeListCount; childIndex++)
+                {
+                    var child = listManager->NodeList[childIndex];
+                    var rowNode = child == null ? null : child->GetAsAtkComponentNode();
+                    if (rowNode == null || rowNode->Component == null ||
+                        rowNode->Component->GetComponentType() != ComponentType.ListItemRenderer ||
+                        !IsEffectivelyVisible(child))
+                        continue;
+                    if (((AtkComponentListItemRenderer*)rowNode->Component)->ListItemIndex == rowIndex)
+                        matches.Add(((nint)componentNode, (nint)rowNode));
+                }
+            }
+
+            FindListRows(&componentNode->Component->UldManager, rowIndex, matches, visited);
+        }
     }
 
     private static unsafe bool Dispatch(AtkUnitBase* addon, AtkComponentNode* componentNode, AtkComponentNode* parentComponentNode, AtkResNode* node, AtkEventType eventType)

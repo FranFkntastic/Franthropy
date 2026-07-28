@@ -122,6 +122,29 @@ public sealed class RetainerAutomationSessionTests
             retainerBefore,
             retainerAfter));
 
+    [Theory]
+    [InlineData(100, 2, false, 44, true)]
+    [InlineData(101, 2, false, 44, false)]
+    [InlineData(100, 3, false, 44, false)]
+    [InlineData(100, 2, true, 44, false)]
+    [InlineData(100, 2, false, 45, false)]
+    public void MarketListingObservation_RequiresTheCompletePhysicalListingIdentity(
+        uint observedItemId,
+        int observedQuantity,
+        bool observedIsHq,
+        ulong observedUnitPrice,
+        bool expected)
+    {
+        var listing = new RetainerMarketListingTarget(3, 100, 2, false, 44);
+
+        Assert.Equal(expected, RetainerMarketListingObservation.Matches(
+            listing,
+            observedItemId,
+            observedQuantity,
+            observedIsHq,
+            observedUnitPrice));
+    }
+
     [Fact]
     public async Task Session_PropagatesCancellationIntoFrameworkWork()
     {
@@ -143,7 +166,7 @@ public sealed class RetainerAutomationSessionTests
             CreateProxy<IObjectTable>(unused),
             CreateProxy<ITargetManager>(unused),
             CreateProxy<ISigScanner>(unused),
-            "2026.06.18.0000.0000");
+            "2026.07.16.0001.0000");
 
         var open = session.OpenInventoryAsync(cancellation.Token);
 
