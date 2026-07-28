@@ -14,6 +14,7 @@ public sealed class AgentBridgeUiCaptureTransactionManager
     private readonly Action<bool> setWindowOpen;
     private readonly Func<bool> isWindowCollapsed;
     private readonly Action<bool> requestWindowCollapsed;
+    private readonly Action<bool, bool> restoreWindowCollapseState;
     private readonly Action? beginPresentation;
     private readonly Action? restorePresentation;
     private readonly TimeSpan lifetime;
@@ -25,6 +26,7 @@ public sealed class AgentBridgeUiCaptureTransactionManager
         Action<bool> setWindowOpen,
         Func<bool> isWindowCollapsed,
         Action<bool> requestWindowCollapsed,
+        Action<bool, bool> restoreWindowCollapseState,
         TimeSpan? lifetime = null,
         Action? beginPresentation = null,
         Action? restorePresentation = null,
@@ -34,6 +36,7 @@ public sealed class AgentBridgeUiCaptureTransactionManager
         this.setWindowOpen = setWindowOpen ?? throw new ArgumentNullException(nameof(setWindowOpen));
         this.isWindowCollapsed = isWindowCollapsed ?? throw new ArgumentNullException(nameof(isWindowCollapsed));
         this.requestWindowCollapsed = requestWindowCollapsed ?? throw new ArgumentNullException(nameof(requestWindowCollapsed));
+        this.restoreWindowCollapseState = restoreWindowCollapseState ?? throw new ArgumentNullException(nameof(restoreWindowCollapseState));
         this.beginPresentation = beginPresentation;
         this.restorePresentation = restorePresentation;
         this.lifetime = lifetime is { } configured && configured > TimeSpan.Zero ? configured : DefaultLifetime;
@@ -136,8 +139,7 @@ public sealed class AgentBridgeUiCaptureTransactionManager
         if (readyFailure != null)
             transaction.Ready.TrySetException(readyFailure);
         setWindowOpen(transaction.WasOpen);
-        if (transaction.WasOpen)
-            requestWindowCollapsed(transaction.WasCollapsed);
+        restoreWindowCollapseState(transaction.WasOpen, transaction.WasCollapsed);
         restorePresentation?.Invoke();
         active = null;
     }
