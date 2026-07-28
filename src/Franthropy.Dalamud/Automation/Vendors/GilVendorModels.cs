@@ -80,6 +80,22 @@ public sealed record GilVendorShopReadResult(
         new(false, code, message, []);
 }
 
+public sealed record GilVendorMenuAdvanceResult(
+    bool MenuPresented,
+    bool Advanced,
+    string Code,
+    string Message)
+{
+    public static GilVendorMenuAdvanceResult NotPresented() =>
+        new(false, false, "NoMenu", "No vendor menu is presented.");
+
+    public static GilVendorMenuAdvanceResult Selected(string entry) =>
+        new(true, true, "Selected", $"Selected vendor menu entry '{entry}'.");
+
+    public static GilVendorMenuAdvanceResult NoMatchingEntry() =>
+        new(true, false, "OfferUnavailable", "The reached vendor did not present the reviewed shop.");
+}
+
 public sealed record GilVendorShopMatchResult(
     bool IsSuccess,
     string Code,

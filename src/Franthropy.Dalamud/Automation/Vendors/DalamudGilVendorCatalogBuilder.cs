@@ -24,12 +24,23 @@ public static class DalamudGilVendorCatalogBuilder
         {
             foreach (var data in npc.ENpcData)
             {
-                if (!gilShopIds.Contains(data.RowId))
+                if (data.Is<GilShop>() && gilShopIds.Contains(data.RowId))
+                {
+                    AddShopNpc(shopNpcs, data.RowId, npc.RowId);
                     continue;
-                if (!shopNpcs.TryGetValue(data.RowId, out var npcs))
-                    shopNpcs[data.RowId] = npcs = [];
-                if (!npcs.Contains(npc.RowId))
-                    npcs.Add(npc.RowId);
+                }
+                if (data.Is<PreHandler>() &&
+                    data.TryGetValue(out PreHandler preHandler) &&
+                    preHandler.Target.Is<GilShop>() &&
+                    gilShopIds.Contains(preHandler.Target.RowId))
+                {
+                    AddShopNpc(shopNpcs, preHandler.Target.RowId, npc.RowId);
+                    continue;
+                }
+                if (!data.Is<TopicSelect>() || !data.TryGetValue(out TopicSelect topic))
+                    continue;
+                foreach (var shop in topic.Shop.Where(value => value.Is<GilShop>() && gilShopIds.Contains(value.RowId)))
+                    AddShopNpc(shopNpcs, shop.RowId, npc.RowId);
             }
         }
 
@@ -102,6 +113,14 @@ public static class DalamudGilVendorCatalogBuilder
         }
 
         return GilVendorCatalog.Create(offers);
+    }
+
+    private static void AddShopNpc(Dictionary<uint, List<uint>> shopNpcs, uint shopId, uint npcId)
+    {
+        if (!shopNpcs.TryGetValue(shopId, out var npcs))
+            shopNpcs[shopId] = npcs = [];
+        if (!npcs.Contains(npcId))
+            npcs.Add(npcId);
     }
 
     private sealed record VendorLocation(uint TerritoryId, System.Numerics.Vector3 Position);
