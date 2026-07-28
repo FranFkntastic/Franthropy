@@ -3,12 +3,50 @@ using Dalamud.Bindings.ImGui;
 
 namespace Franthropy.Dalamud.UI.Tables;
 
+public enum DalamudTableCellAlignment
+{
+    Left,
+    Right,
+}
+
 public sealed record DalamudTableColumn<TRow>(
     string Label,
     float Width,
     Func<TRow, string> Text,
     Func<TRow, IComparable>? SortKey = null,
-    ImGuiTableColumnFlags Flags = ImGuiTableColumnFlags.WidthFixed);
+    ImGuiTableColumnFlags Flags = ImGuiTableColumnFlags.WidthFixed,
+    Action<TRow>? Draw = null,
+    Func<TRow, Vector4?>? TextColor = null,
+    DalamudTableCellAlignment Alignment = DalamudTableCellAlignment.Left);
+
+public readonly record struct DalamudTableLayout(
+    Vector2 Size,
+    ImGuiTableFlags Flags,
+    int FreezeColumns = 0,
+    int FreezeRows = 0)
+{
+    public const ImGuiTableFlags DefaultFlags =
+        ImGuiTableFlags.RowBg |
+        ImGuiTableFlags.Borders |
+        ImGuiTableFlags.Resizable |
+        ImGuiTableFlags.Reorderable |
+        ImGuiTableFlags.Hideable |
+        ImGuiTableFlags.Sortable;
+
+    public static DalamudTableLayout FitContent(ImGuiTableFlags flags) =>
+        new(Vector2.Zero, flags);
+
+    public static DalamudTableLayout Scrolling(
+        float height,
+        ImGuiTableFlags extraFlags = ImGuiTableFlags.None) =>
+        new(
+            new Vector2(0f, height),
+            DefaultFlags |
+            ImGuiTableFlags.ScrollY |
+            extraFlags,
+            FreezeColumns: 1,
+            FreezeRows: 1);
+}
 
 public sealed class DalamudTableProjection<TRow>
 {
@@ -30,14 +68,17 @@ public sealed class DalamudTableProjection<TRow>
 
     public bool Begin(string id, float height, ImGuiTableFlags extraFlags = ImGuiTableFlags.None)
     {
-        var flags = ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.ScrollY |
-                    ImGuiTableFlags.Resizable | ImGuiTableFlags.Reorderable | ImGuiTableFlags.Hideable |
-                    ImGuiTableFlags.Sortable | extraFlags;
-        if (!ImGui.BeginTable(id, columns.Count, flags, new Vector2(0, height)))
+        return Begin(id, DalamudTableLayout.Scrolling(height, extraFlags));
+    }
+
+    public bool Begin(string id, DalamudTableLayout layout)
+    {
+        if (!ImGui.BeginTable(id, columns.Count, layout.Flags, layout.Size))
             return false;
         foreach (var column in columns)
             ImGui.TableSetupColumn(column.Label, column.Flags, column.Width);
-        ImGui.TableSetupScrollFreeze(1, 1);
+        if (layout.FreezeColumns > 0 || layout.FreezeRows > 0)
+            ImGui.TableSetupScrollFreeze(layout.FreezeColumns, layout.FreezeRows);
         ImGui.TableHeadersRow();
         return true;
     }
@@ -52,6 +93,45 @@ public sealed class DalamudTableProjection<TRow>
             var current = filters[index];
             if (ImGui.InputTextWithHint($"##filter{index}", columns[index].Label, ref current, 64))
                 filters[index] = current;
+        }
+    }
+
+    public void DrawRow(
+        TRow row,
+        Vector4? background = null,
+        float minimumHeight = 0f)
+    {
+        ImGui.TableNextRow(ImGuiTableRowFlags.None, minimumHeight);
+        if (background is { } rowBackground)
+        {
+            ImGui.TableSetBgColor(
+                ImGuiTableBgTarget.RowBg0,
+                ImGui.GetColorU32(rowBackground));
+        }
+
+        foreach (var column in columns)
+        {
+            ImGui.TableNextColumn();
+            if (column.Draw is not null)
+            {
+                column.Draw(row);
+                continue;
+            }
+
+            var text = column.Text(row);
+            if (column.Alignment == DalamudTableCellAlignment.Right)
+            {
+                var width = ImGui.CalcTextSize(text).X;
+                ImGui.SetCursorPosX(
+                    Math.Max(
+                        ImGui.GetCursorPosX(),
+                        ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X - width));
+            }
+
+            if (column.TextColor?.Invoke(row) is { } color)
+                ImGui.TextColored(color, text);
+            else
+                ImGui.TextUnformatted(text);
         }
     }
 

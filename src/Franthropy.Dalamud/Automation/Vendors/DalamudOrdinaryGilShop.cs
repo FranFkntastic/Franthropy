@@ -6,6 +6,8 @@ using ECommons.Automation.UIInput;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
+using Franthropy.Dalamud.Automation.Retainers;
+using Lumina.Excel.Sheets;
 using ValueType = FFXIVClientStructs.FFXIV.Component.GUI.AtkValueType;
 
 namespace Franthropy.Dalamud.Automation.Vendors;
@@ -140,11 +142,21 @@ public sealed class DalamudGilVendorAccessReader
 public sealed class DalamudOrdinaryGilShop
 {
     private const string ShopAddon = "Shop";
+    private static readonly IReadOnlySet<string> EmptyMenuEntries = new HashSet<string>();
     private readonly IGameGui gameGui;
+    private readonly IReadOnlyDictionary<uint, IReadOnlySet<string>> menuEntriesByShopId;
 
     public DalamudOrdinaryGilShop(IGameGui gameGui)
     {
-        this.gameGui = gameGui;
+        this.gameGui = gameGui ?? throw new ArgumentNullException(nameof(gameGui));
+        menuEntriesByShopId = new Dictionary<uint, IReadOnlySet<string>>();
+    }
+
+    public DalamudOrdinaryGilShop(IGameGui gameGui, IDataManager dataManager)
+    {
+        this.gameGui = gameGui ?? throw new ArgumentNullException(nameof(gameGui));
+        ArgumentNullException.ThrowIfNull(dataManager);
+        menuEntriesByShopId = BuildMenuEntries(dataManager);
     }
 
     public unsafe bool IsOpen
@@ -179,6 +191,18 @@ public sealed class DalamudOrdinaryGilShop
         }
 
         return GilVendorShopReadResult.Success(rows);
+    }
+
+    public unsafe GilVendorMenuAdvanceResult TryAdvanceOfferMenu(GilVendorOffer offer)
+    {
+        ArgumentNullException.ThrowIfNull(offer);
+        if (!menuEntriesByShopId.TryGetValue(offer.ShopId, out var targets))
+            targets = EmptyMenuEntries;
+
+        var selectString = TrySelectRenderedMenuEntry("SelectString", entryStride: 1, targets);
+        if (selectString.MenuPresented)
+            return selectString;
+        return TrySelectRenderedMenuEntry("SelectIconString", entryStride: 3, targets);
     }
 
     public unsafe bool TrySubmitPurchase(GilVendorShopRow row, uint quantity, out string error)
@@ -242,4 +266,68 @@ public sealed class DalamudOrdinaryGilShop
                 return false;
         }
     }
+
+    private unsafe GilVendorMenuAdvanceResult TrySelectRenderedMenuEntry(
+        string addonName,
+        int entryStride,
+        IReadOnlySet<string> targets)
+    {
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
+        if (!IsPresented(addon) ||
+            addon->AtkValues == null ||
+            addon->AtkValuesCount <= 7 ||
+            addon->AtkValues[5].Type != ValueType.Int)
+        {
+            return GilVendorMenuAdvanceResult.NotPresented();
+        }
+
+        var entryCount = Math.Max(0, addon->AtkValues[5].Int);
+        for (var index = 0; index < entryCount; index++)
+        {
+            var valueIndex = 7 + (index * entryStride);
+            if (valueIndex >= addon->AtkValuesCount)
+                break;
+            var value = addon->AtkValues + valueIndex;
+            if (value->Type is not (ValueType.String or ValueType.ManagedString or ValueType.WideString or ValueType.ConstString))
+                continue;
+            var observed = value->GetValueAsString().Trim();
+            if (!targets.Any(target => RetainerUiAutomationText.IsSelectStringEntryMatch(observed, target)))
+                continue;
+            addon->FireCallbackInt(index);
+            return GilVendorMenuAdvanceResult.Selected(observed);
+        }
+        return GilVendorMenuAdvanceResult.NoMatchingEntry();
+    }
+
+    private static IReadOnlyDictionary<uint, IReadOnlySet<string>> BuildMenuEntries(IDataManager dataManager)
+    {
+        var entries = dataManager.GetExcelSheet<GilShop>()
+            .Where(row => row.RowId != 0)
+            .ToDictionary(
+                row => row.RowId,
+                row => new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        foreach (var shop in dataManager.GetExcelSheet<GilShop>())
+            AddMenuEntry(entries, shop.RowId, shop.Name.ExtractText().Trim());
+        foreach (var topic in dataManager.GetExcelSheet<TopicSelect>())
+        {
+            var topicName = topic.Name.ExtractText().Trim();
+            foreach (var shop in topic.Shop.Where(value => value.Is<GilShop>()))
+                AddMenuEntry(entries, shop.RowId, topicName);
+        }
+        return entries.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlySet<string>)pair.Value);
+    }
+
+    private static void AddMenuEntry(
+        IReadOnlyDictionary<uint, HashSet<string>> entries,
+        uint shopId,
+        string entry)
+    {
+        if (!string.IsNullOrWhiteSpace(entry) && entries.TryGetValue(shopId, out var names))
+            names.Add(entry);
+    }
+
+    private static unsafe bool IsPresented(AtkUnitBase* addon) =>
+        addon != null && addon->RootNode != null && addon->RootNode->IsVisible();
 }

@@ -64,7 +64,8 @@ public static class DalamudItemAutocompleteRenderer
         DalamudItemAutocompleteState state,
         Vector4 mutedColor,
         Vector4 successColor,
-        Vector4 errorColor)
+        Vector4 errorColor,
+        string placeholder = "Search item...")
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentNullException.ThrowIfNull(itemOptions);
@@ -89,7 +90,7 @@ public static class DalamudItemAutocompleteRenderer
         var previous = state.SearchBuffer;
         var current = state.SearchBuffer;
         ImGui.SetNextItemWidth(-1);
-        if (ImGui.InputTextWithHint($"##{id}ItemSearch", "Search item...", ref current, 160) &&
+        if (ImGui.InputTextWithHint($"##{id}ItemSearch", placeholder, ref current, 160) &&
             !string.Equals(previous, current, StringComparison.Ordinal))
         {
             state.SearchBuffer = current;
