@@ -108,31 +108,80 @@ public sealed class DalamudTableProjection<TRow>
                 ImGuiTableBgTarget.RowBg0,
                 ImGui.GetColorU32(rowBackground));
         }
+        DrawCells(row);
+    }
 
+    public bool DrawSelectableRow<TKey>(
+        TRow row,
+        TableSelectionModel<TKey> selection,
+        IReadOnlyList<TKey> orderedKeys,
+        int rowIndex,
+        string id,
+        Vector4? background = null,
+        float minimumHeight = 0f,
+        bool enabled = true)
+        where TKey : notnull
+    {
+        ImGui.TableNextRow(ImGuiTableRowFlags.None, minimumHeight);
+        if (background is { } rowBackground)
+        {
+            ImGui.TableSetBgColor(
+                ImGuiTableBgTarget.RowBg0,
+                ImGui.GetColorU32(rowBackground));
+        }
+
+        ImGui.TableNextColumn();
+        var cellCursor = ImGui.GetCursorPos();
+        DalamudTableSelectionRenderer.DrawRow(
+            selection,
+            orderedKeys,
+            rowIndex,
+            id,
+            new Vector2(0, Math.Max(minimumHeight, ImGui.GetTextLineHeightWithSpacing())),
+            enabled);
+        var clicked = enabled && ImGui.IsItemClicked(ImGuiMouseButton.Left);
+        ImGui.SetCursorPos(cellCursor);
+        DrawCell(columns[0], row);
+
+        for (var index = 1; index < columns.Count; index++)
+        {
+            ImGui.TableNextColumn();
+            DrawCell(columns[index], row);
+        }
+        return clicked;
+    }
+
+    private void DrawCells(TRow row)
+    {
         foreach (var column in columns)
         {
             ImGui.TableNextColumn();
-            if (column.Draw is not null)
-            {
-                column.Draw(row);
-                continue;
-            }
-
-            var text = column.Text(row);
-            if (column.Alignment == DalamudTableCellAlignment.Right)
-            {
-                var width = ImGui.CalcTextSize(text).X;
-                ImGui.SetCursorPosX(
-                    Math.Max(
-                        ImGui.GetCursorPosX(),
-                        ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X - width));
-            }
-
-            if (column.TextColor?.Invoke(row) is { } color)
-                ImGui.TextColored(color, text);
-            else
-                ImGui.TextUnformatted(text);
+            DrawCell(column, row);
         }
+    }
+
+    private static void DrawCell(DalamudTableColumn<TRow> column, TRow row)
+    {
+        if (column.Draw is not null)
+        {
+            column.Draw(row);
+            return;
+        }
+
+        var text = column.Text(row);
+        if (column.Alignment == DalamudTableCellAlignment.Right)
+        {
+            var width = ImGui.CalcTextSize(text).X;
+            ImGui.SetCursorPosX(
+                Math.Max(
+                    ImGui.GetCursorPosX(),
+                    ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X - width));
+        }
+
+        if (column.TextColor?.Invoke(row) is { } color)
+            ImGui.TextColored(color, text);
+        else
+            ImGui.TextUnformatted(text);
     }
 
     public unsafe IReadOnlyList<TRow> Apply(IEnumerable<TRow> rows, ImGuiTableSortSpecsPtr sortSpecs)
