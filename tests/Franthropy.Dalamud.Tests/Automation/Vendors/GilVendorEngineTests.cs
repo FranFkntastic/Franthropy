@@ -78,6 +78,23 @@ public sealed class GilVendorEngineTests
         Assert.Equal(GilVendorPurchaseEvidence.Indeterminate, mismatch.Evidence);
     }
 
+    [Fact]
+    public void Dynamic_location_fallback_only_scans_unresolved_npcs()
+    {
+        var unresolved = DalamudVendorLocationCatalogBuilder.FindUnresolvedNpcIds(
+            new HashSet<uint> { 10, 20, 30 },
+            [10u, 30u]);
+
+        Assert.Equal([20u], unresolved);
+        Assert.True(DalamudVendorLocationCatalogBuilder.TryBuildPlaneventPath(
+            "ex1/02_rvr/r1t1/level/r1t1",
+            out var path));
+        Assert.Equal("bg/ex1/02_rvr/r1t1/level/planevent.lgb", path);
+        Assert.False(DalamudVendorLocationCatalogBuilder.TryBuildPlaneventPath(
+            "common/invalid",
+            out _));
+    }
+
     private static GilVendorOffer Offer(
         uint itemId,
         uint npcId = 10,

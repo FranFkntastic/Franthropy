@@ -44,17 +44,9 @@ public static class DalamudGilVendorCatalogBuilder
             }
         }
 
-        var locations = dataManager.GetExcelSheet<Level>()
-            .Where(level => level.Object.RowId != 0 && level.Territory.RowId != 0)
-            .GroupBy(level => level.Object.RowId)
-            .ToDictionary(
-                group => group.Key,
-                group => group
-                    .Select(level => new VendorLocation(
-                        level.Territory.RowId,
-                        new((float)level.X, (float)level.Y, (float)level.Z)))
-                    .Distinct()
-                    .ToArray());
+        var locations = DalamudVendorLocationCatalogBuilder.Build(
+            dataManager,
+            shopNpcs.Values.SelectMany(npcs => npcs).ToHashSet());
         var routeAetherytes = dataManager.GetExcelSheet<Aetheryte>()
             .Where(row => row.IsAetheryte && row.Territory.RowId != 0)
             .GroupBy(row => row.Territory.RowId)
@@ -123,5 +115,4 @@ public static class DalamudGilVendorCatalogBuilder
             npcs.Add(npcId);
     }
 
-    private sealed record VendorLocation(uint TerritoryId, System.Numerics.Vector3 Position);
 }
