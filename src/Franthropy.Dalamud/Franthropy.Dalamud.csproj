@@ -104,6 +104,8 @@
     <Compile Remove="Travel\DalamudLifestreamObjectInteractor.cs" />
     <Compile Remove="Travel\DalamudLifestreamPropertyTravel.cs" />
     <Compile Remove="Travel\DalamudLifestreamLogin.cs" />
+    <Compile Remove="Automation\Vendors\DalamudGilVendorCatalogBuilder.cs" />
+    <Compile Remove="Automation\Vendors\DalamudOrdinaryGilShop.cs" />
   </ItemGroup>
 
 </Project>
