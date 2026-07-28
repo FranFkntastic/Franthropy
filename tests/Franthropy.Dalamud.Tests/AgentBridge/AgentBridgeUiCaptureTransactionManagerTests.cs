@@ -9,11 +9,27 @@ public sealed class AgentBridgeUiCaptureTransactionManagerTests
     {
         var open = false;
         var collapsed = true;
-        var manager = CreateManager(() => open, value => open = value, () => collapsed, value => collapsed = value);
+        bool? forcedCollapsed = null;
+        var manager = CreateManager(
+            () => open,
+            value => open = value,
+            () => collapsed,
+            value =>
+            {
+                forcedCollapsed = value;
+                collapsed = value;
+            },
+            (wasOpen, wasCollapsed) =>
+            {
+                forcedCollapsed = null;
+                if (wasOpen)
+                    collapsed = wasCollapsed;
+            });
 
         var handle = manager.Begin("main-window");
         Assert.True(open);
         Assert.False(collapsed);
+        Assert.False(forcedCollapsed);
         Assert.True(manager.ShouldPresentInMainViewport("main-window"));
 
         for (var frameId = 42; frameId <= 47; frameId++)
@@ -25,7 +41,27 @@ public sealed class AgentBridgeUiCaptureTransactionManagerTests
         var result = manager.Complete(handle.TransactionId);
         Assert.True(result.Success);
         Assert.False(open);
+        Assert.Null(forcedCollapsed);
         Assert.False(manager.ShouldPresentInMainViewport("main-window"));
+    }
+
+    [Fact]
+    public void CompletionAlwaysRestoresCollapsePresentationEvenWhenWindowWasClosed()
+    {
+        var open = false;
+        var collapsed = false;
+        (bool WasOpen, bool WasCollapsed)? restored = null;
+        var manager = CreateManager(
+            () => open,
+            value => open = value,
+            () => collapsed,
+            value => collapsed = value,
+            (wasOpen, wasCollapsed) => restored = (wasOpen, wasCollapsed));
+
+        var handle = manager.Begin("main-window");
+        Assert.True(manager.Complete(handle.TransactionId).Success);
+
+        Assert.Equal((false, false), restored);
     }
 
     [Fact]
@@ -64,7 +100,12 @@ public sealed class AgentBridgeUiCaptureTransactionManagerTests
     {
         var open = false;
         var collapsed = false;
-        var manager = CreateManager(() => open, value => open = value, () => collapsed, value => collapsed = value, TimeSpan.FromMilliseconds(1));
+        var manager = CreateManager(
+            () => open,
+            value => open = value,
+            () => collapsed,
+            value => collapsed = value,
+            lifetime: TimeSpan.FromMilliseconds(1));
         var handle = manager.Begin("main-window");
 
         await Task.Delay(20);
@@ -85,6 +126,7 @@ public sealed class AgentBridgeUiCaptureTransactionManagerTests
             value => open = value,
             () => collapsed,
             value => collapsed = value,
+            (_, _) => { },
             beginPresentation: () => began++,
             restorePresentation: () => restored++);
 
@@ -103,5 +145,17 @@ public sealed class AgentBridgeUiCaptureTransactionManagerTests
         Action<bool> setOpen,
         Func<bool> isCollapsed,
         Action<bool> setCollapsed,
-        TimeSpan? lifetime = null) => new(isOpen, setOpen, isCollapsed, setCollapsed, lifetime);
+        Action<bool, bool>? restoreCollapsed = null,
+        TimeSpan? lifetime = null) =>
+        new(
+            isOpen,
+            setOpen,
+            isCollapsed,
+            setCollapsed,
+            restoreCollapsed ?? ((wasOpen, wasCollapsed) =>
+            {
+                if (wasOpen)
+                    setCollapsed(wasCollapsed);
+            }),
+            lifetime);
 }
