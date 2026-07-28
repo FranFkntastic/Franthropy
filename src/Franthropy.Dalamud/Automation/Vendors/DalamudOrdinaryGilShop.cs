@@ -13,6 +13,7 @@ namespace Franthropy.Dalamud.Automation.Vendors;
 public sealed class DalamudGilVendorAccessReader
 {
     private static readonly TimeSpan AssessmentLifetime = TimeSpan.FromSeconds(1);
+    private const float MaximumLocationDistanceSquared = 30f * 30f;
     private readonly IClientState clientState;
     private readonly IPlayerState playerState;
     private readonly IObjectTable objectTable;
@@ -92,13 +93,14 @@ public sealed class DalamudGilVendorAccessReader
     public IGameObject? FindLiveNpc(GilVendorOffer offer)
     {
         ArgumentNullException.ThrowIfNull(offer);
-        return objectTable
+        var matches = objectTable
             .Where(obj =>
                 obj.ObjectKind == ObjectKind.EventNpc &&
                 obj.BaseId == offer.NpcId &&
-                obj.IsTargetable)
-            .OrderBy(obj => System.Numerics.Vector3.DistanceSquared(obj.Position, offer.Position))
-            .FirstOrDefault();
+                obj.IsTargetable &&
+                System.Numerics.Vector3.DistanceSquared(obj.Position, offer.Position) <= MaximumLocationDistanceSquared)
+            .ToArray();
+        return matches.Length == 1 ? matches[0] : null;
     }
 
     public unsafe bool TryTeleport(uint aetheryteId)
