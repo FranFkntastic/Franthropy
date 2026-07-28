@@ -36,8 +36,8 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
     private const double LifecycleRecorderWindowMilliseconds = 180_000;
     private const int MaximumPreludeSamples = 512;
     private const double PreludeRecorderWindowMilliseconds = 5_000;
-    private const nint EventTerminationReceiveRva = 0xB2DF50;
-    private const string ApprovedGameVersion = "2026.06.18.0000.0000";
+    private const nint EventTerminationReceiveRva = 0xB2ED80;
+    private const string ApprovedGameVersion = "2026.07.16.0001.0000";
     private const string PatchContractId = "franthropy.talk-event-packet-transport";
 
     private readonly Hook<ZoneClient.Delegates.SendPacket> sendPacketHook;

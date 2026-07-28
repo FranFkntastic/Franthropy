@@ -197,7 +197,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
     public PositionFrameShadowObservation ArmPositionFrameShadow(
         Vector3 expectedPosition,
         Vector3 hypotheticalPosition,
-        uint expectedOpcode = 0x2C6)
+        uint expectedOpcode = 0x1C8)
         => ArmPositionFrame(
             expectedPosition,
             hypotheticalPosition,
@@ -207,7 +207,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport
     public PositionFrameShadowObservation ArmPositionFrameSubstitution(
         Vector3 expectedPosition,
         Vector3 hypotheticalPosition,
-        uint expectedOpcode = 0x2C6)
+        uint expectedOpcode = 0x1C8)
         => ArmPositionFrame(
             expectedPosition,
             hypotheticalPosition,
