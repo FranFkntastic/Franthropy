@@ -22,6 +22,7 @@ public sealed class DalamudGilVendorAccessReader
     private IReadOnlySet<uint>? cachedAetherytes;
     private DateTimeOffset aetherytesObservedAt;
     private uint cachedTerritory;
+    private ulong cachedOwner;
 
     public DalamudGilVendorAccessReader(
         IClientState clientState,
@@ -38,10 +39,13 @@ public sealed class DalamudGilVendorAccessReader
     public GilVendorAccessAssessment Assess(GilVendorOffer offer)
     {
         ArgumentNullException.ThrowIfNull(offer);
-        if (cachedTerritory != clientState.TerritoryType)
+        if (cachedTerritory != clientState.TerritoryType ||
+            cachedOwner != playerState.ContentId)
         {
             cachedTerritory = clientState.TerritoryType;
+            cachedOwner = playerState.ContentId;
             assessments.Clear();
+            cachedAetherytes = null;
         }
         var key = (offer.NpcId, offer.ShopId, offer.TerritoryId);
         if (assessments.TryGetValue(key, out var cached) &&
