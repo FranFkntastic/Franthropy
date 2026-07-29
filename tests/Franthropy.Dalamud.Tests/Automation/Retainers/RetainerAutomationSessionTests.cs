@@ -46,17 +46,19 @@ public sealed class RetainerAutomationSessionTests
     }
 
     [Theory]
-    [InlineData(true, true, true, 42, 42, (int)RetainerOpeningAction.Complete)]
-    [InlineData(false, true, false, 42, 42, (int)RetainerOpeningAction.AdvanceTalk)]
-    [InlineData(false, true, false, 42, 99, (int)RetainerOpeningAction.RejectIdentity)]
-    [InlineData(false, true, false, 0, 42, (int)RetainerOpeningAction.Wait)]
-    [InlineData(false, false, true, 0, 42, (int)RetainerOpeningAction.Wait)]
+    [InlineData(true, true, true, 42, 42, false, (int)RetainerOpeningAction.Complete)]
+    [InlineData(false, true, false, 42, 42, false, (int)RetainerOpeningAction.AdvanceTalk)]
+    [InlineData(false, true, false, 42, 99, false, (int)RetainerOpeningAction.RejectIdentity)]
+    [InlineData(false, true, false, 0, 42, false, (int)RetainerOpeningAction.Wait)]
+    [InlineData(false, false, true, 0, 42, false, (int)RetainerOpeningAction.Wait)]
+    [InlineData(false, false, true, 0, 42, true, (int)RetainerOpeningAction.CompleteAtList)]
     public void RetainerOpening_AdvancesOnlyVerifiedTalk(
         bool menuReady,
         bool talkReady,
         bool listReady,
         ulong activeRetainerId,
         int expectedRetainerId,
+        bool allowRetainerListCompletion,
         int expected)
     {
         var observed = new RetainerOpeningObservation(
@@ -67,7 +69,10 @@ public sealed class RetainerAutomationSessionTests
 
         Assert.Equal(
             (RetainerOpeningAction)expected,
-            RetainerOpeningPolicy.Decide(observed, checked((ulong)expectedRetainerId)));
+            RetainerOpeningPolicy.Decide(
+                observed,
+                checked((ulong)expectedRetainerId),
+                allowRetainerListCompletion));
     }
 
     [Fact]
@@ -80,6 +85,29 @@ public sealed class RetainerAutomationSessionTests
             ActiveRetainerId: 42);
 
         Assert.Equal(RetainerOpeningAction.AdvanceTalk, RetainerOpeningPolicy.Decide(observed, null));
+    }
+
+    [Theory]
+    [InlineData(true, false, 0, 42, (int)RetainerClosingAction.Complete)]
+    [InlineData(false, true, 42, 42, (int)RetainerClosingAction.AdvanceTalk)]
+    [InlineData(false, true, 0, 42, (int)RetainerClosingAction.AdvanceTalk)]
+    [InlineData(false, true, 99, 42, (int)RetainerClosingAction.RejectIdentity)]
+    [InlineData(false, false, 42, 42, (int)RetainerClosingAction.Wait)]
+    public void RetainerClosing_AdvancesOnlyTheExpectedFarewell(
+        bool listReady,
+        bool talkReady,
+        ulong activeRetainerId,
+        ulong expectedRetainerId,
+        int expected)
+    {
+        var observed = new RetainerClosingObservation(
+            listReady,
+            talkReady,
+            activeRetainerId);
+
+        Assert.Equal(
+            (RetainerClosingAction)expected,
+            RetainerClosingPolicy.Decide(observed, expectedRetainerId));
     }
 
     [Fact]
