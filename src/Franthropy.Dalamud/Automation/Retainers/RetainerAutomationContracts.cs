@@ -35,6 +35,19 @@ public sealed record RetainerAutomationOpenResult(
 
 public sealed record RetainerRetrievalResult(bool Success, int Transferred, string Code, string Message);
 public sealed record RetainerDepositResult(bool Success, int Transferred, string Code, string Message);
+public sealed record RetainerMarketListingTarget(
+    int SlotIndex,
+    uint ItemId,
+    int Quantity,
+    bool IsHq,
+    uint? UnitPrice);
+public sealed record RetainerSellingUiObservation(
+    bool MarketListReady,
+    bool SellListReady,
+    bool ListingEditorReady,
+    bool InventoryReady,
+    bool CommandMenuReady,
+    bool RetainerListReady);
 
 /// <summary>
 /// Complete game-facing retainer interaction lifecycle. Product planning, authorization,
@@ -48,6 +61,12 @@ public interface IRetainerAutomationSession
     Task<RetainerAutomationResult> OpenRetainerAsync(RetainerAutomationTarget target, CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> WaitForCurrentRetainerMenuAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> OpenInventoryAsync(CancellationToken cancellationToken = default);
+    Task<RetainerAutomationResult> OpenSellingListAsync(CancellationToken cancellationToken = default);
+    Task<RetainerAutomationResult> OpenSellingListingAsync(
+        RetainerMarketListingTarget listing,
+        CancellationToken cancellationToken = default);
+    Task<RetainerSellingUiObservation> ObserveSellingUiAsync(CancellationToken cancellationToken = default);
+    Task<RetainerAutomationResult> ReturnToRetainerListAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DalamudInventoryStack>> ScanRetainerAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default);
     Task<RetainerRetrievalResult> RetrieveAsync(DalamudInventoryStack stack, int quantity, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DalamudInventoryStack>> ScanPlayerInventoryAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default);
@@ -94,4 +113,18 @@ public static class RetainerRetrievalObservation
 
         return slotMatches && playerQuantityAfter - playerQuantityBefore == transferred;
     }
+}
+
+public static class RetainerMarketListingObservation
+{
+    public static bool Matches(
+        RetainerMarketListingTarget expected,
+        uint observedItemId,
+        int observedQuantity,
+        bool observedIsHq,
+        ulong observedUnitPrice) =>
+        expected.ItemId == observedItemId &&
+        expected.Quantity == observedQuantity &&
+        expected.IsHq == observedIsHq &&
+        (expected.UnitPrice is null || expected.UnitPrice == observedUnitPrice);
 }
