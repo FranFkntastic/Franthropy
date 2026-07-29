@@ -45,6 +45,43 @@ public sealed class RetainerAutomationSessionTests
             [new RetainerListEntry("Inactive", false)]));
     }
 
+    [Theory]
+    [InlineData(true, true, true, 42, 42, (int)RetainerOpeningAction.Complete)]
+    [InlineData(false, true, false, 42, 42, (int)RetainerOpeningAction.AdvanceTalk)]
+    [InlineData(false, true, false, 42, 99, (int)RetainerOpeningAction.RejectIdentity)]
+    [InlineData(false, true, false, 0, 42, (int)RetainerOpeningAction.Wait)]
+    [InlineData(false, false, true, 0, 42, (int)RetainerOpeningAction.Wait)]
+    public void RetainerOpening_AdvancesOnlyVerifiedTalk(
+        bool menuReady,
+        bool talkReady,
+        bool listReady,
+        ulong activeRetainerId,
+        int expectedRetainerId,
+        int expected)
+    {
+        var observed = new RetainerOpeningObservation(
+            menuReady,
+            talkReady,
+            listReady,
+            activeRetainerId);
+
+        Assert.Equal(
+            (RetainerOpeningAction)expected,
+            RetainerOpeningPolicy.Decide(observed, checked((ulong)expectedRetainerId)));
+    }
+
+    [Fact]
+    public void RetainerOpening_AllowsVerifiedCurrentRetainerWithoutAnExpectedIdentity()
+    {
+        var observed = new RetainerOpeningObservation(
+            CommandMenuReady: false,
+            TalkReady: true,
+            RetainerListReady: false,
+            ActiveRetainerId: 42);
+
+        Assert.Equal(RetainerOpeningAction.AdvanceTalk, RetainerOpeningPolicy.Decide(observed, null));
+    }
+
     [Fact]
     public void NativeRetainerRowReader_DoesNotCallItself()
     {

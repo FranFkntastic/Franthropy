@@ -1,5 +1,6 @@
 using Dalamud.Plugin.Services;
 using Dalamud.Utility;
+using ECommons.UIHelpers.AddonMasterImplementations;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
@@ -19,6 +20,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 {
     private const string RetainerList = "RetainerList";
     private const string SelectString = "SelectString";
+    private const string Talk = "Talk";
     private const string InventoryLarge = "InventoryRetainerLarge";
     private const string InventorySmall = "InventoryRetainer";
     private const string SellingList = "RetainerSellList";
@@ -146,11 +148,25 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 List: IsReady(RetainerList),
                 Inventory: IsInventoryReady(),
                 Menu: IsCommandMenuReady(),
+                Talk: IsReady(Talk),
+                ActiveRetainerId: ReadActiveRetainerId(),
                 Selling: IsReady(SellingList) || IsReady(MarketList) || IsReady(SellingListingEditor)),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         if (state.List)
             return RetainerAutomationResult.Succeeded("RetainerListReady", "Retainer list is ready.");
+        if (state.Talk)
+        {
+            if (state.ActiveRetainerId == 0)
+                return RetainerAutomationResult.Failed(
+                    "RetainerTalkIdentityUnavailable",
+                    "A talk window is open, but no active retainer identity is available.");
+
+            var menu = await ReachRetainerMenuAsync(null, cancellationToken).ConfigureAwait(false);
+            return menu.Success
+                ? await ReturnToRetainerListAsync(cancellationToken).ConfigureAwait(false)
+                : menu;
+        }
         if (state.Inventory || state.Menu || state.Selling)
             return await ReturnToRetainerListAsync(cancellationToken).ConfigureAwait(false);
 
@@ -186,8 +202,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         var selected = await framework.RunOnTick(() => SelectRetainer(target.RetainerName), cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!selected.Success)
             return selected;
-        if (!await WaitUntilAsync(IsCommandMenuReady, cancellationToken).ConfigureAwait(false))
-            return RetainerAutomationResult.Failed("RetainerMenuTimeout", $"Timed out waiting for {target.RetainerName}'s command menu.");
+        var menu = await ReachRetainerMenuAsync(target, cancellationToken).ConfigureAwait(false);
+        if (!menu.Success)
+            return menu;
 
         var verified = await framework.RunOnTick(() => VerifyActive(target.RetainerId), cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!verified.Success)
@@ -207,8 +224,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         var selected = await framework.RunOnTick(SelectFirstAvailableRetainer, cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!selected.Result.Success || string.IsNullOrWhiteSpace(selected.RetainerName))
             return RetainerAutomationOpenResult.Failed(selected.Result.Code, selected.Result.Message);
-        if (!await WaitUntilAsync(IsCommandMenuReady, cancellationToken).ConfigureAwait(false))
-            return RetainerAutomationOpenResult.Failed("RetainerMenuTimeout", "Timed out waiting for the first available retainer's command menu.");
+        var menu = await ReachRetainerMenuAsync(null, cancellationToken).ConfigureAwait(false);
+        if (!menu.Success)
+            return RetainerAutomationOpenResult.Failed(menu.Code, menu.Message);
 
         var retainerId = await framework.RunOnTick(ReadActiveRetainerId, cancellationToken: cancellationToken).ConfigureAwait(false);
         if (retainerId == 0)
@@ -219,10 +237,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         return RetainerAutomationOpenResult.Succeeded(target, "RetainerOpened", $"Opened and verified {target.RetainerName}.");
     }
 
-    public async Task<RetainerAutomationResult> WaitForCurrentRetainerMenuAsync(CancellationToken cancellationToken = default) =>
-        await WaitUntilAsync(IsCommandMenuReady, cancellationToken).ConfigureAwait(false)
-            ? RetainerAutomationResult.Succeeded("RetainerMenuReady", "Current retainer command menu is ready.")
-            : RetainerAutomationResult.Failed("RetainerMenuTimeout", "Timed out waiting for the current retainer command menu.");
+    public Task<RetainerAutomationResult> WaitForCurrentRetainerMenuAsync(CancellationToken cancellationToken = default) =>
+        ReachRetainerMenuAsync(null, cancellationToken);
 
     public async Task<RetainerAutomationResult> OpenInventoryAsync(CancellationToken cancellationToken = default)
     {
@@ -455,6 +471,56 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private GamePatchCompatibility EvaluatePatchCompatibility() =>
         GamePatchCompatibilityGate.Evaluate(PatchContractId, ApprovedGameVersion, currentGameVersion);
 
+    private async Task<RetainerAutomationResult> ReachRetainerMenuAsync(
+        RetainerAutomationTarget? expected,
+        CancellationToken cancellationToken)
+    {
+        const int maximumAttempts = 180;
+        const int talkAdvanceCooldownTicks = 6;
+        const int maximumTalkAdvances = 12;
+        var nextTalkAdvanceAttempt = 0;
+        var talkAdvances = 0;
+        RetainerOpeningObservation observed = default;
+
+        for (var attempt = 0; attempt < maximumAttempts; attempt++)
+        {
+            observed = await framework.RunOnTick(ObserveRetainerOpening, cancellationToken: cancellationToken).ConfigureAwait(false);
+            var action = RetainerOpeningPolicy.Decide(observed, expected?.RetainerId);
+            if (action == RetainerOpeningAction.Complete)
+                return RetainerAutomationResult.Succeeded("RetainerMenuReady", "Retainer command menu is ready.");
+            if (action == RetainerOpeningAction.RejectIdentity)
+            {
+                return RetainerAutomationResult.Failed(
+                    "RetainerIdentityMismatch",
+                    $"The talk window belongs to retainer {observed.ActiveRetainerId}, not expected retainer {expected!.RetainerId}.");
+            }
+
+            if (action == RetainerOpeningAction.AdvanceTalk && attempt >= nextTalkAdvanceAttempt)
+            {
+                if (talkAdvances >= maximumTalkAdvances)
+                {
+                    return RetainerAutomationResult.Failed(
+                        "RetainerTalkAdvanceLimit",
+                        $"Stopped after {maximumTalkAdvances} bounded talk advances while opening {FormatRetainerTarget(expected)}.");
+                }
+
+                var advanced = await framework.RunOnTick(AdvanceTalk, cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (advanced.Success)
+                    talkAdvances++;
+                else if (advanced.Code != "RetainerTalkUnavailable")
+                    return advanced;
+                nextTalkAdvanceAttempt = attempt + talkAdvanceCooldownTicks;
+            }
+
+            await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
+        }
+
+        return RetainerAutomationResult.Failed(
+            "RetainerMenuTimeout",
+            $"Timed out waiting for {FormatRetainerTarget(expected)} command menu after {talkAdvances} talk advance(s). " +
+            $"Observed {FormatRetainerOpeningObservation(observed)}.");
+    }
+
     private async Task<bool> WaitUntilAsync(Func<bool> predicate, CancellationToken cancellationToken)
     {
         for (var attempt = 0; attempt < 180; attempt++)
@@ -508,6 +574,32 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     {
         var addon = gameGui.GetAddonByName<AddonSelectString>(SelectString, 1);
         return addon is not null && addon->AtkUnitBase.IsReady && addon->AtkUnitBase.IsVisible && FindEntry(addon, ResolveAddonText(2378)) >= 0;
+    }
+
+    private unsafe RetainerOpeningObservation ObserveRetainerOpening() =>
+        new(
+            IsCommandMenuReady(),
+            IsReady(Talk),
+            IsReady(RetainerList),
+            ReadActiveRetainerId());
+
+    private unsafe RetainerAutomationResult AdvanceTalk()
+    {
+        var addon = gameGui.GetAddonByName<AddonTalk>(Talk, 1);
+        if (addon is null || !addon->AtkUnitBase.IsReady || !addon->AtkUnitBase.IsVisible)
+            return RetainerAutomationResult.Failed("RetainerTalkUnavailable", "The retainer talk window is unavailable.");
+
+        try
+        {
+            new AddonMaster.Talk((nint)addon).Click();
+            return RetainerAutomationResult.Succeeded("RetainerTalkAdvanced", "Advanced the current retainer greeting.");
+        }
+        catch (Exception exception)
+        {
+            return RetainerAutomationResult.Failed(
+                "RetainerTalkAdvanceFailed",
+                $"The retainer greeting could not be advanced: {exception.Message}");
+        }
     }
 
     private unsafe RetainerAutomationResult SelectCommand(uint addonRow)
@@ -679,4 +771,45 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         return ready.Count == 0 ? "no known retainer surface" : string.Join(", ", ready);
     }
 
+    private static string FormatRetainerTarget(RetainerAutomationTarget? target) =>
+        target is null ? "the current retainer's" : $"{target.RetainerName}'s";
+
+    private static string FormatRetainerOpeningObservation(RetainerOpeningObservation observed)
+    {
+        var ready = new List<string>();
+        if (observed.CommandMenuReady) ready.Add("retainer command menu");
+        if (observed.TalkReady) ready.Add(Talk);
+        if (observed.RetainerListReady) ready.Add(RetainerList);
+        if (observed.ActiveRetainerId != 0) ready.Add($"active retainer {observed.ActiveRetainerId}");
+        return ready.Count == 0 ? "no known retainer surface or identity" : string.Join(", ", ready);
+    }
+
+}
+
+internal enum RetainerOpeningAction
+{
+    Wait,
+    AdvanceTalk,
+    Complete,
+    RejectIdentity,
+}
+
+internal readonly record struct RetainerOpeningObservation(
+    bool CommandMenuReady,
+    bool TalkReady,
+    bool RetainerListReady,
+    ulong ActiveRetainerId);
+
+internal static class RetainerOpeningPolicy
+{
+    public static RetainerOpeningAction Decide(RetainerOpeningObservation observed, ulong? expectedRetainerId)
+    {
+        if (observed.CommandMenuReady)
+            return RetainerOpeningAction.Complete;
+        if (!observed.TalkReady || observed.ActiveRetainerId == 0)
+            return RetainerOpeningAction.Wait;
+        if (expectedRetainerId is > 0 && observed.ActiveRetainerId != expectedRetainerId)
+            return RetainerOpeningAction.RejectIdentity;
+        return RetainerOpeningAction.AdvanceTalk;
+    }
 }
