@@ -21,4 +21,20 @@ public sealed class DalamudTableLayoutTests
         Assert.Equal(0, layout.FreezeColumns);
         Assert.Equal(0, layout.FreezeRows);
     }
+
+    [Theory]
+    [InlineData(false, false, false, DalamudTableRowBackground.None)]
+    [InlineData(true, false, false, DalamudTableRowBackground.Selected)]
+    [InlineData(true, true, false, DalamudTableRowBackground.Hovered)]
+    [InlineData(true, true, true, DalamudTableRowBackground.Active)]
+    public void Row_background_uses_interaction_precedence_without_overlay_selection(
+        bool selected,
+        bool hovered,
+        bool active,
+        DalamudTableRowBackground expected)
+    {
+        Assert.Equal(
+            expected,
+            DalamudTableSelectionRenderer.ResolveBackground(selected, hovered, active));
+    }
 }
