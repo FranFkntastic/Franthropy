@@ -34,6 +34,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Franthropy.AgentBridge\Franthropy.AgentBridge.csproj" />
     <ProjectReference Include="..\Franthropy.Filtering\Franthropy.Filtering.csproj" />
   </ItemGroup>
 

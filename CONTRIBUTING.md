@@ -12,6 +12,8 @@ transport. Keep product-specific orchestration in the consuming plugin.
 
 - `Franthropy.Filtering` owns dependency-free language mechanics.
 - `Franthropy.FFXIV` owns product-neutral FFXIV domain contracts.
+- `Franthropy.AgentBridge` owns transport-safe contracts, hosting, reviewed
+  controls, and operation receipts without a Dalamud dependency.
 - `Franthropy.Dalamud` owns game- and Dalamud-facing adapters and UI primitives.
 - `Franthropy.Web` owns web-facing adapters for shared models.
 
@@ -21,7 +23,7 @@ contract cannot be proven.
 
 ## Branch and Pull Request Flow
 
-Create your branch from `local-dev` and target `local-dev` in the pull request.
+Create your branch from `main` and target `main` in the pull request.
 Open an issue first for a new project, breaking API change, native game
 interaction, or major dependency. Small fixes can go directly to a pull request.
 

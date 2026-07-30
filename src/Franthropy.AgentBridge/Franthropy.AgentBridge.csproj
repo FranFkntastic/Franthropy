@@ -1,32 +1,33 @@
 <Project Sdk="Microsoft.NET.Sdk">
-
   <PropertyGroup>
-    <Title>Franthropy.Filtering</Title>
-    <Description>Typed, dependency-free filter language primitives for Franthropy tools.</Description>
+    <Title>Franthropy.AgentBridge</Title>
+    <Description>Authenticated, transport-safe contracts and hosting primitives for agent-enabled FFXIV plugins.</Description>
     <Authors>FranFkntastic</Authors>
     <Copyright>FranFkntastic</Copyright>
     <Version>0.1.0</Version>
     <LangVersion>latest</LangVersion>
-    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net8.0-windows;net10.0-windows</TargetFrameworks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <Deterministic>true</Deterministic>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>CS1591</NoWarn>
     <IsPackable>true</IsPackable>
-    <PackageId>Franthropy.Filtering</PackageId>
+    <PackageId>Franthropy.AgentBridge</PackageId>
     <PackageProjectUrl>https://github.com/FranFkntastic/Franthropy</PackageProjectUrl>
     <RepositoryUrl>https://github.com/FranFkntastic/Franthropy</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
-    <PackageTags>filtering;parser;query;ffxiv</PackageTags>
+    <PackageTags>ffxiv;dalamud;agent;bridge;mcp</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
   <ItemGroup>
-    <None Include="..\..\README.md" Pack="true" PackagePath="\" Link="README.md" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
   </ItemGroup>
-
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 </Project>

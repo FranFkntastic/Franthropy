@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  reusable-packages:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Test agent bridge
+        run: dotnet test tests/Franthropy.AgentBridge.Tests/Franthropy.AgentBridge.Tests.csproj -c Release
+
+      - name: Test filtering
+        run: dotnet test tests/Franthropy.Filtering.Tests/Franthropy.Filtering.Tests.csproj -c Release
+
+      - name: Test FFXIV contracts
+        run: dotnet test tests/Franthropy.FFXIV.Tests/Franthropy.FFXIV.Tests.csproj -c Release
+
+      - name: Test web primitives
+        run: dotnet test tests/Franthropy.Web.Tests/Franthropy.Web.Tests.csproj -c Release
+
+      - name: Pack reusable projects
+        shell: pwsh
+        run: |
+          $projects = @(
+            'src/Franthropy.AgentBridge/Franthropy.AgentBridge.csproj',
+            'src/Franthropy.Filtering/Franthropy.Filtering.csproj',
+            'src/Franthropy.FFXIV/Franthropy.FFXIV.csproj',
+            'src/Franthropy.Web/Franthropy.Web.csproj'
+          )
+          foreach ($project in $projects) {
+            dotnet pack $project -c Release -o artifacts/packages -p:ContinuousIntegrationBuild=true
+            if ($LASTEXITCODE -ne 0) { throw "Pack failed: $project" }
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages
+          path: |
+            artifacts/packages/*.nupkg
+            artifacts/packages/*.snupkg
+          if-no-files-found: error

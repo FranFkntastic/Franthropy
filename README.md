@@ -4,6 +4,7 @@ Shared FFXIV toolkit libraries for Franthropy plugins and tools.
 
 ## Projects
 
+- `src/Franthropy.AgentBridge` - authenticated agent-bridge wire contracts, hosting, reviewed controls, and operation receipts without a Dalamud dependency.
 - `src/Franthropy.Filtering` - dependency-free filter syntax, diagnostics, typed binding, and evaluation primitives.
 - `src/Franthropy.FFXIV` - canonical, product-neutral FFXIV filter vocabulary and resolver contracts.
 - `src/Franthropy.Dalamud` - Dalamud-aware helper primitives such as world catalog lookups and Lifestream market-board travel command construction.
@@ -41,7 +42,27 @@ Shared code should therefore:
 - be promoted from a plugin only when the common abstraction is demonstrated;
 - stay in a focused namespace or project so consumers reference only what they need.
 
-## Consuming Locally
+## NuGet packages
+
+Versioned packages are published for the focused, independently reusable
+projects:
+
+```powershell
+dotnet add package Franthropy.AgentBridge
+dotnet add package Franthropy.Filtering
+dotnet add package Franthropy.FFXIV
+dotnet add package Franthropy.Web
+```
+
+`Franthropy.Dalamud` remains source-consumed because its broad, patch-sensitive
+surface compiles against the developer's current Dalamud installation. Agent
+bridge contracts and hosting no longer require that monolith.
+
+See [Agent Bridge: Getting Started](docs/agent-bridge/getting-started.md) for a
+minimal plugin integration and [Release Process](docs/releases.md) for package
+versioning and publication.
+
+## Consuming source
 
 Consumer repositories should reference the specific project they need. During local development, sibling checkouts are expected:
 
@@ -74,7 +95,7 @@ dotnet test .\Franthropy.sln -c Debug
 ## Contributing
 
 Pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), create
-changes from the `local-dev` integration branch, and keep each shared primitive
+changes from `main`, and keep each shared primitive
 small enough for an unrelated consumer to adopt without inheriting product
 policy. Report vulnerabilities privately as described in
 [SECURITY.md](SECURITY.md).
