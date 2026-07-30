@@ -202,7 +202,7 @@ public static class FilterCompletionService
                 FilterCompletionKind.Value,
                 replacement,
                 candidate.Description,
-                $"{candidate.TargetFieldKey}{candidate.Operator.Display()}{candidate.TargetValue}"))
+                $"{candidate.TargetFieldKey}{candidate.Operator.Display()}{(candidate.TargetValues.Count > 1 ? $"({string.Join('|', candidate.TargetValues)})" : candidate.TargetValue)}"))
             .Take(maximumItems)
             .ToArray();
         if (predicates.Length > 0 || context.Catalog.PredicateAliases.Any(candidate =>

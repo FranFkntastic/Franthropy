@@ -56,11 +56,7 @@ public static class FilterCompiler
                     if (predicate is not null)
                     {
                         var target = context.Catalog.Resolve(predicate.TargetFieldKey, context.AvailableKeys);
-                        var syntheticValue = new FilterScalarValueSyntax(predicateValue.Token with
-                        {
-                            Text = predicate.TargetValue,
-                            Value = predicate.TargetValue,
-                        });
+                        var syntheticValue = CreatePredicateValue(predicate, predicateValue.Token);
                         var syntheticComparator = fieldExpression.Comparator with
                         {
                             Kind = predicate.Operator.TokenKind(),
@@ -84,6 +80,41 @@ public static class FilterCompiler
             default:
                 return _ => FilterTruth.Unknown;
         }
+    }
+
+    private static FilterValueSyntax CreatePredicateValue(
+        FilterPredicateAlias predicate,
+        FilterToken sourceToken)
+    {
+        if (predicate.TargetValues.Count == 1)
+        {
+            return new FilterScalarValueSyntax(sourceToken with
+            {
+                Text = predicate.TargetValues[0],
+                Value = predicate.TargetValues[0],
+            });
+        }
+
+        var values = predicate.TargetValues
+            .Select(value => new FilterScalarValueSyntax(sourceToken with
+            {
+                Kind = FilterTokenKind.Word,
+                Text = value,
+                Value = value,
+            }))
+            .ToArray();
+        var separators = Enumerable.Range(0, values.Length - 1)
+            .Select(_ => new FilterToken(
+                FilterTokenKind.Pipe,
+                "|",
+                "|",
+                sourceToken.Span))
+            .ToArray();
+        return new FilterListValueSyntax(
+            new FilterToken(FilterTokenKind.LeftParenthesis, "(", "(", sourceToken.Span),
+            values,
+            separators,
+            new FilterToken(FilterTokenKind.RightParenthesis, ")", ")", sourceToken.Span));
     }
 
     private static Func<TRecord, FilterTruth> BindFreeText<TRecord>(

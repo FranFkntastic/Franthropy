@@ -37,6 +37,7 @@ public sealed class FfxivFilterCatalogTests
 
     private sealed record Offer(FfxivRegion Region);
     private sealed record ItemDefinition(bool HighQualityCapable, long MaxStackSize);
+    private sealed record EquipmentDefinition(IReadOnlyCollection<FfxivEquipmentSlot> Slots);
     private sealed record Acquisition(IReadOnlyCollection<FfxivAcquisitionSource> Sources);
 
     [Fact]
@@ -58,7 +59,24 @@ public sealed class FfxivFilterCatalogTests
         Assert.DoesNotContain("item.vendoravailable", keys);
         Assert.Contains(Vocabulary.Catalog.PredicateAliases, predicate => predicate.Qualifier == "is" && predicate.Specifier == "hqCapable");
         Assert.Contains(Vocabulary.Catalog.PredicateAliases, predicate => predicate.Qualifier == "is" && predicate.Specifier == "stackable");
+        Assert.Contains(Vocabulary.Catalog.PredicateAliases, predicate => predicate.Qualifier == "is" && predicate.Specifier == "equippable");
         Assert.Contains(Vocabulary.Catalog.PredicateAliases, predicate => predicate.Qualifier == "is" && predicate.Specifier == "vendorBuyable");
+    }
+
+    [Fact]
+    public void EquippableState_UsesAuthoritativeEquipmentSlotMembership()
+    {
+        var context = new FilterContextBuilder<EquipmentDefinition>(Vocabulary.Catalog)
+            .BindSet(Vocabulary.ItemSlots, row => Evidence.Known(row.Slots))
+            .Build("ffxiv.item-equipment", "1");
+        var alias = FilterCompiler.Compile<EquipmentDefinition>("is:equippable", context);
+        var canonicalExpression = $"slot:({string.Join('|', Enum.GetNames<FfxivEquipmentSlot>())})";
+        var canonical = FilterCompiler.Compile<EquipmentDefinition>(canonicalExpression, context);
+
+        Assert.True(alias.IsValid, string.Join(Environment.NewLine, alias.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        Assert.Equal(canonical.SemanticExpression, alias.SemanticExpression);
+        Assert.True(alias.Matches(new EquipmentDefinition([FfxivEquipmentSlot.Body])));
+        Assert.False(alias.Matches(new EquipmentDefinition([])));
     }
 
     [Fact]
@@ -175,7 +193,8 @@ public sealed class FfxivFilterCatalogTests
 
         Assert.Contains("## `item.itemLevel`", markdown);
         Assert.Contains("`ilvl`", markdown);
-        Assert.Contains("\"catalogVersion\": \"1.4\"", json);
+        Assert.Contains("\"catalogVersion\": \"1.5\"", json);
+        Assert.Contains("\"specifier\": \"equippable\"", json);
         Assert.Contains("\"key\": \"acquisition.source\"", json);
     }
 

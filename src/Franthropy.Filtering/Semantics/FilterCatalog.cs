@@ -24,6 +24,8 @@ public sealed record FilterPredicateAlias(
     string Description = "",
     FilterComparisonOperator Operator = FilterComparisonOperator.ExactEquals)
 {
+    public IReadOnlyList<string> TargetValues { get; init; } = [TargetValue];
+
     public FilterPredicateAlias(
         string qualifier,
         string specifier,
@@ -32,6 +34,24 @@ public sealed record FilterPredicateAlias(
         string description)
         : this(qualifier, specifier, targetFieldKey, targetValue, description, FilterComparisonOperator.ExactEquals)
     {
+    }
+
+    public FilterPredicateAlias(
+        string qualifier,
+        string specifier,
+        string targetFieldKey,
+        IReadOnlyList<string> targetValues,
+        string description,
+        FilterComparisonOperator @operator = FilterComparisonOperator.Match)
+        : this(
+            qualifier,
+            specifier,
+            targetFieldKey,
+            targetValues?.FirstOrDefault() ?? string.Empty,
+            description,
+            @operator)
+    {
+        TargetValues = targetValues?.ToArray() ?? throw new ArgumentNullException(nameof(targetValues));
     }
 
     public void Deconstruct(
@@ -46,6 +66,30 @@ public sealed record FilterPredicateAlias(
         targetFieldKey = TargetFieldKey;
         targetValue = TargetValue;
         description = Description;
+    }
+
+    public bool Equals(FilterPredicateAlias? other) =>
+        other is not null &&
+        string.Equals(Qualifier, other.Qualifier, StringComparison.Ordinal) &&
+        string.Equals(Specifier, other.Specifier, StringComparison.Ordinal) &&
+        string.Equals(TargetFieldKey, other.TargetFieldKey, StringComparison.Ordinal) &&
+        string.Equals(TargetValue, other.TargetValue, StringComparison.Ordinal) &&
+        string.Equals(Description, other.Description, StringComparison.Ordinal) &&
+        Operator == other.Operator &&
+        TargetValues.SequenceEqual(other.TargetValues, StringComparer.Ordinal);
+
+    public override int GetHashCode()
+    {
+        var hash = new HashCode();
+        hash.Add(Qualifier, StringComparer.Ordinal);
+        hash.Add(Specifier, StringComparer.Ordinal);
+        hash.Add(TargetFieldKey, StringComparer.Ordinal);
+        hash.Add(TargetValue, StringComparer.Ordinal);
+        hash.Add(Description, StringComparer.Ordinal);
+        hash.Add(Operator);
+        foreach (var value in TargetValues)
+            hash.Add(value, StringComparer.Ordinal);
+        return hash.ToHashCode();
     }
 }
 
@@ -127,6 +171,8 @@ public sealed class FilterCatalog
                 throw new ArgumentException($"Predicate '{predicate.Qualifier}:{predicate.Specifier}' targets unknown field '{predicate.TargetFieldKey}'.", nameof(predicateAliases));
             if (!exact[predicate.TargetFieldKey].Operators.Contains(predicate.Operator))
                 throw new ArgumentException($"Predicate '{predicate.Qualifier}:{predicate.Specifier}' uses unsupported operator '{predicate.Operator.Display()}' for field '{predicate.TargetFieldKey}'.", nameof(predicateAliases));
+            if (predicate.TargetValues.Count == 0 || predicate.TargetValues.Any(string.IsNullOrWhiteSpace))
+                throw new ArgumentException($"Predicate '{predicate.Qualifier}:{predicate.Specifier}' must target at least one non-empty value.", nameof(predicateAliases));
         }
     }
 
@@ -180,16 +226,19 @@ public sealed class FilterCatalog
     private static bool Equivalent(FilterPredicateAlias left, FilterPredicateAlias right, FilterField target) =>
         left.TargetFieldKey.Equals(right.TargetFieldKey, StringComparison.OrdinalIgnoreCase) &&
         left.Operator == right.Operator &&
-        string.Equals(
-            NormalizePredicateValue(target, left),
-            NormalizePredicateValue(target, right),
-            StringComparison.OrdinalIgnoreCase);
+        left.TargetValues.Select(value => NormalizePredicateValue(target, left.Operator, value))
+            .SequenceEqual(
+                right.TargetValues.Select(value => NormalizePredicateValue(target, right.Operator, value)),
+                StringComparer.OrdinalIgnoreCase);
 
-    private static string NormalizePredicateValue(FilterField field, FilterPredicateAlias predicate)
+    private static string NormalizePredicateValue(
+        FilterField field,
+        FilterComparisonOperator @operator,
+        string targetValue)
     {
-        if (predicate.Operator == FilterComparisonOperator.Match && field.MatchUsesRecordFuzzy)
-            return FilterText.Normalize(predicate.TargetValue);
-        var fuzzy = predicate.Operator is FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals;
-        return field.NormalizeLiteral(predicate.TargetValue, fuzzy) ?? FilterText.Normalize(predicate.TargetValue);
+        if (@operator == FilterComparisonOperator.Match && field.MatchUsesRecordFuzzy)
+            return FilterText.Normalize(targetValue);
+        var fuzzy = @operator is FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals;
+        return field.NormalizeLiteral(targetValue, fuzzy) ?? FilterText.Normalize(targetValue);
     }
 }
