@@ -4,7 +4,7 @@ namespace Franthropy.FFXIV.Filtering;
 
 public sealed class FfxivFilterCatalog
 {
-    public const string CurrentVersion = "1.1";
+    public const string CurrentVersion = "1.5";
 
     private FfxivFilterCatalog(IFfxivFilterResolvers resolvers)
     {
@@ -19,14 +19,18 @@ public sealed class FfxivFilterCatalog
         ItemUnique = FilterFields.Boolean("item.unique", "Unique", "Whether the FFXIV item definition is unique.", ["unique"]);
         ItemTradable = FilterFields.Boolean("item.tradable", "Tradable", "Whether the item definition permits trade or market listing.", ["tradable"]);
         ItemDesynthesizable = FilterFields.Boolean("item.desynthesizable", "Desynthesizable", "Whether the item definition permits desynthesis.", ["desynth"]);
-        InstanceQuality = FilterFields.Enumeration<FfxivItemQuality>("instance.quality", "Quality", "Observed NQ or HQ item quality.", ["quality"]);
+        ItemHighQualityCapable = FilterFields.Boolean("item.highQualityCapable", "HQ capable", "Whether the item definition permits a high-quality variant.", ["hqCapable"], statePredicateName: "hqCapable");
+        ItemMaxStackSize = FilterFields.Integer("item.maxStackSize", "Maximum stack size", "Maximum quantity permitted in one inventory stack.", ["stackSize"], minimum: 1);
+        InstanceQuality = FilterFields.Enumeration<FfxivItemQuality>("instance.quality", "Quality", "Observed NQ or HQ item quality.");
         InstanceQuantity = FilterFields.Integer("instance.quantity", "Stack quantity", "Quantity in one observed physical stack.", minimum: 0);
-        InstanceLocation = FilterFields.Enumeration<FfxivStorageLocation>("instance.location", "Location", "Semantic storage location of an observed item instance.", ["location"]);
+        InstanceLocation = FilterFields.Enumeration<FfxivStorageLocation>("instance.location", "Location", "Semantic storage location of an observed item instance.");
         InstanceEquipped = FilterFields.Boolean("instance.equipped", "Equipped", "Whether the observed item instance is currently equipped.");
         InstanceCondition = FilterFields.Decimal("instance.condition", "Condition", "Observed item condition as a percentage from 0 through 100.", ["condition"], 0, 100);
         InstanceSpiritbond = FilterFields.Decimal("instance.spiritbond", "Spiritbond", "Observed spiritbond as a percentage from 0 through 100.", ["spiritbond"], 0, 100);
         OwnershipOwned = FilterFields.Boolean("ownership.owned", "Owned", "Whether at least one instance exists in a complete active ownership scope.", ["owned"]);
         OwnershipQuantity = FilterFields.Integer("ownership.quantity", "Owned quantity", "Total quantity across the active ownership scope.", minimum: 0);
+        OwnershipQualities = FilterFields.Set("ownership.quality", EnumResolver<FfxivItemQuality>(), "quality", "Qualities", "NQ or HQ qualities contributing ownership evidence.");
+        OwnershipLocations = FilterFields.Set("ownership.location", EnumResolver<FfxivStorageLocation>(), "storage location", "Locations", "Semantic storage locations contributing ownership evidence.");
         OwnershipCharacters = FilterFields.Set("ownership.character", resolvers.Characters, "character", "Characters", "Characters contributing ownership evidence.", ["character"]);
         OwnershipRetainers = FilterFields.Set("ownership.retainer", resolvers.Retainers, "retainer", "Retainers", "Retainers contributing ownership evidence.", ["retainer"]);
         OfferSource = FilterFields.Enumeration<FfxivOfferSource>("offer.source", "Offer source", "Source of one represented actionable purchase offer.");
@@ -41,15 +45,24 @@ public sealed class FfxivFilterCatalog
         Fields =
         [
             ItemName, ItemLevel, EquipLevel, ItemJobs, ItemSlots, ItemRarity, ItemUiCategory, ItemUnique, ItemTradable,
-            ItemDesynthesizable, InstanceQuality, InstanceQuantity, InstanceLocation, InstanceEquipped, InstanceCondition,
-            InstanceSpiritbond, OwnershipOwned, OwnershipQuantity, OwnershipCharacters, OwnershipRetainers, OfferSource,
+            ItemDesynthesizable, ItemHighQualityCapable, ItemMaxStackSize, InstanceQuality, InstanceQuantity, InstanceLocation, InstanceEquipped, InstanceCondition,
+            InstanceSpiritbond, OwnershipOwned, OwnershipQuantity, OwnershipQualities, OwnershipLocations,
+            OwnershipCharacters, OwnershipRetainers, OfferSource,
             OfferPrice, OfferTotalPrice, OfferQuantity, OfferWorld, OfferDataCenter, OfferRegion, OfferAge, AcquisitionSources,
         ];
         Catalog = new FilterCatalog(Fields, CurrentVersion,
         [
-            new("is", "equipped", InstanceEquipped.Key, "true", "Item is currently equipped."),
             new("is", "hq", InstanceQuality.Key, nameof(FfxivItemQuality.HQ), "Item is high quality."),
             new("is", "nq", InstanceQuality.Key, nameof(FfxivItemQuality.NQ), "Item is normal quality."),
+            new("is", "stackable", ItemMaxStackSize.Key, "1", "Item can occupy a stack larger than one.", FilterComparisonOperator.Greater),
+            new(
+                "is",
+                "equippable",
+                ItemSlots.Key,
+                Enum.GetNames<FfxivEquipmentSlot>(),
+                "Item occupies at least one equipment slot.",
+                FilterComparisonOperator.Match),
+            new("is", "vendorBuyable", AcquisitionSources.Key, nameof(FfxivAcquisitionSource.Vendor), "Item is known to be purchasable from an ordinary gil vendor."),
         ]);
     }
 
@@ -75,6 +88,8 @@ public sealed class FfxivFilterCatalog
     public FilterField<bool> ItemUnique { get; }
     public FilterField<bool> ItemTradable { get; }
     public FilterField<bool> ItemDesynthesizable { get; }
+    public FilterField<bool> ItemHighQualityCapable { get; }
+    public FilterField<long> ItemMaxStackSize { get; }
     public FilterField<FfxivItemQuality> InstanceQuality { get; }
     public FilterField<long> InstanceQuantity { get; }
     public FilterField<FfxivStorageLocation> InstanceLocation { get; }
@@ -83,6 +98,8 @@ public sealed class FfxivFilterCatalog
     public FilterField<decimal> InstanceSpiritbond { get; }
     public FilterField<bool> OwnershipOwned { get; }
     public FilterField<long> OwnershipQuantity { get; }
+    public FilterSetField<FfxivItemQuality> OwnershipQualities { get; }
+    public FilterSetField<FfxivStorageLocation> OwnershipLocations { get; }
     public FilterSetField<FfxivCharacterKey> OwnershipCharacters { get; }
     public FilterSetField<FfxivRetainerKey> OwnershipRetainers { get; }
     public FilterField<FfxivOfferSource> OfferSource { get; }

@@ -36,20 +36,80 @@ public sealed class FfxivFilterCatalogTests
         FfxivStorageLocation Location);
 
     private sealed record Offer(FfxivRegion Region);
+    private sealed record ItemDefinition(bool HighQualityCapable, long MaxStackSize);
+    private sealed record EquipmentDefinition(IReadOnlyCollection<FfxivEquipmentSlot> Slots);
+    private sealed record Acquisition(IReadOnlyCollection<FfxivAcquisitionSource> Sources);
 
     [Fact]
     public void Catalog_ContainsEveryDocumentedInitialField()
     {
         var keys = Vocabulary.Fields.Select(field => field.Key).ToArray();
 
-        Assert.Equal(29, keys.Length);
+        Assert.Equal(33, keys.Length);
         Assert.Contains("item.name", keys);
+        Assert.Contains("item.highQualityCapable", keys);
+        Assert.Contains("item.maxStackSize", keys);
         Assert.Contains("instance.spiritbond", keys);
         Assert.Contains("ownership.quantity", keys);
+        Assert.Contains("ownership.quality", keys);
+        Assert.Contains("ownership.location", keys);
         Assert.Contains("offer.totalPrice", keys);
         Assert.Contains("acquisition.source", keys);
         Assert.DoesNotContain("item.craftable", keys);
         Assert.DoesNotContain("item.vendoravailable", keys);
+        Assert.Contains(Vocabulary.Catalog.PredicateAliases, predicate => predicate.Qualifier == "is" && predicate.Specifier == "hqCapable");
+        Assert.Contains(Vocabulary.Catalog.PredicateAliases, predicate => predicate.Qualifier == "is" && predicate.Specifier == "stackable");
+        Assert.Contains(Vocabulary.Catalog.PredicateAliases, predicate => predicate.Qualifier == "is" && predicate.Specifier == "equippable");
+        Assert.Contains(Vocabulary.Catalog.PredicateAliases, predicate => predicate.Qualifier == "is" && predicate.Specifier == "vendorBuyable");
+    }
+
+    [Fact]
+    public void EquippableState_UsesAuthoritativeEquipmentSlotMembership()
+    {
+        var context = new FilterContextBuilder<EquipmentDefinition>(Vocabulary.Catalog)
+            .BindSet(Vocabulary.ItemSlots, row => Evidence.Known(row.Slots))
+            .Build("ffxiv.item-equipment", "1");
+        var alias = FilterCompiler.Compile<EquipmentDefinition>("is:equippable", context);
+        var canonicalExpression = $"slot:({string.Join('|', Enum.GetNames<FfxivEquipmentSlot>())})";
+        var canonical = FilterCompiler.Compile<EquipmentDefinition>(canonicalExpression, context);
+
+        Assert.True(alias.IsValid, string.Join(Environment.NewLine, alias.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        Assert.Equal(canonical.SemanticExpression, alias.SemanticExpression);
+        Assert.True(alias.Matches(new EquipmentDefinition([FfxivEquipmentSlot.Body])));
+        Assert.False(alias.Matches(new EquipmentDefinition([])));
+    }
+
+    [Fact]
+    public void DefinitionCapabilityFields_CompileWithStableAliases()
+    {
+        var context = new FilterContextBuilder<ItemDefinition>(Vocabulary.Catalog)
+            .Bind(Vocabulary.ItemHighQualityCapable, row => Evidence.Known(row.HighQualityCapable))
+            .Bind(Vocabulary.ItemMaxStackSize, row => Evidence.Known(row.MaxStackSize))
+            .Build("ffxiv.item-definitions", "1");
+        var stackableHqItem = new ItemDefinition(true, 999);
+
+        Assert.True(FilterCompiler.Compile<ItemDefinition>("hqCapable:true stackSize>1", context).Matches(stackableHqItem));
+        Assert.False(FilterCompiler.Compile<ItemDefinition>("hqCapable:false", context).Matches(stackableHqItem));
+        Assert.False(FilterCompiler.Compile<ItemDefinition>("stackSize=0", context).IsValid);
+        Assert.Equal(
+            FilterCompiler.Compile<ItemDefinition>("item.highQualityCapable==true", context).SemanticExpression,
+            FilterCompiler.Compile<ItemDefinition>("is:hqCapable", context).SemanticExpression);
+        Assert.Equal(
+            FilterCompiler.Compile<ItemDefinition>("item.maxStackSize>1", context).SemanticExpression,
+            FilterCompiler.Compile<ItemDefinition>("is:stackable", context).SemanticExpression);
+    }
+
+    [Fact]
+    public void VendorBuyableState_UsesAcquisitionSourceMembership()
+    {
+        var context = new FilterContextBuilder<Acquisition>(Vocabulary.Catalog)
+            .BindSet(Vocabulary.AcquisitionSources, row => Evidence.Known(row.Sources))
+            .Build("ffxiv.item-acquisition", "1");
+
+        Assert.True(FilterCompiler.Compile<Acquisition>("is:vendorBuyable", context)
+            .Matches(new Acquisition([FfxivAcquisitionSource.Craft, FfxivAcquisitionSource.Vendor])));
+        Assert.False(FilterCompiler.Compile<Acquisition>("is:vendorBuyable", context)
+            .Matches(new Acquisition([FfxivAcquisitionSource.Craft])));
     }
 
     [Fact]
@@ -93,7 +153,7 @@ public sealed class FfxivFilterCatalogTests
             .UseDefaultText(Vocabulary.ItemName, _ => Evidence.Known("Owned Blade"))
             .Build("ffxiv.item-instances", "1");
 
-        var compilation = FilterCompiler.Compile<Instance>("-owned", context);
+        var compilation = FilterCompiler.Compile<Instance>("NOT owned", context);
 
         Assert.True(compilation.IsValid);
         Assert.False(compilation.Matches(new Instance(Cuirass, 1, [], FfxivItemQuality.NQ, 1, FfxivStorageLocation.Inventory)));
@@ -133,7 +193,8 @@ public sealed class FfxivFilterCatalogTests
 
         Assert.Contains("## `item.itemLevel`", markdown);
         Assert.Contains("`ilvl`", markdown);
-        Assert.Contains("\"catalogVersion\": \"1.1\"", json);
+        Assert.Contains("\"catalogVersion\": \"1.5\"", json);
+        Assert.Contains("\"specifier\": \"equippable\"", json);
         Assert.Contains("\"key\": \"acquisition.source\"", json);
     }
 

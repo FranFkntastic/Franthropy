@@ -35,4 +35,28 @@ public sealed class DalamudSummoningBellInteractorTests
         Assert.Equal(6.5f, DalamudSummoningBellInteractor.GetInteractionDistance(ObjectKind.HousingEventObject));
         Assert.Equal(4.75f, DalamudSummoningBellInteractor.GetInteractionDistance(ObjectKind.EventObj));
     }
+
+    [Theory]
+    [InlineData(4.74f, ObjectKind.EventObj, false)]
+    [InlineData(4.75f, ObjectKind.EventObj, true)]
+    [InlineData(6.49f, ObjectKind.HousingEventObject, false)]
+    [InlineData(6.5f, ObjectKind.HousingEventObject, true)]
+    public void IsOutsideInteractionRange_MatchesOrdinaryInteractionBoundary(
+        float distance,
+        ObjectKind kind,
+        bool expected)
+    {
+        Assert.Equal(expected, DalamudSummoningBellInteractor.IsOutsideInteractionRange(distance, kind));
+    }
+
+    [Theory]
+    [InlineData(0.5f, 25f, 26f)]
+    [InlineData(30f, 25f, 30f)]
+    public void GetTemporaryHitboxRadius_CoversDistanceWithoutShrinking(
+        float originalRadius,
+        float distance,
+        float expected)
+    {
+        Assert.Equal(expected, DalamudSummoningBellInteractor.GetTemporaryHitboxRadius(originalRadius, distance));
+    }
 }

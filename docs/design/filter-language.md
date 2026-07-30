@@ -8,7 +8,26 @@ Primary consumers: MarketMafioso, Squire, Craft Architect, inventory and retaine
 
 Canonical field reference: [Canonical FFXIV Filter Vocabulary](filter-vocabulary.md)
 
-Living implementation plan: [Filter Language and Inventory Viewer Implementation Roadmap](filter-language-implementation.md)
+## Contents
+
+- [Summary](#summary)
+- [Why this belongs in Franthropy](#why-this-belongs-in-franthropy)
+- [Design principles](#design-principles)
+- [Terminology](#terminology)
+- [Language surface](#language-surface)
+- [Type system and evaluation](#type-system-and-evaluation)
+- [Canonical FFXIV vocabulary](#canonical-ffxiv-vocabulary)
+- [API shape](#api-shape)
+- [Diagnostics and intrinsic verbiage](#diagnostics-and-intrinsic-verbiage)
+- [Completion, editor, and help surfaces](#completion-editor-and-help-surfaces)
+- [Persistence, compatibility, and versioning](#persistence-compatibility-and-versioning)
+- [Performance and safety](#performance-and-safety)
+- [Project structure](#project-structure)
+- [Testing strategy](#testing-strategy)
+- [Delivery plan](#delivery-plan)
+- [Explicit non-goals](#explicit-non-goals)
+- [Decisions recorded by this design](#decisions-recorded-by-this-design)
+- [Questions to settle during Phase 1](#questions-to-settle-during-phase-1)
 
 ## Summary
 
@@ -107,7 +126,7 @@ darksteel ilvl>=50 acquisition.source:craft
 slot:ring (job:WHM | job:SCH) -is:equipped
 offer.source:vendor price<5000
 world:Siren quantity>=20 is:hq
--darksteel location:(inventory | retainer) condition<100
+NOT darksteel location:(inventory | retainer) condition<100
 acquisition.source:vendor is:nq
 ```
 
@@ -120,7 +139,8 @@ The first expression means that the default text fields contain `darksteel`, ite
 | `a b` | `a AND b` |
 | `a AND b`, `a && b` | both expressions must match |
 | `a OR b`, `a \| b` | either expression may match |
-| `NOT a`, `!a`, `-a` | negate an expression; `-darksteel` excludes the default-name match |
+| `NOT a`, `!a` | negate any expression; `NOT darksteel` excludes the default-name match |
+| `-field:value`, `-(...)` | compact negation for structured expressions; a hyphen in plain text remains literal |
 | `( ... )` | explicit grouping |
 | `field:value` | concise, type-appropriate direct match; text and explicitly searchable name fields use record-level fuzzy containment, while other typed and named values resolve exactly |
 | `field=value`, `field!=value` | fuzzy match or its negation; finite vocabularies accept a partial only when it resolves uniquely |
@@ -128,13 +148,16 @@ The first expression means that the default text fields contain `darksteel`, ite
 | `<`, `<=`, `>`, `>=` | ordered comparison for numeric, temporal, and other ordered types |
 | `field:low..high` | inclusive range; either endpoint may be omitted |
 | `field:(a \| b \| c)` | match any listed value |
+| `is:state` | discover a human-readable state that lowers to one typed field comparison |
 | `known(field)`, `unknown(field)` | explicitly test whether a record has evidence for a field |
 
 The negation modifier never changes the equality mode: `!=` is the negative partner of fuzzy `=`, while `!==` is the negative partner of exact `==`. Exact text and named-value comparison normalizes Unicode compatibility forms, case, and whitespace before comparing the whole text, name, or alias. Fuzzy text comparison performs normalized substring matching; it does not use regexes, edit distance, or stemming.
 
 Item names deliberately distinguish direct search from identity resolution. `name:darksteel` tests every record's normalized display name and may return many different Darksteel items. `name=darksteel` asks the finite item catalog to resolve that partial to one identity and diagnoses ambiguity rather than choosing, while `name=="Darksteel Ingot"` requires a complete normalized name or alias. All three retain stable item keys internally; none exposes IDs to users.
 
-Human-readable predicate namespaces express common states: `is:equipped`, `is:hq`, and `is:nq`. Canonical quality forms remain `quality:hq` and `quality:nq`; the `is:` spellings share those predicates' semantic identities. `has:` is reserved for future evidence predicates such as `has:price`.
+The `is:` namespace is the discoverable state surface. Every Boolean field exposes a positive state by default, so `is:unique` and `is:equipped` lower to exact comparisons against their canonical fields. A descriptor may choose a clearer state name, such as `is:hqCapable` for `item.highQualityCapable`, while curated atomic states may lower to another typed comparison: `is:stackable` means `item.maxStackSize>1`, `is:equippable` means `item.slot` overlaps the known equipment-slot vocabulary, and `is:hq` means `instance.quality==HQ`. Canonical field forms remain valid and share the same semantic identity and cache key. `has:` is reserved for future evidence predicates such as `has:price`.
+
+Negation composes with state predicates without weakening evidence semantics. `-is:unique` matches a known false unique flag; an unknown flag remains unknown and does not match. Catalog-owned states cannot expand into arbitrary compound policy expressions. User-defined named compound states are a separate future persistence and expansion layer rather than hidden catalog behavior.
 
 Keywords are case-insensitive. Symbolic and word operators are aliases for the same AST nodes and therefore have identical precedence.
 
@@ -157,7 +180,7 @@ From strongest to weakest:
 - Integers allow separators in input (`1,000` or `1_000`) and normalize them internally.
 - Decimal values use invariant `.` syntax in persisted expressions; the editor may accept locale-aware input and normalize it.
 - Durations use compact units such as `30m`, `6h`, and `2d` where a field declares duration semantics.
-- Boolean fields accept `true`, `false`, `yes`, and `no`. Bare words always remain default-text search, so states use intentional forms such as `is:equipped` rather than a bare `equipped` token.
+- Boolean fields accept `true`, `false`, `yes`, and `no`. Bare words always remain default-text search, so positive states use discoverable forms such as `is:equipped` rather than a bare `equipped` token.
 - A field's value resolver owns named values and aliases. For example, `job:WHM` and `job:"White Mage"` resolve to the same stable job identity.
 
 V1 does not expose regular expressions, arbitrary functions, arithmetic, property reflection, or executable callbacks in query text.
@@ -170,7 +193,9 @@ The normative grammar will live beside parser tests; this sketch defines the int
 query          = or-expression , EOF ;
 or-expression  = and-expression , { OR , and-expression } ;
 and-expression = unary-expression , { ( AND | implicit-AND ) , unary-expression } ;
-unary-expression = [ NOT | "!" | "-" ] , primary ;
+unary-expression = [ NOT | "!" ] , primary
+                 | "-" , structured-primary
+                 | primary ;
 primary        = "(" , or-expression , ")"
                | function-call
                | field-expression
@@ -183,6 +208,8 @@ range          = [ scalar ] , ".." , [ scalar ] ;
 value-list     = "(" , scalar , { "|" , scalar } , ")" ;
 function-call  = ( "known" | "unknown" ) , "(" , field-name , ")" ;
 ```
+
+The compact `-` form is recognized only before a structured field expression, function call, quoted value, or parenthesized expression. In ordinary text, hyphens remain part of the search term, so `-class`, `shark-class`, and `modified-shark-class` all use literal substring matching.
 
 The shape `qualifier:domain:specifier` is reserved for future parameterized namespaces, following forms such as `stat:range:>=50`. V1 parses that shape and emits a focused reserved-syntax diagnostic; it does not assign ceremonial meanings such as `is:quality:hq`. This reservation prevents a consumer from claiming an incompatible ad hoc interpretation before a real nested domain exists.
 
@@ -216,7 +243,7 @@ Field access returns `Known(value)` or `Unknown(reason)`. Unknown is distinct fr
 - **Unavailable** is a compile-time context error: this record type cannot answer the field.
 - **Unknown** is a per-record value: the context supports the field, but this observation lacks evidence.
 
-Evaluation uses three-valued logic (`true`, `false`, `unknown`). Only `true` records pass the filter. Negating an unknown result remains unknown, so `-tradable` cannot accidentally include items whose tradability was never observed. Users can deliberately select incomplete records with `unknown(tradable)`.
+Evaluation uses three-valued logic (`true`, `false`, `unknown`). Only `true` records pass the filter. Negating an unknown result remains unknown, so `NOT tradable:true` cannot accidentally include items whose tradability was never observed. Users can deliberately select incomplete records with `unknown(tradable)`.
 
 This matters especially for market snapshots, retainer observations, and partially loaded game data: absence of evidence must not become evidence of the opposite state.
 
@@ -244,6 +271,8 @@ Canonical keys are fully qualified. Concise aliases are global conveniences, not
 | `item.unique` | `unique` | boolean | unique-item flag |
 | `item.tradable` | `tradable` | boolean | may be traded or listed where applicable |
 | `item.desynthesizable` | `desynth` | boolean | item is eligible for desynthesis |
+| `item.highQualityCapable` | `hqCapable` | boolean | item definition permits an HQ variant |
+| `item.maxStackSize` | `stackSize` | integer | maximum quantity permitted in one inventory stack |
 | `instance.quality` | `quality` | enum | NQ or HQ quality state of an observed instance or represented offer |
 | `instance.quantity` | `quantity` when unambiguous | quantity | amount represented by a physical item stack |
 | `instance.location` | `location` when unambiguous | named entity | inventory, retainer, armoury, saddlebag, and similar location |
@@ -252,6 +281,8 @@ Canonical keys are fully qualified. Concise aliases are global conveniences, not
 | `instance.spiritbond` | `spiritbond` | percentage | spiritbond progress |
 | `ownership.owned` | `owned` | boolean | at least one matching instance exists in the observed ownership scope |
 | `ownership.quantity` | unqualified when unambiguous | quantity | total amount across the observed ownership scope |
+| `ownership.quality` | `quality` when unambiguous | enum set | NQ and HQ qualities contributing to an ownership aggregate |
+| `ownership.location` | `location` when unambiguous | enum set | semantic storage locations contributing to an ownership aggregate |
 | `ownership.character` | `character` when unambiguous | named set | characters contributing ownership evidence |
 | `ownership.retainer` | `retainer` | named set | retainers contributing ownership evidence |
 | `offer.source` | `source` when unambiguous | enum | source of the represented purchase offer |
@@ -399,6 +430,7 @@ Saved filters store the original expression plus optional normalized text, catal
 Compatibility rules:
 
 - canonical keys and aliases are stable public API;
+- catalog-owned state specifiers such as `is:hqCapable` are stable public API and normalize to their canonical field comparison;
 - adding a field or non-conflicting value alias is backward compatible;
 - removing or changing a field meaning requires a major catalog version and migration diagnostic;
 - renamed fields retain deprecated aliases for at least one major version;

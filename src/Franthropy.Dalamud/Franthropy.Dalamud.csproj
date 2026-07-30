@@ -54,6 +54,10 @@
       <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\Dalamud.Bindings.ImGui.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="Dalamud.Bindings.ImPlot">
+      <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\Dalamud.Bindings.ImPlot.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="FFXIVClientStructs">
       <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\FFXIVClientStructs.dll</HintPath>
       <Private>false</Private>
@@ -80,6 +84,10 @@
     <Compile Remove="Automation\Inventory\DalamudItemContextActionUiTransaction.cs" />
     <Compile Remove="Automation\Retainers\DalamudSummoningBellInteractor.cs" />
     <Compile Remove="Automation\Retainers\DalamudRetainerAutomationSession.cs" />
+    <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.cs" />
+    <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.PositionFrameShadow.cs" />
+    <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.WarmSessionProbe.cs" />
+    <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.YieldProbe.cs" />
     <Compile Remove="Automation\Retainers\RetainerAutomationContracts.cs" />
     <Compile Remove="Automation\Ui\RenderedItemDetailTooltipRequest.cs" />
     <Compile Remove="Automation\Inventory\DalamudInventoryStackScanner.cs" />
@@ -89,6 +97,7 @@
     <Compile Remove="Automation\Retainers\DalamudRetainerInventory.cs" />
     <Compile Remove="Automation\Retainers\DalamudAutoRetainerIpc.cs" />
     <Compile Remove="UI\Settings\DalamudSettingsTreeRenderer.cs" />
+    <Compile Remove="UI\Styling\DalamudUiChrome.cs" />
     <Compile Remove="UI\Items\DalamudItemAutocompleteRenderer.cs" />
     <Compile Remove="UI\Filtering\DalamudFilterAutocompleteRenderer.cs" />
     <Compile Remove="UI\Windows\DalamudOwnedWindowSurface.cs" />
@@ -98,12 +107,19 @@
     <Compile Remove="AgentBridge\ReflectedPluginWindowPresentationManager.cs" />
     <Compile Remove="AgentBridge\DalamudRenderedUiTextActionDispatcher.cs" />
     <Compile Remove="UI\Plots\DalamudPlotRenderer.cs" />
+    <Compile Remove="UI\Tables\DalamudTableProjection.cs" />
     <Compile Remove="UI\Tables\DalamudTableSelectionRenderer.cs" />
     <Compile Remove="Diagnostics\DalamudConditionTrustProbe.cs" />
     <Compile Remove="Diagnostics\DalamudRenderControl.cs" />
     <Compile Remove="Travel\DalamudLifestreamObjectInteractor.cs" />
     <Compile Remove="Travel\DalamudLifestreamPropertyTravel.cs" />
+    <Compile Remove="Travel\DalamudLifestreamAetheryteTravel.cs" />
     <Compile Remove="Travel\DalamudLifestreamLogin.cs" />
+    <Compile Remove="Travel\DalamudTravelReadiness.cs" />
+    <Compile Remove="Travel\DalamudVNavmeshTravel.cs" />
+    <Compile Remove="Automation\Vendors\DalamudGilVendorCatalogBuilder.cs" />
+    <Compile Remove="Automation\Vendors\DalamudVendorLocationCatalogBuilder.cs" />
+    <Compile Remove="Automation\Vendors\DalamudOrdinaryGilShop.cs" />
   </ItemGroup>
 
 </Project>

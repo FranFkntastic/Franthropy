@@ -106,8 +106,13 @@ internal sealed class FilterTokenizer(string source, FilterLimits limits, Diagno
                     TextSpan.FromBounds(start, position));
                 return Token(FilterTokenKind.Bad, start, hadWhitespace);
             case '-':
-                position++;
-                return Token(FilterTokenKind.Minus, start, hadWhitespace);
+                if (StartsStructuredNegation())
+                {
+                    position++;
+                    return Token(FilterTokenKind.Minus, start, hadWhitespace);
+                }
+
+                return ReadWord(hadWhitespace);
             case '"':
                 return ReadQuotedString(hadWhitespace);
             default:
@@ -207,9 +212,24 @@ internal sealed class FilterTokenizer(string source, FilterLimits limits, Diagno
         var current = source[index];
         if (char.IsWhiteSpace(current))
             return true;
-        if (current is '(' or ')' or ':' or '=' or '!' or '<' or '>' or '|' or '&' or '-' or '"')
+        if (current is '(' or ')' or ':' or '=' or '!' or '<' or '>' or '|' or '&' or '"')
             return true;
         return current == '.' && Peek(index - position + 1) == '.';
+    }
+
+    private bool StartsStructuredNegation()
+    {
+        var next = Peek(1);
+        if (next is '(' or '"' or '!')
+            return true;
+
+        var scan = position + 1;
+        while (scan < source.Length && !IsWordBoundary(scan))
+            scan++;
+
+        return scan > position + 1 &&
+               scan < source.Length &&
+               source[scan] is '(' or ':' or '=' or '!' or '<' or '>';
     }
 
     private bool SkipWhitespace()

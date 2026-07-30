@@ -1,6 +1,7 @@
 using Franthropy.Filtering.Semantics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Franthropy.Filtering.Documentation;
 
@@ -10,7 +11,81 @@ public sealed record FilterReferenceModel(
     string ContextSchemaVersion,
     IReadOnlyList<FilterFieldReference> Fields)
 {
-    public IReadOnlyList<FilterPredicateAlias> Predicates { get; init; } = [];
+    private IReadOnlyList<FilterPredicateAlias> predicates = [];
+    private IReadOnlyList<FilterPredicateReference> predicateReferences = [];
+
+    [JsonIgnore]
+    public IReadOnlyList<FilterPredicateAlias> Predicates
+    {
+        get => predicates.Count > 0
+            ? predicates
+            : predicateReferences.Select(ToAlias).ToArray();
+        init => predicates = value ?? [];
+    }
+
+    [JsonPropertyName("predicates")]
+    public IReadOnlyList<FilterPredicateReference> PredicateReferences
+    {
+        get => predicateReferences.Count > 0
+            ? predicateReferences
+            : predicates.Select(ToReference).ToArray();
+        init => predicateReferences = (value ?? []).Select(NormalizeReference).ToArray();
+    }
+
+    private static FilterPredicateReference NormalizeReference(FilterPredicateReference predicate) =>
+        string.IsNullOrEmpty(predicate.Operator)
+            ? predicate with { Operator = FilterComparisonOperator.ExactEquals.Display() }
+            : predicate;
+
+    private static FilterPredicateAlias ToAlias(FilterPredicateReference predicate) => new(
+        predicate.Qualifier,
+        predicate.Specifier,
+        predicate.TargetFieldKey,
+        predicate.TargetValue,
+        predicate.Description,
+        ParseOperator(predicate.Operator))
+    {
+        TargetValues = predicate.TargetValues.Count > 0
+            ? predicate.TargetValues
+            : [predicate.TargetValue],
+    };
+
+    private static FilterPredicateReference ToReference(FilterPredicateAlias predicate) => new(
+        predicate.Qualifier,
+        predicate.Specifier,
+        predicate.TargetFieldKey,
+        predicate.Operator.Display(),
+        predicate.TargetValue,
+        predicate.Description)
+    {
+        TargetValues = predicate.TargetValues,
+    };
+
+    private static FilterComparisonOperator ParseOperator(string? value) => value switch
+    {
+        null or "" => FilterComparisonOperator.ExactEquals,
+        ":" => FilterComparisonOperator.Match,
+        "=" => FilterComparisonOperator.Equals,
+        "!=" => FilterComparisonOperator.NotEquals,
+        "==" => FilterComparisonOperator.ExactEquals,
+        "!==" => FilterComparisonOperator.ExactNotEquals,
+        "<" => FilterComparisonOperator.Less,
+        "<=" => FilterComparisonOperator.LessOrEqual,
+        ">" => FilterComparisonOperator.Greater,
+        ">=" => FilterComparisonOperator.GreaterOrEqual,
+        _ => throw new JsonException($"Unknown filter comparison operator '{value}'."),
+    };
+}
+
+public sealed record FilterPredicateReference(
+    string Qualifier,
+    string Specifier,
+    string TargetFieldKey,
+    string Operator,
+    string TargetValue,
+    string Description)
+{
+    public IReadOnlyList<string> TargetValues { get; init; } = [];
 }
 
 public sealed record FilterFieldReference(
@@ -41,7 +116,10 @@ public static class FilterReferenceGenerator
                 true,
                 false,
                 catalog.GetPreferredName(field))).ToArray())
-        { Predicates = catalog.PredicateAliases };
+        {
+            Predicates = catalog.PredicateAliases,
+            PredicateReferences = CreatePredicates(catalog.PredicateAliases),
+        };
     }
 
     public static FilterReferenceModel Create<TRecord>(FilterContext<TRecord> context)
@@ -56,8 +134,24 @@ public static class FilterReferenceGenerator
                 context.AvailableKeys.Contains(field.Key),
                 context.DefaultTextBindings.Any(binding => binding.Field == field),
                 context.Catalog.GetPreferredName(field, context.AvailableKeys))).ToArray())
-        { Predicates = context.Catalog.PredicateAliases.Where(predicate => context.AvailableKeys.Contains(predicate.TargetFieldKey)).ToArray() };
+        {
+            Predicates = context.Catalog.PredicateAliases.Where(predicate => context.AvailableKeys.Contains(predicate.TargetFieldKey)).ToArray(),
+            PredicateReferences = CreatePredicates(context.Catalog.PredicateAliases.Where(predicate => context.AvailableKeys.Contains(predicate.TargetFieldKey))),
+        };
     }
+
+    private static IReadOnlyList<FilterPredicateReference> CreatePredicates(IEnumerable<FilterPredicateAlias> predicates) => predicates
+        .Select(predicate => new FilterPredicateReference(
+            predicate.Qualifier,
+            predicate.Specifier,
+            predicate.TargetFieldKey,
+            predicate.Operator.Display(),
+            predicate.TargetValue,
+            predicate.Description)
+        {
+            TargetValues = predicate.TargetValues,
+        })
+        .ToArray();
 
     private static FilterFieldReference CreateField(
         FilterField field,
@@ -96,11 +190,16 @@ public static class FilterReferenceWriter
         builder.Append("Catalog version: `").Append(reference.CatalogVersion).AppendLine("`").AppendLine();
         builder.Append("Context: `").Append(reference.ContextId).Append("` (schema `")
             .Append(reference.ContextSchemaVersion).AppendLine("`)").AppendLine();
-        if (reference.Predicates.Count > 0)
+        if (reference.PredicateReferences.Count > 0)
         {
             builder.AppendLine("## Predicates").AppendLine();
-            foreach (var predicate in reference.Predicates)
-                builder.Append("- `").Append(predicate.Qualifier).Append(':').Append(predicate.Specifier).Append("`: ").AppendLine(predicate.Description);
+            foreach (var predicate in reference.PredicateReferences)
+                builder.Append("- `").Append(predicate.Qualifier).Append(':').Append(predicate.Specifier)
+                    .Append("` -> `").Append(predicate.TargetFieldKey).Append(predicate.Operator)
+                    .Append(predicate.TargetValues.Count > 1
+                        ? $"({string.Join('|', predicate.TargetValues)})"
+                        : predicate.TargetValue)
+                    .Append("`: ").AppendLine(predicate.Description);
             builder.AppendLine();
         }
         foreach (var field in reference.Fields)

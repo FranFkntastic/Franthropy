@@ -7,6 +7,15 @@ public sealed record RetainerListEntry(string Name, bool IsActive);
 
 public static class RetainerUiAutomationText
 {
+    public static int? FindFirstActiveRetainerListIndex(IReadOnlyList<RetainerListEntry> entries)
+    {
+        for (var index = 0; index < entries.Count; index++)
+            if (entries[index].IsActive && !string.IsNullOrWhiteSpace(entries[index].Name))
+                return index;
+
+        return null;
+    }
+
     public static int? FindRetainerListIndex(IReadOnlyList<RetainerListEntry> entries, string retainerName)
     {
         for (var index = 0; index < entries.Count; index++)

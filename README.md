@@ -7,6 +7,7 @@ Shared FFXIV toolkit libraries for Franthropy plugins and tools.
 - `src/Franthropy.Filtering` - dependency-free filter syntax, diagnostics, typed binding, and evaluation primitives.
 - `src/Franthropy.FFXIV` - canonical, product-neutral FFXIV filter vocabulary and resolver contracts.
 - `src/Franthropy.Dalamud` - Dalamud-aware helper primitives such as world catalog lookups and Lifestream market-board travel command construction.
+- `src/Franthropy.Web` - web-facing adapters for shared Franthropy models.
 
 ## Current Scope
 
@@ -58,6 +59,9 @@ ComplicatedMarketBoard can then reference:
 
 ## Build
 
+The repository requires the .NET 8 and .NET 10 SDKs. `Franthropy.Dalamud`
+also expects a development Dalamud installation.
+
 ```powershell
 dotnet test .\Franthropy.sln -c Debug
 ```
@@ -66,4 +70,14 @@ dotnet test .\Franthropy.sln -c Debug
 
 - [Franthropy Filter Language](docs/design/filter-language.md) - proposed shared filtering engine, canonical FFXIV vocabulary, context binding model, diagnostics, and staged delivery plan.
 - [Canonical FFXIV Filter Vocabulary](docs/design/filter-vocabulary.md) - field semantics, named values, context availability, worked expressions, and vocabulary contribution rules.
-- [Filter Language and Inventory Viewer Implementation Roadmap](docs/design/filter-language-implementation.md) - living cross-repository sequence, Inventory Viewer upgrades, acceptance gates, testing, and decision log.
+
+## Contributing
+
+Pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), create
+changes from the `local-dev` integration branch, and keep each shared primitive
+small enough for an unrelated consumer to adopt without inheriting product
+policy. Report vulnerabilities privately as described in
+[SECURITY.md](SECURITY.md).
+
+Franthropy is licensed under the
+[GNU General Public License v3.0](LICENSE).
