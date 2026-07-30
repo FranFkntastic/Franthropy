@@ -8,7 +8,26 @@ Primary consumers: MarketMafioso, Squire, Craft Architect, inventory and retaine
 
 Canonical field reference: [Canonical FFXIV Filter Vocabulary](filter-vocabulary.md)
 
-Living implementation plan: [Filter Language and Inventory Viewer Implementation Roadmap](filter-language-implementation.md)
+## Contents
+
+- [Summary](#summary)
+- [Why this belongs in Franthropy](#why-this-belongs-in-franthropy)
+- [Design principles](#design-principles)
+- [Terminology](#terminology)
+- [Language surface](#language-surface)
+- [Type system and evaluation](#type-system-and-evaluation)
+- [Canonical FFXIV vocabulary](#canonical-ffxiv-vocabulary)
+- [API shape](#api-shape)
+- [Diagnostics and intrinsic verbiage](#diagnostics-and-intrinsic-verbiage)
+- [Completion, editor, and help surfaces](#completion-editor-and-help-surfaces)
+- [Persistence, compatibility, and versioning](#persistence-compatibility-and-versioning)
+- [Performance and safety](#performance-and-safety)
+- [Project structure](#project-structure)
+- [Testing strategy](#testing-strategy)
+- [Delivery plan](#delivery-plan)
+- [Explicit non-goals](#explicit-non-goals)
+- [Decisions recorded by this design](#decisions-recorded-by-this-design)
+- [Questions to settle during Phase 1](#questions-to-settle-during-phase-1)
 
 ## Summary
 

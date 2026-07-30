@@ -6,7 +6,21 @@ Audience: filter users, UI authors, context implementers, and vocabulary contrib
 
 Companion architecture: [Franthropy Filter Language](filter-language.md)
 
-Living implementation plan: [Filter Language and Inventory Viewer Implementation Roadmap](filter-language-implementation.md)
+## Contents
+
+- [Purpose](#purpose)
+- [Reading the vocabulary](#reading-the-vocabulary)
+- [Matching behavior by type](#matching-behavior-by-type)
+- [Item definition fields](#item-definition-fields)
+- [Item-instance fields](#item-instance-fields)
+- [Ownership fields](#ownership-fields)
+- [Purchase-offer fields](#purchase-offer-fields)
+- [Acquisition fields](#acquisition-fields)
+- [Context availability](#context-availability)
+- [Worked expressions](#worked-expressions)
+- [Filters inside rules](#filters-inside-rules)
+- [Adding vocabulary](#adding-vocabulary)
+- [Documentation and publication](#documentation-and-publication)
 
 ## Purpose
 
