@@ -4,7 +4,7 @@
     <Description>Canonical FFXIV domain vocabulary and data contracts for Franthropy tools.</Description>
     <Authors>FranFkntastic</Authors>
     <Copyright>FranFkntastic</Copyright>
-    <Version>0.1.0.0</Version>
+    <Version>0.1.0</Version>
     <LangVersion>latest</LangVersion>
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <Nullable>enable</Nullable>
@@ -12,8 +12,21 @@
     <Deterministic>true</Deterministic>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>CS1591</NoWarn>
-    <IsPackable>false</IsPackable>
+    <IsPackable>true</IsPackable>
+    <PackageId>Franthropy.FFXIV</PackageId>
+    <PackageProjectUrl>https://github.com/FranFkntastic/Franthropy</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/FranFkntastic/Franthropy</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
+    <PackageTags>ffxiv;domain-model;filtering</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Link="README.md" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Franthropy.Filtering\Franthropy.Filtering.csproj" />
   </ItemGroup>

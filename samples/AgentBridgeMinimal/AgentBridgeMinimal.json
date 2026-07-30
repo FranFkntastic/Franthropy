@@ -1,0 +1,13 @@
+{
+  "Author": "FranFkntastic",
+  "Name": "Agent Bridge Minimal Sample",
+  "Punchline": "Demonstrates a safe, read-only agent bridge host.",
+  "Description": "Example plugin showing authenticated discovery, a versioned manifest, and a read-only snapshot command.",
+  "InternalName": "AgentBridgeMinimal",
+  "AssemblyVersion": "0.1.0.0",
+  "DalamudApiLevel": 15,
+  "ApplicableVersion": "any",
+  "Tags": ["development", "sample", "agent", "bridge"],
+  "CategoryTags": ["developer tools"],
+  "IsTestingExclusive": true
+}

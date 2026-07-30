@@ -1,0 +1,23 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Platforms>x64</Platforms>
+    <Name>AgentBridgeMinimal</Name>
+    <AssemblyName>AgentBridgeMinimal</AssemblyName>
+    <Author>FranFkntastic</Author>
+    <Description>Minimal read-only Franthropy.AgentBridge sample plugin.</Description>
+    <Punchline>Demonstrates a safe agent bridge host.</Punchline>
+    <RepoUrl>https://github.com/FranFkntastic/Franthropy</RepoUrl>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Franthropy.AgentBridge\Franthropy.AgentBridge.csproj" />
+    <Content Include="AgentBridgeMinimal.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>
