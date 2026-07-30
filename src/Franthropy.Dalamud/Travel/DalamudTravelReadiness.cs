@@ -68,6 +68,8 @@ public sealed class DalamudTravelReadiness
             return Wait("Casting", "Waiting for the current cast to finish.");
         if (condition[ConditionFlag.OccupiedSummoningBell])
             return Wait("RetainerSessionReleasing", "Waiting for the summoning-bell session to release.");
+        if (condition[ConditionFlag.OccupiedInEvent])
+            return Wait("EventReleasing", "Waiting for the current game event to release.");
         if (objects.LocalPlayer is null)
             return Wait("PlayerUnavailable", "Waiting for the local player to become available.");
 
