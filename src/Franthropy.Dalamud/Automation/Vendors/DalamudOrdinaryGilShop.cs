@@ -3,7 +3,6 @@ using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using ECommons.Automation;
 using ECommons.Automation.UIInput;
-using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Franthropy.Dalamud.Automation.Retainers;
@@ -15,14 +14,18 @@ namespace Franthropy.Dalamud.Automation.Vendors;
 public sealed class DalamudGilVendorAccessReader
 {
     private static readonly TimeSpan AssessmentLifetime = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan AetheryteRefreshLifetime = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan FailedAetheryteRefreshBackoff = TimeSpan.FromSeconds(2);
     private const float MaximumLocationDistanceSquared = 30f * 30f;
     private readonly IClientState clientState;
     private readonly IPlayerState playerState;
     private readonly IObjectTable objectTable;
+    private readonly IAetheryteList aetheryteList;
     private readonly Func<DateTimeOffset> utcNow;
     private readonly Dictionary<(uint NpcId, uint ShopId, uint TerritoryId), CachedAssessment> assessments = [];
-    private IReadOnlySet<uint>? cachedAetherytes;
-    private DateTimeOffset aetherytesObservedAt;
+    private readonly GilVendorAetheryteSnapshot aetheryteSnapshot = new();
+    private DateTimeOffset nextAetheryteRefreshAt;
+    private string? aetheryteRefreshFailure;
     private uint cachedTerritory;
     private ulong cachedOwner;
 
@@ -30,25 +33,20 @@ public sealed class DalamudGilVendorAccessReader
         IClientState clientState,
         IPlayerState playerState,
         IObjectTable objectTable,
+        IAetheryteList aetheryteList,
         Func<DateTimeOffset>? utcNow = null)
     {
         this.clientState = clientState;
         this.playerState = playerState;
         this.objectTable = objectTable;
+        this.aetheryteList = aetheryteList;
         this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
 
     public GilVendorAccessAssessment Assess(GilVendorOffer offer)
     {
         ArgumentNullException.ThrowIfNull(offer);
-        if (cachedTerritory != clientState.TerritoryType ||
-            cachedOwner != playerState.ContentId)
-        {
-            cachedTerritory = clientState.TerritoryType;
-            cachedOwner = playerState.ContentId;
-            assessments.Clear();
-            cachedAetherytes = null;
-        }
+        SynchronizeOwnerAndTerritory();
         var key = (offer.NpcId, offer.ShopId, offer.TerritoryId);
         if (assessments.TryGetValue(key, out var cached) &&
             utcNow() - cached.ObservedAt < AssessmentLifetime)
@@ -59,6 +57,48 @@ public sealed class DalamudGilVendorAccessReader
         var assessment = AssessCore(offer);
         assessments[key] = new(utcNow(), assessment);
         return assessment;
+    }
+
+    /// <summary>
+    /// Captures the owner-scoped teleport list from Dalamud outside the render path.
+    /// Call this from a framework update; <see cref="Assess"/> only reads the managed snapshot.
+    /// </summary>
+    public void RefreshAttunedAetherytes()
+    {
+        SynchronizeOwnerAndTerritory();
+        var owner = playerState.ContentId;
+        if (!playerState.IsLoaded ||
+            owner == 0 ||
+            objectTable.LocalPlayer is null ||
+            utcNow() < nextAetheryteRefreshAt)
+        {
+            return;
+        }
+
+        try
+        {
+            var count = aetheryteList.Length;
+            var observed = new HashSet<uint>();
+            for (var index = 0; index < count; index++)
+            {
+                if (objectTable.LocalPlayer is null || playerState.ContentId != owner)
+                    return;
+                if (aetheryteList[index] is { } entry && entry.AetheryteId != 0)
+                    observed.Add(entry.AetheryteId);
+            }
+
+            if (objectTable.LocalPlayer is null || playerState.ContentId != owner)
+                return;
+            aetheryteSnapshot.Observe(owner, observed);
+            aetheryteRefreshFailure = null;
+            nextAetheryteRefreshAt = utcNow().Add(AetheryteRefreshLifetime);
+            assessments.Clear();
+        }
+        catch (Exception ex)
+        {
+            aetheryteRefreshFailure = ex.GetType().Name;
+            nextAetheryteRefreshAt = utcNow().Add(FailedAetheryteRefreshBackoff);
+        }
     }
 
     private GilVendorAccessAssessment AssessCore(GilVendorOffer offer)
@@ -73,27 +113,36 @@ public sealed class DalamudGilVendorAccessReader
                 : new(GilVendorAccessState.Probeable, "CurrentTerritory", "The vendor is in the current territory and will be verified before spending.");
         }
 
-        if (!TryReadCachedAttunedAetherytes(out var attuned))
-            return new(GilVendorAccessState.Unknown, "TeleportListUnavailable", "The character's live teleport destinations are unavailable.");
+        if (!aetheryteSnapshot.TryRead(playerState.ContentId, out var attuned))
+        {
+            var detail = string.IsNullOrWhiteSpace(aetheryteRefreshFailure)
+                ? "The character's teleport destinations are still being observed."
+                : $"The character's teleport destinations could not be observed ({aetheryteRefreshFailure}).";
+            return new(GilVendorAccessState.Unknown, "TeleportListUnavailable", detail);
+        }
         var route = offer.RouteAetheryteIds.FirstOrDefault(attuned.Contains);
         return route == 0
             ? new(GilVendorAccessState.Unavailable, "NoAttunedRoute", "No attuned destination reaches this vendor territory.")
             : new(GilVendorAccessState.Probeable, "AttunedRoute", "An attuned destination can reach this vendor.", route);
     }
 
-    private bool TryReadCachedAttunedAetherytes(out IReadOnlySet<uint> aetherytes)
+    private void SynchronizeOwnerAndTerritory()
     {
-        if (cachedAetherytes is not null &&
-            utcNow() - aetherytesObservedAt < AssessmentLifetime)
+        var owner = playerState.ContentId;
+        if (cachedOwner != owner)
         {
-            aetherytes = cachedAetherytes;
-            return true;
+            cachedOwner = owner;
+            aetheryteSnapshot.SynchronizeOwner(owner);
+            aetheryteRefreshFailure = null;
+            nextAetheryteRefreshAt = DateTimeOffset.MinValue;
+            assessments.Clear();
         }
-        if (!TryReadAttunedAetherytes(out aetherytes))
-            return false;
-        cachedAetherytes = aetherytes;
-        aetherytesObservedAt = utcNow();
-        return true;
+
+        if (cachedTerritory == clientState.TerritoryType)
+            return;
+        cachedTerritory = clientState.TerritoryType;
+        nextAetheryteRefreshAt = DateTimeOffset.MinValue;
+        assessments.Clear();
     }
 
     public IGameObject? FindLiveNpc(GilVendorOffer offer)
@@ -107,31 +156,6 @@ public sealed class DalamudGilVendorAccessReader
                 System.Numerics.Vector3.DistanceSquared(obj.Position, offer.Position) <= MaximumLocationDistanceSquared)
             .ToArray();
         return matches.Length == 1 ? matches[0] : null;
-    }
-
-    public unsafe bool TryTeleport(uint aetheryteId)
-    {
-        if (aetheryteId == 0 || !TryReadAttunedAetherytes(out var attuned) || !attuned.Contains(aetheryteId))
-            return false;
-        var telepo = Telepo.Instance();
-        return telepo != null && telepo->Teleport(aetheryteId, 0);
-    }
-
-    public static unsafe bool TryReadAttunedAetherytes(out IReadOnlySet<uint> aetherytes)
-    {
-        var telepo = Telepo.Instance();
-        if (telepo == null)
-        {
-            aetherytes = new HashSet<uint>();
-            return false;
-        }
-
-        telepo->UpdateAetheryteList();
-        var result = new HashSet<uint>();
-        for (var index = 0; index < telepo->TeleportList.Count; index++)
-            result.Add(telepo->TeleportList[index].AetheryteId);
-        aetherytes = result;
-        return true;
     }
 
     private sealed record CachedAssessment(

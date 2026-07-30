@@ -466,7 +466,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
     public PositionFrameShadowObservation ArmPositionFrameShadow(
         Vector3 expectedPosition,
         Vector3 hypotheticalPosition,
-        uint expectedOpcode = 0x2C6) =>
+        uint expectedOpcode = 0x1C8) =>
         talkPacketTransport?.ArmPositionFrameShadow(
             expectedPosition,
             hypotheticalPosition,
@@ -487,7 +487,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
     public PositionFrameShadowObservation ArmPositionFrameSubstitution(
         Vector3 expectedPosition,
         Vector3 hypotheticalPosition,
-        uint expectedOpcode = 0x2C6) =>
+        uint expectedOpcode = 0x1C8) =>
         talkPacketTransport?.ArmPositionFrameSubstitution(
             expectedPosition,
             hypotheticalPosition,
