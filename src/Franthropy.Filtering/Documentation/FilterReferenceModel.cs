@@ -43,7 +43,12 @@ public sealed record FilterReferenceModel(
         predicate.TargetFieldKey,
         predicate.TargetValue,
         predicate.Description,
-        ParseOperator(predicate.Operator));
+        ParseOperator(predicate.Operator))
+    {
+        TargetValues = predicate.TargetValues.Count > 0
+            ? predicate.TargetValues
+            : [predicate.TargetValue],
+    };
 
     private static FilterPredicateReference ToReference(FilterPredicateAlias predicate) => new(
         predicate.Qualifier,
@@ -51,7 +56,10 @@ public sealed record FilterReferenceModel(
         predicate.TargetFieldKey,
         predicate.Operator.Display(),
         predicate.TargetValue,
-        predicate.Description);
+        predicate.Description)
+    {
+        TargetValues = predicate.TargetValues,
+    };
 
     private static FilterComparisonOperator ParseOperator(string? value) => value switch
     {
@@ -75,7 +83,10 @@ public sealed record FilterPredicateReference(
     string TargetFieldKey,
     string Operator,
     string TargetValue,
-    string Description);
+    string Description)
+{
+    public IReadOnlyList<string> TargetValues { get; init; } = [];
+}
 
 public sealed record FilterFieldReference(
     string Key,
@@ -136,7 +147,10 @@ public static class FilterReferenceGenerator
             predicate.TargetFieldKey,
             predicate.Operator.Display(),
             predicate.TargetValue,
-            predicate.Description))
+            predicate.Description)
+        {
+            TargetValues = predicate.TargetValues,
+        })
         .ToArray();
 
     private static FilterFieldReference CreateField(
@@ -181,7 +195,10 @@ public static class FilterReferenceWriter
             builder.AppendLine("## Predicates").AppendLine();
             foreach (var predicate in reference.PredicateReferences)
                 builder.Append("- `").Append(predicate.Qualifier).Append(':').Append(predicate.Specifier)
-                    .Append("` -> `").Append(predicate.TargetFieldKey).Append(predicate.Operator).Append(predicate.TargetValue)
+                    .Append("` -> `").Append(predicate.TargetFieldKey).Append(predicate.Operator)
+                    .Append(predicate.TargetValues.Count > 1
+                        ? $"({string.Join('|', predicate.TargetValues)})"
+                        : predicate.TargetValue)
                     .Append("`: ").AppendLine(predicate.Description);
             builder.AppendLine();
         }

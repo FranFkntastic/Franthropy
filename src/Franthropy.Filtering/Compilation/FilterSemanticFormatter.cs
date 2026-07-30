@@ -67,7 +67,7 @@ internal static class FilterSemanticFormatter
             if (predicate is not null)
             {
                 var target = catalog.Resolve(predicate.TargetFieldKey, availableKeys).Field!;
-                WriteScalarComparison(builder, target, predicate.Operator, predicate.TargetValue);
+                WritePredicateComparison(builder, target, predicate);
                 return;
             }
         }
@@ -104,6 +104,29 @@ internal static class FilterSemanticFormatter
 
         var fuzzy = comparison is FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals;
         builder.Append(Quote(field.NormalizeLiteral(value, fuzzy) ?? FilterText.Normalize(value)));
+    }
+
+    private static void WritePredicateComparison(
+        StringBuilder builder,
+        FilterField field,
+        FilterPredicateAlias predicate)
+    {
+        if (predicate.TargetValues.Count == 1)
+        {
+            WriteScalarComparison(builder, field, predicate.Operator, predicate.TargetValues[0]);
+            return;
+        }
+
+        builder.Append(field.Key).Append(SemanticOperator(field, predicate.Operator)).Append('(');
+        var fuzzy = predicate.Operator is FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals;
+        for (var index = 0; index < predicate.TargetValues.Count; index++)
+        {
+            if (index > 0)
+                builder.Append('|');
+            var value = predicate.TargetValues[index];
+            builder.Append(Quote(field.NormalizeLiteral(value, fuzzy) ?? FilterText.Normalize(value)));
+        }
+        builder.Append(')');
     }
 
     private static string SemanticOperator(FilterField? field, FilterComparisonOperator comparison) => comparison switch

@@ -4,7 +4,7 @@ namespace Franthropy.FFXIV.Filtering;
 
 public sealed class FfxivFilterCatalog
 {
-    public const string CurrentVersion = "1.4";
+    public const string CurrentVersion = "1.5";
 
     private FfxivFilterCatalog(IFfxivFilterResolvers resolvers)
     {
@@ -55,6 +55,13 @@ public sealed class FfxivFilterCatalog
             new("is", "hq", InstanceQuality.Key, nameof(FfxivItemQuality.HQ), "Item is high quality."),
             new("is", "nq", InstanceQuality.Key, nameof(FfxivItemQuality.NQ), "Item is normal quality."),
             new("is", "stackable", ItemMaxStackSize.Key, "1", "Item can occupy a stack larger than one.", FilterComparisonOperator.Greater),
+            new(
+                "is",
+                "equippable",
+                ItemSlots.Key,
+                Enum.GetNames<FfxivEquipmentSlot>(),
+                "Item occupies at least one equipment slot.",
+                FilterComparisonOperator.Match),
             new("is", "vendorBuyable", AcquisitionSources.Key, nameof(FfxivAcquisitionSource.Vendor), "Item is known to be purchasable from an ordinary gil vendor."),
         ]);
     }

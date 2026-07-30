@@ -175,9 +175,12 @@ Initial canonical values follow Franthropy equipment semantics: `mainHand`, `off
 ```text
 slot:ring
 slot:(head | body | hands | legs | feet)
+is:equippable
 ```
 
 An item capable of occupying either ring position still has the semantic slot `ring`; left and right placement belongs to loadout positioning, not item identity.
+
+`is:equippable` lowers to overlap with the complete `item.slot` vocabulary. It therefore follows authoritative equipment-slot evidence instead of guessing from equip level, UI category, or another duplicate Boolean.
 
 ### `item.rarity`
 
