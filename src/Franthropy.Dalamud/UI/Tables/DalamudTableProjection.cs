@@ -113,6 +113,29 @@ public sealed class DalamudTableProjection<TRow>
         DrawCells(row, id);
     }
 
+    public void DrawMessageRow(
+        string message,
+        int columnIndex = 0,
+        Vector4? textColor = null,
+        float minimumHeight = 0f)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        if ((uint)columnIndex >= (uint)columns.Count)
+            throw new ArgumentOutOfRangeException(nameof(columnIndex));
+
+        ImGui.TableNextRow(ImGuiTableRowFlags.None, minimumHeight);
+        for (var index = 0; index < columns.Count; index++)
+        {
+            ImGui.TableNextColumn();
+            if (index != columnIndex)
+                continue;
+            if (textColor is { } color)
+                ImGui.TextColored(color, message);
+            else
+                ImGui.TextDisabled(message);
+        }
+    }
+
     public bool DrawSelectableRow<TKey>(
         TRow row,
         TableSelectionModel<TKey> selection,
