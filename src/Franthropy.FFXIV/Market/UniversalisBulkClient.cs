@@ -285,8 +285,6 @@ public sealed class UniversalisBulkClient
                             shouldSplit: false);
                     }
 
-                    if (response.StatusCode == HttpStatusCode.TooManyRequests)
-                        ApplyRateLimitCooldown(response);
                     shouldSplit = response.StatusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.GatewayTimeout;
                     lastException = new HttpRequestException(
                         $"Universalis returned {(int)response.StatusCode} {response.StatusCode}.",
@@ -335,7 +333,10 @@ public sealed class UniversalisBulkClient
         try
         {
             await WaitForRequestSlotAsync(cancellationToken).ConfigureAwait(false);
-            return await httpClient.GetAsync(uri, cancellationToken).ConfigureAwait(false);
+            var response = await httpClient.GetAsync(uri, cancellationToken).ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                ApplyRateLimitCooldown(response);
+            return response;
         }
         finally
         {
@@ -348,12 +349,26 @@ public sealed class UniversalisBulkClient
         await requestStartGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var delay = nextRequestAtUtc - DateTimeOffset.UtcNow;
-            if (delay > TimeSpan.Zero)
-                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            while (true)
+            {
+                TimeSpan delay;
+                lock (requestScheduleSync)
+                    delay = nextRequestAtUtc - DateTimeOffset.UtcNow;
+                if (delay > TimeSpan.Zero)
+                {
+                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
 
-            lock (requestScheduleSync)
-                nextRequestAtUtc = DateTimeOffset.UtcNow + options.MinimumRequestSpacing;
+                lock (requestScheduleSync)
+                {
+                    var now = DateTimeOffset.UtcNow;
+                    if (nextRequestAtUtc > now)
+                        continue;
+                    nextRequestAtUtc = now + options.MinimumRequestSpacing;
+                    return;
+                }
+            }
         }
         finally
         {
