@@ -121,6 +121,7 @@
     <Compile Remove="Automation\Vendors\DalamudGilVendorCatalogBuilder.cs" />
     <Compile Remove="Automation\Vendors\DalamudVendorLocationCatalogBuilder.cs" />
     <Compile Remove="Automation\Vendors\DalamudOrdinaryGilShop.cs" />
+    <Compile Remove="Automation\MarketBoard\DalamudMarketBoardListingObserver.cs" />
   </ItemGroup>
 
 </Project>
