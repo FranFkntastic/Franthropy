@@ -66,9 +66,8 @@ internal static class FilterSemanticFormatter
             var predicate = catalog.ResolvePredicate(syntax.Field.Value, scalar.Token.Value);
             if (predicate is not null)
             {
-                var target = catalog.Resolve(predicate.TargetFieldKey, availableKeys).Field;
-                builder.Append(predicate.TargetFieldKey).Append("==")
-                    .Append(Quote(target?.NormalizeLiteral(predicate.TargetValue, false) ?? predicate.TargetValue));
+                var target = catalog.Resolve(predicate.TargetFieldKey, availableKeys).Field!;
+                WriteScalarComparison(builder, target, predicate.Operator, predicate.TargetValue);
                 return;
             }
         }
@@ -79,13 +78,7 @@ internal static class FilterSemanticFormatter
         var comparison = FilterComparisonOperatorExtensions.TryFromToken(syntax.Comparator, out var parsed)
             ? parsed
             : FilterComparisonOperator.Match;
-        var semanticOperator = comparison switch
-        {
-            FilterComparisonOperator.Match when field?.ValueKind == FilterValueKind.Text => "=",
-            FilterComparisonOperator.Match when field?.MatchUsesRecordFuzzy == true => ":",
-            FilterComparisonOperator.Match => "==",
-            _ => comparison.Display(),
-        };
+        var semanticOperator = SemanticOperator(field, comparison);
         builder.Append(semanticOperator);
         if (comparison == FilterComparisonOperator.Match && field?.MatchUsesRecordFuzzy == true)
         {
@@ -95,6 +88,31 @@ internal static class FilterSemanticFormatter
         WriteValue(builder, syntax.Value, field,
             comparison is FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals);
     }
+
+    private static void WriteScalarComparison(
+        StringBuilder builder,
+        FilterField field,
+        FilterComparisonOperator comparison,
+        string value)
+    {
+        builder.Append(field.Key).Append(SemanticOperator(field, comparison));
+        if (comparison == FilterComparisonOperator.Match && field.MatchUsesRecordFuzzy)
+        {
+            builder.Append(Quote(FilterText.Normalize(value)));
+            return;
+        }
+
+        var fuzzy = comparison is FilterComparisonOperator.Equals or FilterComparisonOperator.NotEquals;
+        builder.Append(Quote(field.NormalizeLiteral(value, fuzzy) ?? FilterText.Normalize(value)));
+    }
+
+    private static string SemanticOperator(FilterField? field, FilterComparisonOperator comparison) => comparison switch
+    {
+        FilterComparisonOperator.Match when field?.ValueKind == FilterValueKind.Text => "=",
+        FilterComparisonOperator.Match when field?.MatchUsesRecordFuzzy == true => ":",
+        FilterComparisonOperator.Match => "==",
+        _ => comparison.Display(),
+    };
 
     private static void WriteValue(StringBuilder builder, FilterValueSyntax value, FilterField? field, bool fuzzy)
     {

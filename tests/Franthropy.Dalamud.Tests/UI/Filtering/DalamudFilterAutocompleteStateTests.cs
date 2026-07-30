@@ -7,6 +7,96 @@ namespace Franthropy.Dalamud.Tests.UI.Filtering;
 public sealed class DalamudFilterAutocompleteStateTests
 {
     [Fact]
+    public void DownMovesToTheNextSuggestion()
+    {
+        var input = DalamudFilterAutocompleteInput.Decide(
+            inputActive: true,
+            suggestionCount: 3,
+            downPressed: true,
+            upPressed: false,
+            tabPressed: false);
+
+        Assert.Equal(1, input.SelectionDelta);
+        Assert.False(input.ApplyCompletion);
+        Assert.False(input.KeepInputFocused);
+    }
+
+    [Fact]
+    public void UpMovesToThePreviousSuggestion()
+    {
+        var input = DalamudFilterAutocompleteInput.Decide(
+            inputActive: true,
+            suggestionCount: 3,
+            downPressed: false,
+            upPressed: true,
+            tabPressed: false);
+
+        Assert.Equal(-1, input.SelectionDelta);
+        Assert.False(input.ApplyCompletion);
+        Assert.False(input.KeepInputFocused);
+    }
+
+    [Fact]
+    public void CompletionCallbackAppliesTheSelectedSuggestion()
+    {
+        var state = new DalamudFilterAutocompleteState();
+        state.SetExpression("is:h", 4);
+        var completion = new FilterCompletionItem(
+            "hq",
+            "hq",
+            FilterCompletionKind.Value,
+            new TextSpan(3, 1));
+        var input = DalamudFilterAutocompleteInput.Decide(
+            inputActive: true,
+            suggestionCount: 1,
+            downPressed: false,
+            upPressed: false,
+            tabPressed: true);
+
+        Assert.True(input.ApplyCompletion);
+        Assert.True(input.KeepInputFocused);
+        Assert.True(state.TryApply([completion]));
+        Assert.Equal("is:hq", state.Expression);
+        Assert.Equal(5, state.CaretPosition);
+    }
+
+    [Fact]
+    public void TabWithoutSuggestionsKeepsTheInputFocusedWithoutChangingText()
+    {
+        var state = new DalamudFilterAutocompleteState();
+        state.SetExpression("quality:h", 9);
+        var input = DalamudFilterAutocompleteInput.Decide(
+            inputActive: true,
+            suggestionCount: 0,
+            downPressed: false,
+            upPressed: false,
+            tabPressed: true);
+
+        if (input.KeepInputFocused)
+            state.RequestFocus();
+
+        Assert.False(input.ApplyCompletion);
+        Assert.Equal("quality:h", state.Expression);
+        Assert.Equal(9, state.CaretPosition);
+    }
+
+    [Fact]
+    public void InputFlagsConsumeTabForCompletionInsteadOfFocusTraversal()
+    {
+        Assert.True(DalamudFilterAutocompleteRenderer.InputFlagsConsumeTab);
+    }
+
+    [Fact]
+    public void SuggestionWindowRemainsMouseSelectable()
+    {
+        Assert.True(DalamudFilterAutocompleteRenderer.SuggestionWindowAllowsMouseSelection);
+        Assert.True(DalamudFilterAutocompleteRenderer.SuggestionWindowAllowsScrolling);
+        Assert.True(DalamudFilterAutocompleteRenderer.SuggestionWindowUsesInteractivePopupStyle);
+        Assert.True(DalamudFilterAutocompleteRenderer.MaximumVisibleItems > 8);
+        Assert.True(DalamudFilterAutocompleteRenderer.DefaultMaximumItems >= 9);
+    }
+
+    [Fact]
     public void AppliesCompletionAtCaretWithoutReplacingSurroundingExpression()
     {
         var state = new DalamudFilterAutocompleteState();
