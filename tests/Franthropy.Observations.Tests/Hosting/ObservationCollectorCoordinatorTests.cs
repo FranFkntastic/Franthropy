@@ -45,6 +45,22 @@ public sealed class ObservationCollectorCoordinatorTests
     }
 
     [Fact]
+    public async Task Candidate_watcher_fault_marks_leader_ineligible_and_relinquishes_without_a_heartbeat()
+    {
+        using var fixture = new CoordinatorFixture();
+        using var leader = fixture.Create("Leader", "leader", new Version(2, 0), 2);
+        using var follower = fixture.Create("Follower", "follower", new Version(1, 0), 1);
+        leader.Start();
+        follower.Start();
+        await WaitForStateAsync(leader, ObservationLeadershipState.Collector);
+
+        leader.ReportCandidateObservationFault(new IOException("synthetic watcher failure"));
+
+        await WaitForStateAsync(leader, ObservationLeadershipState.Faulted);
+        await WaitForStateAsync(follower, ObservationLeadershipState.Collector);
+    }
+
+    [Fact]
     public async Task Quiet_inputs_produce_no_election_or_candidate_writes()
     {
         using var fixture = new CoordinatorFixture();

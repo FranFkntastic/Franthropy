@@ -124,6 +124,19 @@ public sealed class ObservationCollectorCoordinator : IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(reason);
         if (!started)
             throw new InvalidOperationException("The coordinator has not started.");
+        RecordFault(reason);
+    }
+
+    internal void ReportCandidateObservationFault(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        if (disposed || !started)
+            return;
+        RecordFault($"Candidate change observation failed: {exception.Message}");
+    }
+
+    private void RecordFault(string reason)
+    {
         faultReason = reason;
         WriteCandidate(candidateStream!);
         changed.Set();
@@ -416,11 +429,8 @@ public sealed class ObservationCollectorCoordinator : IDisposable
 
     private void OnCandidateChanged(object sender, FileSystemEventArgs e) => changed.Set();
     private void OnCandidateRenamed(object sender, RenamedEventArgs e) => changed.Set();
-    private void OnWatcherError(object sender, ErrorEventArgs e)
-    {
-        faultReason = $"Candidate change observation failed: {e.GetException().Message}";
-        changed.Set();
-    }
+    private void OnWatcherError(object sender, ErrorEventArgs e) =>
+        ReportCandidateObservationFault(e.GetException());
 
     private static string HashName(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
