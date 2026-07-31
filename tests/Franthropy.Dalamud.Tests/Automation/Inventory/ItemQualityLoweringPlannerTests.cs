@@ -38,6 +38,21 @@ public sealed class ItemQualityLoweringPlannerTests
     }
 
     [Fact]
+    public void ResolveNext_PrefersOneCoveringStackOverMultipleSmallerConversions()
+    {
+        var result = ItemQualityLoweringPlanner.ResolveNext(
+            [new(100, "Cobalt Joint Plate", 600)],
+            [
+                Stack(0, 100, 480, highQuality: false),
+                Stack(1, 100, 100, highQuality: true),
+                Stack(2, 100, 999, highQuality: true),
+            ]);
+
+        Assert.True(result.Success);
+        Assert.Equal(999, result.Stack!.Quantity);
+    }
+
+    [Fact]
     public void ResolveNext_FailsWhenCombinedStockCannotCoverRequirement()
     {
         var result = ItemQualityLoweringPlanner.ResolveNext(

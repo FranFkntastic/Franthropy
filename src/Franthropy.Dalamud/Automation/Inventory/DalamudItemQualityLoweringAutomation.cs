@@ -76,9 +76,6 @@ public static class ItemQualityLoweringPlanner
 
             var highQuality = matching
                 .Where(stack => stack.IsHighQuality)
-                .OrderBy(stack => stack.Quantity)
-                .ThenBy(stack => stack.Container)
-                .ThenBy(stack => stack.SlotIndex)
                 .ToArray();
             var highQualityQuantity = highQuality.Sum(stack => stack.Quantity);
             if (highQualityQuantity < remaining)
@@ -92,11 +89,22 @@ public static class ItemQualityLoweringPlanner
                     remaining);
             }
 
+            var next = highQuality
+                .Where(stack => stack.Quantity >= remaining)
+                .OrderBy(stack => stack.Quantity)
+                .ThenBy(stack => stack.Container)
+                .ThenBy(stack => stack.SlotIndex)
+                .FirstOrDefault()
+                ?? highQuality
+                    .OrderByDescending(stack => stack.Quantity)
+                    .ThenBy(stack => stack.Container)
+                    .ThenBy(stack => stack.SlotIndex)
+                    .First();
             return new(
                 true,
                 false,
-                $"Lowering {highQuality[0].Quantity:N0} {requirement.ItemName} from HQ to NQ.",
-                highQuality[0],
+                $"Lowering {next.Quantity:N0} {requirement.ItemName} from HQ to NQ.",
+                next,
                 remaining);
         }
 
@@ -373,8 +381,19 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
         return Snapshot;
     }
 
-    private ItemQualityLoweringAutomationSnapshot Fail(string message)
+    private unsafe ItemQualityLoweringAutomationSnapshot Fail(string message)
     {
+        var yesNo = gameGui.GetAddonByName<AddonSelectYesno>(SelectYesNoAddon, 1);
+        var agent = AgentInventoryContext.Instance();
+        if (activeStack is not null &&
+            Snapshot.State == ItemQualityLoweringAutomationState.WaitingForConfirmation &&
+            IsExpectedConfirmation(yesNo, agent, activeStack) &&
+            yesNo->NoButton != null &&
+            yesNo->NoButton->IsEnabled)
+        {
+            yesNo->NoButton->ClickAddonButton(&yesNo->AtkUnitBase);
+        }
+
         activeStack = null;
         deadline = default;
         Snapshot = new(ItemQualityLoweringAutomationState.Failed, message, null, 0, false);
