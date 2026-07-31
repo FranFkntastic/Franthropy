@@ -232,14 +232,31 @@ public sealed class UniversalisBulkClient
                 itemIds[..midpoint],
                 itemIds[midpoint..],
             };
-            await Task.WhenAll(halves.Select(half => FetchChunkWithRecoveryAsync(
-                half,
-                request,
-                serializerOptions,
-                items,
-                failures,
-                splitDepth + 1,
-                cancellationToken))).ConfigureAwait(false);
+            if (request.UseParallelRequests)
+            {
+                await Task.WhenAll(halves.Select(half => FetchChunkWithRecoveryAsync(
+                    half,
+                    request,
+                    serializerOptions,
+                    items,
+                    failures,
+                    splitDepth + 1,
+                    cancellationToken))).ConfigureAwait(false);
+            }
+            else
+            {
+                foreach (var half in halves)
+                {
+                    await FetchChunkWithRecoveryAsync(
+                        half,
+                        request,
+                        serializerOptions,
+                        items,
+                        failures,
+                        splitDepth + 1,
+                        cancellationToken).ConfigureAwait(false);
+                }
+            }
             return;
         }
 
@@ -266,12 +283,10 @@ public sealed class UniversalisBulkClient
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             }
 
-            using var attemptCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            attemptCancellation.CancelAfter(options.AttemptTimeout);
             try
             {
                 var uri = BuildRequestUri(request, itemIds);
-                using var response = await SendAsync(uri, attemptCancellation.Token).ConfigureAwait(false);
+                using var response = await SendAsync(uri, cancellationToken).ConfigureAwait(false);
                 lastStatusCode = response.StatusCode;
 
                 if (!response.IsSuccessStatusCode)
@@ -294,10 +309,10 @@ public sealed class UniversalisBulkClient
                 }
 
                 await using var stream = await response.Content
-                    .ReadAsStreamAsync(attemptCancellation.Token)
+                    .ReadAsStreamAsync(cancellationToken)
                     .ConfigureAwait(false);
                 using var document = await JsonDocument
-                    .ParseAsync(stream, cancellationToken: attemptCancellation.Token)
+                    .ParseAsync(stream, cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
                 return ParseResponse<TItem>(document.RootElement, itemIds, serializerOptions);
             }
@@ -333,7 +348,9 @@ public sealed class UniversalisBulkClient
         try
         {
             await WaitForRequestSlotAsync(cancellationToken).ConfigureAwait(false);
-            var response = await httpClient.GetAsync(uri, cancellationToken).ConfigureAwait(false);
+            using var attemptCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            attemptCancellation.CancelAfter(options.AttemptTimeout);
+            var response = await httpClient.GetAsync(uri, attemptCancellation.Token).ConfigureAwait(false);
             if (response.StatusCode == HttpStatusCode.TooManyRequests)
                 ApplyRateLimitCooldown(response);
             return response;

@@ -73,6 +73,49 @@ public sealed class UniversalisBulkClientTests
     }
 
     [Fact]
+    public async Task Queued_chunk_receives_its_own_attempt_timeout_after_acquiring_a_request_slot()
+    {
+        var handler = new FirstRequestTimesOutHandler();
+        var client = CreateClient(
+            handler,
+            chunkSize: 1,
+            maxConcurrency: 1,
+            maxAttempts: 1,
+            attemptTimeout: TimeSpan.FromMilliseconds(50));
+
+        var result = await client.FetchAsync<ItemResponse>(new UniversalisBulkRequest
+        {
+            WorldOrDataCenter = "Aether",
+            ItemIds = [1, 2],
+        });
+
+        Assert.Equal([1u, 2u, 1u], handler.RequestedItemIds);
+        Assert.Empty(result.MissingItemIds);
+        Assert.True(result.Items.ContainsKey(2));
+    }
+
+    [Fact]
+    public async Task Serial_mode_keeps_split_recovery_requests_serial()
+    {
+        var handler = new RecordingHandler(
+            request => request.RequestUri!.AbsolutePath.EndsWith("/1,2", StringComparison.Ordinal)
+                ? new HttpResponseMessage(HttpStatusCode.GatewayTimeout)
+                : BulkResponse(request),
+            responseDelay: TimeSpan.FromMilliseconds(30));
+        var client = CreateClient(handler, chunkSize: 2, maxConcurrency: 2, maxAttempts: 1);
+
+        var result = await client.FetchAsync<ItemResponse>(new UniversalisBulkRequest
+        {
+            WorldOrDataCenter = "Aether",
+            ItemIds = [1, 2],
+            UseParallelRequests = false,
+        });
+
+        Assert.Equal(2, result.Items.Count);
+        Assert.Equal(1, handler.MaximumConcurrency);
+    }
+
+    [Fact]
     public async Task MissingItems_AreRetriedThenReportedExplicitly()
     {
         var handler = new RecordingHandler(_ => JsonResponse(
@@ -94,7 +137,9 @@ public sealed class UniversalisBulkClientTests
     private static UniversalisBulkClient CreateClient(
         HttpMessageHandler handler,
         int chunkSize = 10,
-        int maxConcurrency = 2) =>
+        int maxConcurrency = 2,
+        int maxAttempts = 2,
+        TimeSpan? attemptTimeout = null) =>
         new(
             new HttpClient(handler),
             new Uri("https://example.test/api/v2/"),
@@ -102,10 +147,11 @@ public sealed class UniversalisBulkClientTests
             {
                 ChunkSize = chunkSize,
                 MaxConcurrentRequests = maxConcurrency,
+                MaxAttemptsPerChunk = maxAttempts,
                 MinimumRequestSpacing = TimeSpan.Zero,
                 DefaultRetryDelay = TimeSpan.Zero,
                 DefaultRateLimitCooldown = TimeSpan.Zero,
-                AttemptTimeout = TimeSpan.FromSeconds(2),
+                AttemptTimeout = attemptTimeout ?? TimeSpan.FromSeconds(2),
             });
 
     private static HttpResponseMessage BulkResponse(HttpRequestMessage request)
@@ -171,6 +217,25 @@ public sealed class UniversalisBulkClientTests
                     return;
                 observed = previous;
             }
+        }
+    }
+
+    private sealed class FirstRequestTimesOutHandler : HttpMessageHandler
+    {
+        private readonly ConcurrentQueue<uint> requestedItemIds = new();
+        private int requestCount;
+
+        public int RequestCount => Volatile.Read(ref requestCount);
+        public IReadOnlyList<uint> RequestedItemIds => requestedItemIds.ToArray();
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            requestedItemIds.Enqueue(uint.Parse(request.RequestUri!.AbsolutePath.Split('/').Last()));
+            if (Interlocked.Increment(ref requestCount) == 1)
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return BulkResponse(request);
         }
     }
 
