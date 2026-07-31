@@ -36,6 +36,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Franthropy.AgentBridge\Franthropy.AgentBridge.csproj" />
     <ProjectReference Include="..\Franthropy.Filtering\Franthropy.Filtering.csproj" />
+    <ProjectReference Include="..\Franthropy.Observations\Franthropy.Observations.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -123,6 +124,7 @@
     <Compile Remove="Automation\Vendors\DalamudVendorLocationCatalogBuilder.cs" />
     <Compile Remove="Automation\Vendors\DalamudOrdinaryGilShop.cs" />
     <Compile Remove="Automation\MarketBoard\DalamudMarketBoardListingObserver.cs" />
+    <Compile Remove="Observations\DalamudSharedObservationHost.cs" />
   </ItemGroup>
 
 </Project>
