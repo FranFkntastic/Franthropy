@@ -20,6 +20,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\Franthropy.AgentBridge\Franthropy.AgentBridge.csproj" />
     <ProjectReference Include="..\..\src\Franthropy.Dalamud\Franthropy.Dalamud.csproj" />
     <ProjectReference Include="..\..\src\Franthropy.Filtering\Franthropy.Filtering.csproj" />
   </ItemGroup>
@@ -36,6 +37,10 @@
     </Reference>
     <Reference Include="Dalamud.Bindings.ImGui">
       <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\Dalamud.Bindings.ImGui.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="FFXIVClientStructs">
+      <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\FFXIVClientStructs.dll</HintPath>
       <Private>true</Private>
     </Reference>
   </ItemGroup>

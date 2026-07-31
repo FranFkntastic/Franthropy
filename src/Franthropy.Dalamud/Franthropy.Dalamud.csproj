@@ -92,6 +92,7 @@
     <Compile Remove="Automation\Retainers\RetainerAutomationContracts.cs" />
     <Compile Remove="Automation\Ui\RenderedItemDetailTooltipRequest.cs" />
     <Compile Remove="Automation\Inventory\DalamudInventoryStackScanner.cs" />
+    <Compile Remove="Automation\Inventory\DalamudItemQualityLoweringAutomation.cs" />
     <Compile Remove="Automation\Retainers\DalamudRetainerCrystalTransfer.cs" />
     <Compile Remove="Automation\Retainers\DalamudRetainerItemTransfer.cs" />
     <Compile Remove="Automation\Retainers\DalamudRetainerItemRetrieval.cs" />
