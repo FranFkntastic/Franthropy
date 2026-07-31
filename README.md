@@ -7,6 +7,7 @@ Shared FFXIV toolkit libraries for Franthropy plugins and tools.
 - `src/Franthropy.AgentBridge` - authenticated agent-bridge wire contracts, hosting, reviewed controls, and operation receipts without a Dalamud dependency.
 - `src/Franthropy.Filtering` - dependency-free filter syntax, diagnostics, typed binding, and evaluation primitives.
 - `src/Franthropy.FFXIV` - canonical, product-neutral FFXIV filter vocabulary and resolver contracts.
+- `src/Franthropy.Observations` - versioned shared observation contracts, truthful-state validation, and SQLite persistence.
 - `src/Franthropy.Dalamud` - Dalamud-aware helper primitives such as world catalog lookups and Lifestream market-board travel command construction.
 - `src/Franthropy.Web` - web-facing adapters for shared Franthropy models.
 
@@ -19,6 +20,7 @@ The toolkit scope is intentionally small:
 - world catalog lookup
 - Lifestream market-board travel command construction
 - immutable character and equipment observation contracts
+- durable owner-scoped inventory and retainer observation contracts
 - neutral equipment-use and gearset-protection analysis
 - frame-validated UI review primitives
 
@@ -51,6 +53,7 @@ projects:
 dotnet add package Franthropy.AgentBridge
 dotnet add package Franthropy.Filtering
 dotnet add package Franthropy.FFXIV
+dotnet add package Franthropy.Observations
 dotnet add package Franthropy.Web
 ```
 

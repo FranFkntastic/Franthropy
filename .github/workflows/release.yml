@@ -36,6 +36,7 @@ jobs:
             'tests/Franthropy.AgentBridge.Tests/Franthropy.AgentBridge.Tests.csproj',
             'tests/Franthropy.Filtering.Tests/Franthropy.Filtering.Tests.csproj',
             'tests/Franthropy.FFXIV.Tests/Franthropy.FFXIV.Tests.csproj',
+            'tests/Franthropy.Observations.Tests/Franthropy.Observations.Tests.csproj',
             'tests/Franthropy.Web.Tests/Franthropy.Web.Tests.csproj'
           )
           foreach ($project in $tests) {
@@ -50,6 +51,7 @@ jobs:
             'src/Franthropy.AgentBridge/Franthropy.AgentBridge.csproj',
             'src/Franthropy.Filtering/Franthropy.Filtering.csproj',
             'src/Franthropy.FFXIV/Franthropy.FFXIV.csproj',
+            'src/Franthropy.Observations/Franthropy.Observations.csproj',
             'src/Franthropy.Web/Franthropy.Web.csproj'
           )
           foreach ($project in $projects) {

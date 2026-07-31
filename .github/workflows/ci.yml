@@ -29,6 +29,9 @@ jobs:
       - name: Test FFXIV contracts
         run: dotnet test tests/Franthropy.FFXIV.Tests/Franthropy.FFXIV.Tests.csproj -c Release
 
+      - name: Test shared observations
+        run: dotnet test tests/Franthropy.Observations.Tests/Franthropy.Observations.Tests.csproj -c Release
+
       - name: Test web primitives
         run: dotnet test tests/Franthropy.Web.Tests/Franthropy.Web.Tests.csproj -c Release
 
@@ -39,6 +42,7 @@ jobs:
             'src/Franthropy.AgentBridge/Franthropy.AgentBridge.csproj',
             'src/Franthropy.Filtering/Franthropy.Filtering.csproj',
             'src/Franthropy.FFXIV/Franthropy.FFXIV.csproj',
+            'src/Franthropy.Observations/Franthropy.Observations.csproj',
             'src/Franthropy.Web/Franthropy.Web.csproj'
           )
           foreach ($project in $projects) {
