@@ -8,6 +8,7 @@ tests, packs, and attaches the reusable NuGet packages to a GitHub release.
 - `Franthropy.AgentBridge`
 - `Franthropy.Filtering`
 - `Franthropy.FFXIV`
+- `Franthropy.Observations`
 - `Franthropy.Web`
 
 `Franthropy.Dalamud` is intentionally excluded until its patch-sensitive,
