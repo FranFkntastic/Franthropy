@@ -5,7 +5,7 @@ namespace Franthropy.Observations.V1;
 public static class ObservationContract
 {
     public static ObservationVersion Version { get; } = new(1, 0);
-    public static ObservationVersion SchemaVersion { get; } = new(1, 0);
+    public static ObservationVersion SchemaVersion { get; } = new(1, 1);
 }
 
 public readonly record struct ObservationVersion(int Major, int Minor) : IComparable<ObservationVersion>

@@ -9,7 +9,7 @@ namespace Franthropy.Observations.Storage;
 
 public sealed class SqliteObservationStore : IObservationStore
 {
-    private const int SchemaUserVersion = 1000;
+    private const int SchemaUserVersion = 1001;
     private const int SqliteBusy = 5;
     private const int SqliteLocked = 6;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -66,7 +66,7 @@ public sealed class SqliteObservationStore : IObservationStore
             }
 
             var userVersion = await ExecuteScalarInt64Async(connection, "PRAGMA user_version;", cancellationToken).ConfigureAwait(false);
-            if (userVersion != 0 && userVersion != SchemaUserVersion)
+            if (userVersion is not 0 and not 1000 and not SchemaUserVersion)
             {
                 return new ObservationStoreOpenResult(
                     ObservationStoreOpenStatus.UnsupportedDatabaseVersion,
@@ -75,8 +75,40 @@ public sealed class SqliteObservationStore : IObservationStore
                     nativeVersion);
             }
 
+            if (userVersion != 0)
+            {
+                var minimumWriterCapability = await ReadMetadataIntAsync(
+                    connection,
+                    "minimum_writer_capability",
+                    cancellationToken).ConfigureAwait(false);
+                if (options.WriterCapability < minimumWriterCapability)
+                {
+                    return new ObservationStoreOpenResult(
+                        ObservationStoreOpenStatus.IncompatibleWriterCapability,
+                        null,
+                        $"Writer capability {options.WriterCapability} is below the database minimum {minimumWriterCapability}.",
+                        nativeVersion);
+                }
+            }
+
             if (userVersion == 0)
                 await CreateSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
+            else if (userVersion == 1000)
+                await MigrateFrom1000Async(connection, options, cancellationToken).ConfigureAwait(false);
+
+            var schemaMajor = await ReadMetadataIntAsync(connection, "schema_major", cancellationToken).ConfigureAwait(false);
+            var schemaMinor = await ReadMetadataIntAsync(connection, "schema_minor", cancellationToken).ConfigureAwait(false);
+            var contractMajor = await ReadMetadataIntAsync(connection, "contract_major", cancellationToken).ConfigureAwait(false);
+            if (schemaMajor != ObservationContract.SchemaVersion.Major ||
+                schemaMinor != ObservationContract.SchemaVersion.Minor ||
+                contractMajor != ObservationContract.Version.Major)
+            {
+                return new ObservationStoreOpenResult(
+                    ObservationStoreOpenStatus.UnsupportedDatabaseVersion,
+                    null,
+                    $"Database metadata schema {schemaMajor}.{schemaMinor} and contract major {contractMajor} are unsupported.",
+                    nativeVersion);
+            }
 
             return new ObservationStoreOpenResult(
                 ObservationStoreOpenStatus.Ready,
@@ -103,7 +135,7 @@ public sealed class SqliteObservationStore : IObservationStore
                     $"The observation database is corrupt and could not be quarantined: {quarantineException.Message}");
             }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SqliteException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SqliteException or InvalidOperationException)
         {
             return new ObservationStoreOpenResult(ObservationStoreOpenStatus.Unavailable, null, ex.Message);
         }
@@ -276,6 +308,33 @@ public sealed class SqliteObservationStore : IObservationStore
         }
     }
 
+    public async ValueTask<ObservationCollectionReadResult> ReadCurrentByOwnerAsync(
+        ObservationOwner owner,
+        ObservationContainerKind container,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        ArgumentNullException.ThrowIfNull(owner);
+        try
+        {
+            await using var connection = CreateConnection(options, readOnly: true);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            var rows = await ReadCurrentRowsByOwnerAsync(connection, owner, container, cancellationToken).ConfigureAwait(false);
+            return new ObservationCollectionReadResult(
+                ObservationReadStatus.Found,
+                rows.Select(ToTrustedObservation).ToArray(),
+                $"Found {rows.Count} trusted observation(s) for the owner and container.");
+        }
+        catch (SqliteException ex) when (IsBusy(ex))
+        {
+            return new ObservationCollectionReadResult(ObservationReadStatus.Busy, [], "The observation database remained busy beyond the bounded wait.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SqliteException or JsonException)
+        {
+            return new ObservationCollectionReadResult(ObservationReadStatus.Unavailable, [], ex.Message);
+        }
+    }
+
     public async ValueTask<ObservationWriteResult> InvalidateAsync(
         ObservationScope scope,
         string reason,
@@ -364,11 +423,12 @@ public sealed class SqliteObservationStore : IObservationStore
             );
             INSERT INTO observation_metadata(key, value) VALUES
                 ('schema_major', '1'),
-                ('schema_minor', '0'),
+                ('schema_minor', '1'),
                 ('contract_major', '1'),
                 ('contract_minor', '0'),
                 ('minimum_writer_capability', '1'),
-                ('next_revision', '0');
+                ('next_revision', '0'),
+                ('change_revision', '0');
             CREATE TABLE observation_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 scope_key TEXT NOT NULL,
@@ -391,6 +451,9 @@ public sealed class SqliteObservationStore : IObservationStore
                 ON observation_history(observed_at_utc);
             CREATE TABLE current_projection (
                 scope_key TEXT PRIMARY KEY,
+                owner_local_content_id TEXT NOT NULL,
+                owner_home_world_id INTEGER NOT NULL,
+                container_kind INTEGER NOT NULL,
                 revision INTEGER NOT NULL,
                 observed_at_utc TEXT NOT NULL,
                 scope_json TEXT NOT NULL,
@@ -405,10 +468,80 @@ public sealed class SqliteObservationStore : IObservationStore
                 last_confirmed_at_utc TEXT NOT NULL,
                 confirmation_count INTEGER NOT NULL
             );
-            PRAGMA user_version = 1000;
+            CREATE INDEX ix_current_projection_owner_container
+                ON current_projection(owner_local_content_id, owner_home_world_id, container_kind);
+            PRAGMA user_version = 1001;
             """;
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async ValueTask MigrateFrom1000Async(
+        SqliteConnection connection,
+        ObservationStoreOptions options,
+        CancellationToken cancellationToken)
+    {
+        var databasePath = Path.GetFullPath(options.DatabasePath);
+        var directory = Path.GetDirectoryName(databasePath)!;
+        var lockPath = Path.GetFullPath(options.MigrationLockPath ?? Path.Combine(directory, "migration.lock"));
+        var backupDirectory = Path.GetFullPath(options.BackupDirectory ?? Path.Combine(directory, "backups"));
+        Directory.CreateDirectory(Path.GetDirectoryName(lockPath)!);
+        Directory.CreateDirectory(backupDirectory);
+
+        await using var migrationLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+        try
+        {
+            migrationLock.Lock(0, 1);
+        }
+        catch (IOException ex)
+        {
+            throw new InvalidOperationException("Another compatible host is migrating the shared observation database.", ex);
+        }
+
+        try
+        {
+            var backupPath = Path.Combine(
+                backupDirectory,
+                $"observations-v1.0-{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}.db");
+            var backupBuilder = new SqliteConnectionStringBuilder
+            {
+                DataSource = backupPath,
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Pooling = false,
+            };
+            await using (var backup = new SqliteConnection(backupBuilder.ToString()))
+            {
+                await backup.OpenAsync(cancellationToken).ConfigureAwait(false);
+                connection.BackupDatabase(backup);
+            }
+
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.Transaction = (SqliteTransaction)transaction;
+            command.CommandText = """
+                ALTER TABLE current_projection ADD COLUMN owner_local_content_id TEXT NOT NULL DEFAULT '';
+                ALTER TABLE current_projection ADD COLUMN owner_home_world_id INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE current_projection ADD COLUMN container_kind INTEGER NOT NULL DEFAULT 0;
+                UPDATE current_projection SET
+                    owner_local_content_id = substr(scope_key, 1, 16),
+                    owner_home_world_id = CAST(substr(scope_key, 18, instr(substr(scope_key, 18), ':') - 1) AS INTEGER),
+                    container_kind = CAST(json_extract(scope_json, '$.container') AS INTEGER);
+                CREATE INDEX ix_current_projection_owner_container
+                    ON current_projection(owner_local_content_id, owner_home_world_id, container_kind);
+                INSERT INTO observation_metadata(key, value)
+                VALUES('change_revision', COALESCE((SELECT value FROM observation_metadata WHERE key = 'next_revision'), '0'))
+                ON CONFLICT(key) DO NOTHING;
+                UPDATE observation_metadata SET value = '1' WHERE key = 'schema_minor';
+                PRAGMA user_version = 1001;
+                """;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            options.BeforeMigrationCommit?.Invoke();
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            migrationLock.Unlock(0, 1);
+        }
     }
 
     private static async ValueTask InsertHistoryAsync(
@@ -459,15 +592,20 @@ public sealed class SqliteObservationStore : IObservationStore
         command.Transaction = (SqliteTransaction)transaction;
         command.CommandText = """
             INSERT INTO current_projection(
-                scope_key, revision, observed_at_utc, scope_json, capture_json,
+                scope_key, owner_local_content_id, owner_home_world_id, container_kind,
+                revision, observed_at_utc, scope_json, capture_json,
                 payload_contract, payload_version, payload_json, payload_sha256,
                 is_stale, stale_reason, stale_observed_at_utc, last_confirmed_at_utc, confirmation_count)
             VALUES(
-                $scope_key, $revision, $observed_at, $scope_json, $capture_json,
+                $scope_key, $owner_local_content_id, $owner_home_world_id, $container_kind,
+                $revision, $observed_at, $scope_json, $capture_json,
                 $payload_contract, $payload_version, $payload_json, $payload_sha256,
                 0, NULL, NULL, $observed_at, 1)
             ON CONFLICT(scope_key) DO UPDATE SET
                 revision = excluded.revision,
+                owner_local_content_id = excluded.owner_local_content_id,
+                owner_home_world_id = excluded.owner_home_world_id,
+                container_kind = excluded.container_kind,
                 observed_at_utc = excluded.observed_at_utc,
                 scope_json = excluded.scope_json,
                 capture_json = excluded.capture_json,
@@ -482,6 +620,9 @@ public sealed class SqliteObservationStore : IObservationStore
                 confirmation_count = 1;
             """;
         command.Parameters.AddWithValue("$scope_key", CreateScopeKey(observation.Scope));
+        command.Parameters.AddWithValue("$owner_local_content_id", FormatOwnerId(observation.Scope.Owner.LocalContentId));
+        command.Parameters.AddWithValue("$owner_home_world_id", observation.Scope.Owner.HomeWorldId);
+        command.Parameters.AddWithValue("$container_kind", (int)observation.Scope.Container);
         command.Parameters.AddWithValue("$revision", storeRevision);
         command.Parameters.AddWithValue("$observed_at", FormatUtc(observation.Capture.ObservedAtUtc));
         command.Parameters.AddWithValue("$scope_json", JsonSerializer.Serialize(observation.Scope, JsonOptions));
@@ -582,6 +723,51 @@ public sealed class SqliteObservationStore : IObservationStore
             reader.GetInt32(11));
     }
 
+    private static async ValueTask<List<CurrentRow>> ReadCurrentRowsByOwnerAsync(
+        SqliteConnection connection,
+        ObservationOwner owner,
+        ObservationContainerKind container,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT revision, scope_json, capture_json, payload_contract, payload_version,
+                   payload_json, payload_sha256, is_stale, stale_reason,
+                   stale_observed_at_utc, last_confirmed_at_utc, confirmation_count
+            FROM current_projection
+            WHERE owner_local_content_id = $owner_local_content_id
+              AND owner_home_world_id = $owner_home_world_id
+              AND container_kind = $container_kind
+            ORDER BY scope_key;
+            """;
+        command.Parameters.AddWithValue("$owner_local_content_id", FormatOwnerId(owner.LocalContentId));
+        command.Parameters.AddWithValue("$owner_home_world_id", owner.HomeWorldId);
+        command.Parameters.AddWithValue("$container_kind", (int)container);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        var rows = new List<CurrentRow>();
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            rows.Add(new CurrentRow(
+                reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetInt32(4),
+                reader.GetString(5), reader.GetString(6), reader.GetBoolean(7), reader.IsDBNull(8) ? null : reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetString(9), reader.GetString(10), reader.GetInt32(11)));
+        }
+        return rows;
+    }
+
+    private static TrustedObservation ToTrustedObservation(CurrentRow row) => new(
+        row.Revision,
+        JsonSerializer.Deserialize<ObservationScope>(row.ScopeJson, JsonOptions)
+            ?? throw new InvalidDataException("Stored observation scope is null."),
+        JsonSerializer.Deserialize<ObservationCapture>(row.CaptureJson, JsonOptions)
+            ?? throw new InvalidDataException("Stored observation capture is null."),
+        new ObservationPayload(row.PayloadContract, row.PayloadVersion, row.PayloadJson),
+        row.IsStale,
+        row.StaleReason,
+        ParseNullableUtc(row.StaleObservedAtUtc),
+        ParseUtc(row.LastConfirmedAtUtc),
+        row.ConfirmationCount);
+
     private static int CompareSourceOrder(ObservationCapture incoming, CurrentRow current)
     {
         var existing = JsonSerializer.Deserialize<ObservationCapture>(current.CaptureJson, JsonOptions)
@@ -610,7 +796,13 @@ public sealed class SqliteObservationStore : IObservationStore
             WHERE key = 'next_revision'
             RETURNING CAST(value AS INTEGER);
             """;
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
+        var revision = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
+        await using var changeCommand = connection.CreateCommand();
+        changeCommand.Transaction = (SqliteTransaction)transaction;
+        changeCommand.CommandText = "UPDATE observation_metadata SET value = $revision WHERE key = 'change_revision';";
+        changeCommand.Parameters.AddWithValue("$revision", revision.ToString(CultureInfo.InvariantCulture));
+        await changeCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        return revision;
     }
 
     private async ValueTask RunDueCleanupAsync(
@@ -701,6 +893,7 @@ public sealed class SqliteObservationStore : IObservationStore
 
     private void PublishChange(ObservationChange change)
     {
+        SignalCrossCopyChange(change.Revision);
         var subscribers = Changed;
         if (subscribers is null)
             return;
@@ -717,9 +910,29 @@ public sealed class SqliteObservationStore : IObservationStore
         }
     }
 
+    private void SignalCrossCopyChange(long revision)
+    {
+        var signalPath = Path.GetFullPath(options.ChangeSignalPath ??
+            Path.Combine(Path.GetDirectoryName(options.DatabasePath)!, "changes.signal"));
+        var temporaryPath = Path.Combine(Path.GetDirectoryName(signalPath)!, $".{Path.GetFileName(signalPath)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(signalPath)!);
+            File.WriteAllText(temporaryPath, revision.ToString(CultureInfo.InvariantCulture), Encoding.ASCII);
+            File.Move(temporaryPath, signalPath, overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            LastNotificationError = ex.Message;
+            try { File.Delete(temporaryPath); }
+            catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
     private static string CreateScopeKey(ObservationScope scope) => string.Create(
         CultureInfo.InvariantCulture,
         $"{scope.Owner.LocalContentId:X16}:{scope.Owner.HomeWorldId}:{(int)scope.Subject.Kind}:{scope.Subject.Id:X16}:{(int)scope.Container}");
+    private static string FormatOwnerId(ulong value) => value.ToString("X16", CultureInfo.InvariantCulture);
 
     private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
     private static string FormatUtc(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
@@ -751,6 +964,20 @@ public sealed class SqliteObservationStore : IObservationStore
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
+    }
+
+    private static async ValueTask<int> ReadMetadataIntAsync(
+        SqliteConnection connection,
+        string key,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT value FROM observation_metadata WHERE key = $key;";
+        command.Parameters.AddWithValue("$key", key);
+        var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        if (value is null or DBNull)
+            throw new InvalidDataException($"Observation database metadata '{key}' is missing.");
+        return Convert.ToInt32(value, CultureInfo.InvariantCulture);
     }
 
     private static void QuarantineDatabase(string databasePath)

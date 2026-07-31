@@ -1,4 +1,5 @@
 using Franthropy.Observations.Hosting;
+using Franthropy.Observations.Storage;
 using Franthropy.Observations.V1;
 
 namespace Franthropy.Observations.Tests.Hosting;
@@ -76,6 +77,28 @@ public sealed class ObservationCollectorCoordinatorTests
         Assert.False(File.Exists(abandoned));
     }
 
+    [Fact]
+    public async Task Persisted_minimum_writer_capability_excludes_an_older_host()
+    {
+        using var fixture = new CoordinatorFixture();
+        static ObservationDatabaseProbeResult Probe() => new(
+            ObservationDatabaseProbeStatus.Compatible,
+            new ObservationVersion(1, 1),
+            new ObservationVersion(1, 0),
+            MinimumWriterCapability: 2,
+            CurrentRevision: 10,
+            Message: "compatible");
+        using var old = fixture.Create("Old", "old", new Version(1, 0), 1, databaseProbe: Probe);
+        using var current = fixture.Create("Current", "current", new Version(2, 0), 2, databaseProbe: Probe);
+
+        old.Start();
+        await WaitForStateAsync(old, ObservationLeadershipState.Reader);
+        current.Start();
+        await WaitForStateAsync(current, ObservationLeadershipState.Collector);
+
+        Assert.NotEqual(ObservationLeadershipState.Collector, old.State.State);
+    }
+
     private static async Task WaitForStateAsync(
         ObservationCollectorCoordinator coordinator,
         ObservationLeadershipState expected)
@@ -121,7 +144,8 @@ public sealed class ObservationCollectorCoordinatorTests
             Version version,
             int capability,
             Action? start = null,
-            Action? stop = null) =>
+            Action? stop = null,
+            Func<ObservationDatabaseProbeResult>? databaseProbe = null) =>
             new(new ObservationCollectorCoordinatorOptions
             {
                 ProfileId = $"test-{Path.GetFileName(Root)}",
@@ -130,6 +154,7 @@ public sealed class ObservationCollectorCoordinatorTests
                 PluginInstanceId = $"{instanceId}-{Guid.NewGuid():N}",
                 FranthropyVersion = version,
                 WriterCapability = capability,
+                DatabaseProbe = databaseProbe,
                 StartCollector = start,
                 StopCollector = stop,
             });

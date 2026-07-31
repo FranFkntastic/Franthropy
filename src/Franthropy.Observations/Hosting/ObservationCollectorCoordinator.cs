@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Franthropy.Observations.Storage;
 using Franthropy.Observations.V1;
 
 namespace Franthropy.Observations.Hosting;
@@ -14,6 +15,7 @@ public sealed record ObservationCollectorCoordinatorOptions
     public required Version FranthropyVersion { get; init; }
     public int WriterCapability { get; init; } = 1;
     public int MinimumWriterCapability { get; init; } = 1;
+    public Func<ObservationDatabaseProbeResult>? DatabaseProbe { get; init; }
     public Action? StartCollector { get; init; }
     public Action? StopCollector { get; init; }
 }
@@ -301,7 +303,7 @@ public sealed class ObservationCollectorCoordinator : IDisposable
     }
 
     private bool IsCompatible(CandidateAnnouncement candidate) =>
-        candidate.WriterCapability >= options.MinimumWriterCapability &&
+        candidate.WriterCapability >= Math.Max(options.MinimumWriterCapability, candidate.DatabaseMinimumWriterCapability) &&
         candidate.ContractMajor == ObservationContract.Version.Major &&
         candidate.SchemaMajor == ObservationContract.SchemaVersion.Major &&
         candidate.SchemaMinor == ObservationContract.SchemaVersion.Minor &&
@@ -339,17 +341,22 @@ public sealed class ObservationCollectorCoordinator : IDisposable
 
     private void WriteCandidate(FileStream stream)
     {
+        var capability = Volatile.Read(ref writerCapability);
+        var database = options.DatabaseProbe?.Invoke();
+        var minimumWriterCapability = database?.MinimumWriterCapability ?? options.MinimumWriterCapability;
+        var databaseEligible = database?.CanWrite(capability) ?? capability >= minimumWriterCapability;
         var announcement = new CandidateAnnouncement(
             options.PluginName,
             options.PluginInstanceId,
             options.FranthropyVersion.ToString(),
-            Volatile.Read(ref writerCapability),
+            capability,
             Environment.ProcessId,
             ObservationContract.Version.Major,
             ObservationContract.Version.Minor,
             ObservationContract.SchemaVersion.Major,
             ObservationContract.SchemaVersion.Minor,
-            faultReason is null && Volatile.Read(ref writerCapability) >= options.MinimumWriterCapability);
+            minimumWriterCapability,
+            faultReason is null && databaseEligible);
         var bytes = JsonSerializer.SerializeToUtf8Bytes(announcement, JsonOptions);
         lock (stream)
         {
@@ -435,6 +442,7 @@ public sealed class ObservationCollectorCoordinator : IDisposable
         int ContractMinor,
         int SchemaMajor,
         int SchemaMinor,
+        int DatabaseMinimumWriterCapability,
         bool Eligible);
 
     private sealed class CandidateComparer : IComparer<CandidateAnnouncement>

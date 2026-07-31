@@ -230,6 +230,208 @@ public sealed class SqliteObservationStoreTests
         }
     }
 
+    [Fact]
+    public async Task Reader_probe_does_not_create_a_missing_database()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var path = Path.Combine(root, "observations.db");
+            var probe = await ObservationDatabaseProbe.ReadAsync(new ObservationStoreOptions { DatabasePath = path });
+
+            Assert.Equal(ObservationDatabaseProbeStatus.Missing, probe.Status);
+            Assert.False(File.Exists(path));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Read_only_open_never_creates_or_migrates_state()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var missingPath = Path.Combine(root, "missing.db");
+            var missing = await SqliteObservationReader.OpenAsync(new ObservationStoreOptions { DatabasePath = missingPath });
+            Assert.Equal(ObservationStoreOpenStatus.Missing, missing.Status);
+            Assert.False(File.Exists(missingPath));
+
+            var legacyPath = Path.Combine(root, "legacy.db");
+            await CreateLegacyVersion10DatabaseAsync(legacyPath);
+            var legacy = await SqliteObservationReader.OpenAsync(new ObservationStoreOptions { DatabasePath = legacyPath });
+            Assert.True(legacy.IsReady, legacy.Message);
+            await legacy.Reader!.DisposeAsync();
+            var probe = await ObservationDatabaseProbe.ReadAsync(new ObservationStoreOptions { DatabasePath = legacyPath });
+            Assert.Equal(ObservationDatabaseProbeStatus.UpgradeRequired, probe.Status);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Version_1_0_database_migrates_forward_after_consistent_backup()
+    {
+        var root = CreateTemporaryDirectory();
+        var path = Path.Combine(root, "observations.db");
+        try
+        {
+            await CreateLegacyVersion10DatabaseAsync(path);
+            var probe = await ObservationDatabaseProbe.ReadAsync(new ObservationStoreOptions { DatabasePath = path });
+            Assert.Equal(ObservationDatabaseProbeStatus.UpgradeRequired, probe.Status);
+
+            var open = await SqliteObservationStore.OpenAsync(new ObservationStoreOptions { DatabasePath = path });
+            Assert.True(open.IsReady, open.Message);
+            await open.Store!.DisposeAsync();
+
+            var migrated = await ObservationDatabaseProbe.ReadAsync(new ObservationStoreOptions { DatabasePath = path });
+            Assert.Equal(ObservationDatabaseProbeStatus.Compatible, migrated.Status);
+            Assert.Equal(new ObservationVersion(1, 1), migrated.SchemaVersion);
+            Assert.Single(Directory.EnumerateFiles(Path.Combine(root, "backups"), "*.db"));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Failed_migration_preserves_version_1_0_database_and_backup()
+    {
+        var root = CreateTemporaryDirectory();
+        var path = Path.Combine(root, "observations.db");
+        try
+        {
+            await CreateLegacyVersion10DatabaseAsync(path);
+            var open = await SqliteObservationStore.OpenAsync(new ObservationStoreOptions
+            {
+                DatabasePath = path,
+                BeforeMigrationCommit = () => throw new InvalidOperationException("synthetic migration failure"),
+            });
+
+            Assert.Equal(ObservationStoreOpenStatus.Unavailable, open.Status);
+            var probe = await ObservationDatabaseProbe.ReadAsync(new ObservationStoreOptions { DatabasePath = path });
+            Assert.Equal(ObservationDatabaseProbeStatus.UpgradeRequired, probe.Status);
+            Assert.Single(Directory.EnumerateFiles(Path.Combine(root, "backups"), "*.db"));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Writer_below_persisted_capability_cannot_open_or_migrate()
+    {
+        var root = CreateTemporaryDirectory();
+        var path = Path.Combine(root, "observations.db");
+        try
+        {
+            await CreateLegacyVersion10DatabaseAsync(path);
+            await using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = "UPDATE observation_metadata SET value = '2' WHERE key = 'minimum_writer_capability';";
+                await command.ExecuteNonQueryAsync();
+            }
+
+            var open = await SqliteObservationStore.OpenAsync(new ObservationStoreOptions
+            {
+                DatabasePath = path,
+                WriterCapability = 1,
+            });
+
+            Assert.Equal(ObservationStoreOpenStatus.IncompatibleWriterCapability, open.Status);
+            Assert.False(Directory.Exists(Path.Combine(root, "backups")));
+            var probe = await ObservationDatabaseProbe.ReadAsync(new ObservationStoreOptions { DatabasePath = path });
+            Assert.Equal(ObservationDatabaseProbeStatus.UpgradeRequired, probe.Status);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Committed_write_wakes_a_separate_change_monitor()
+    {
+        await using var fixture = await StoreFixture.CreateAsync();
+        await using var monitor = new ObservationDatabaseChangeMonitor(new ObservationStoreOptions
+        {
+            DatabasePath = fixture.DatabasePath,
+        });
+        await using var secondMonitor = new ObservationDatabaseChangeMonitor(new ObservationStoreOptions
+        {
+            DatabasePath = fixture.DatabasePath,
+        });
+        var changed = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondChanged = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+        monitor.Changed += (_, change) => changed.TrySetResult(change.Revision);
+        secondMonitor.Changed += (_, change) => secondChanged.TrySetResult(change.Revision);
+        await monitor.StartAsync();
+        await secondMonitor.StartAsync();
+
+        var write = await fixture.Store.WriteAsync(fixture.CreateListingObservation(1, []));
+
+        Assert.Equal(write.CurrentRevision, await changed.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(write.CurrentRevision, await secondChanged.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(write.CurrentRevision, monitor.LastRevision);
+    }
+
+    [Fact]
+    public async Task Owner_container_query_returns_only_matching_retainer_listings()
+    {
+        await using var fixture = await StoreFixture.CreateAsync();
+        var first = fixture.CreateListingObservation(1, [new(0, 100, 1, 10, false)]);
+        var second = fixture.CreateListingObservation(2, [new(0, 200, 1, 20, false)]) with
+        {
+            Scope = first.Scope with { Subject = ObservationSubject.Retainer(201, first.Scope.Owner) },
+        };
+        var otherOwner = new ObservationOwner(999, 74);
+        var other = fixture.CreateListingObservation(3, []) with
+        {
+            Scope = new ObservationScope(otherOwner, ObservationSubject.Retainer(300, otherOwner), ObservationContainerKind.RetainerMarketListings),
+        };
+        await fixture.Store.WriteAsync(first);
+        await fixture.Store.WriteAsync(second);
+        await fixture.Store.WriteAsync(other);
+
+        var read = await fixture.Store.ReadCurrentByOwnerAsync(first.Scope.Owner, ObservationContainerKind.RetainerMarketListings);
+
+        Assert.Equal(ObservationReadStatus.Found, read.Status);
+        Assert.Equal([200UL, 201UL], read.Observations.Select(observation => observation.Scope.Subject.Id));
+    }
+
+    private static async Task CreateLegacyVersion10DatabaseAsync(string path)
+    {
+        var open = await SqliteObservationStore.OpenAsync(new ObservationStoreOptions { DatabasePath = path });
+        Assert.True(open.IsReady, open.Message);
+        await open.Store!.DisposeAsync();
+        SqliteConnection.ClearAllPools();
+        await using var connection = new SqliteConnection($"Data Source={path}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            DROP INDEX ix_current_projection_owner_container;
+            ALTER TABLE current_projection DROP COLUMN owner_local_content_id;
+            ALTER TABLE current_projection DROP COLUMN owner_home_world_id;
+            ALTER TABLE current_projection DROP COLUMN container_kind;
+            DELETE FROM observation_metadata WHERE key = 'change_revision';
+            UPDATE observation_metadata SET value = '0' WHERE key = 'schema_minor';
+            PRAGMA user_version = 1000;
+            """;
+        await command.ExecuteNonQueryAsync();
+    }
+
     private static ObservationEnvelope ObservationForInstance(
         ObservationScope scope,
         string instance,

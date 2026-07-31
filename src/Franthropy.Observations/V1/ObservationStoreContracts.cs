@@ -46,6 +46,11 @@ public sealed record ObservationReadResult(
     TrustedObservation? Observation,
     string Message);
 
+public sealed record ObservationCollectionReadResult(
+    ObservationReadStatus Status,
+    IReadOnlyList<TrustedObservation> Observations,
+    string Message);
+
 public enum ObservationChangeKind
 {
     Replaced,
@@ -64,6 +69,11 @@ public interface IObservationReader
 {
     ValueTask<ObservationReadResult> ReadCurrentAsync(
         ObservationScope scope,
+        CancellationToken cancellationToken = default);
+
+    ValueTask<ObservationCollectionReadResult> ReadCurrentByOwnerAsync(
+        ObservationOwner owner,
+        ObservationContainerKind container,
         CancellationToken cancellationToken = default);
 }
 
