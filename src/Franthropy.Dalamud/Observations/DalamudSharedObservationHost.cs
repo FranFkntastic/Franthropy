@@ -440,21 +440,28 @@ public sealed class DalamudSharedObservationHost : IDisposable
         private void Enqueue(ObservationEnvelope observation)
         {
             if (!queue.Writer.TryWrite(observation))
-                diagnostic?.Invoke("The bounded shared-observation queue is full; the observation was rejected.", null);
+                fault("The bounded shared-observation queue is full; collection stopped before evidence could be dropped silently.");
         }
 
         private async Task ProcessAsync()
         {
-            await foreach (var observation in queue.Reader.ReadAllAsync().ConfigureAwait(false))
+            try
             {
-                var result = await store.WriteAsync(observation).ConfigureAwait(false);
-                if (result.Status is ObservationWriteStatus.Busy or ObservationWriteStatus.Unavailable or ObservationWriteStatus.UnsupportedDatabaseVersion)
+                await foreach (var observation in queue.Reader.ReadAllAsync().ConfigureAwait(false))
                 {
-                    fault($"Shared observation writer failed: {result.Message}");
-                    return;
+                    var result = await store.WriteAsync(observation).ConfigureAwait(false);
+                    if (result.Status is ObservationWriteStatus.Busy or ObservationWriteStatus.Unavailable or ObservationWriteStatus.UnsupportedDatabaseVersion)
+                    {
+                        fault($"Shared observation writer failed: {result.Message}");
+                        return;
+                    }
+                    if (result.Status == ObservationWriteStatus.Rejected)
+                        diagnostic?.Invoke($"Shared observation evidence was rejected: {result.Message}", null);
                 }
-                if (result.Status == ObservationWriteStatus.Rejected)
-                    diagnostic?.Invoke($"Shared observation evidence was rejected: {result.Message}", null);
+            }
+            catch (Exception ex)
+            {
+                fault($"The shared observation writer stopped unexpectedly: {ex.Message}");
             }
         }
     }

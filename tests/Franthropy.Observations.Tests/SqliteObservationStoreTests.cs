@@ -388,6 +388,25 @@ public sealed class SqliteObservationStoreTests
     }
 
     [Fact]
+    public async Task Change_monitor_rearms_immediately_after_watcher_failure()
+    {
+        await using var fixture = await StoreFixture.CreateAsync();
+        await using var monitor = new ObservationDatabaseChangeMonitor(new ObservationStoreOptions
+        {
+            DatabasePath = fixture.DatabasePath,
+        });
+        var changed = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+        monitor.Changed += (_, change) => changed.TrySetResult(change.Revision);
+        await monitor.StartAsync();
+
+        monitor.ReportWatcherError(new InternalBufferOverflowException("synthetic watcher failure"));
+        var write = await fixture.Store.WriteAsync(fixture.CreateListingObservation(1, []));
+
+        Assert.Null(monitor.LastNotificationError);
+        Assert.Equal(write.CurrentRevision, await changed.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
     public async Task Owner_container_query_returns_only_matching_retainer_listings()
     {
         await using var fixture = await StoreFixture.CreateAsync();

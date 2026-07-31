@@ -33,15 +33,7 @@ public sealed class ObservationDatabaseChangeMonitor : IAsyncDisposable
             if (watcher is not null)
                 return;
             Directory.CreateDirectory(Path.GetDirectoryName(signalPath)!);
-            watcher = new FileSystemWatcher(Path.GetDirectoryName(signalPath)!, Path.GetFileName(signalPath))
-            {
-                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
-                EnableRaisingEvents = true,
-            };
-            watcher.Created += OnSignal;
-            watcher.Changed += OnSignal;
-            watcher.Renamed += OnSignalRenamed;
-            watcher.Error += OnWatcherError;
+            watcher = CreateWatcher();
         }
 
         var probe = await ObservationDatabaseProbe.ReadAsync(options, cancellationToken).ConfigureAwait(false);
@@ -93,7 +85,44 @@ public sealed class ObservationDatabaseChangeMonitor : IAsyncDisposable
         }
     }
 
-    private void OnWatcherError(object sender, ErrorEventArgs args) => LastNotificationError = args.GetException().Message;
+    internal void ReportWatcherError(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        lock (gate)
+        {
+            if (disposed || watcher is null)
+                return;
+            watcher.Dispose();
+            watcher = null;
+            try
+            {
+                watcher = CreateWatcher();
+                LastNotificationError = null;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                LastNotificationError = $"The database change watcher could not recover after '{exception.Message}': {ex.Message}";
+                return;
+            }
+        }
+        ReadAndPublishSignal();
+    }
+
+    private FileSystemWatcher CreateWatcher()
+    {
+        var next = new FileSystemWatcher(Path.GetDirectoryName(signalPath)!, Path.GetFileName(signalPath))
+        {
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
+        };
+        next.Created += OnSignal;
+        next.Changed += OnSignal;
+        next.Renamed += OnSignalRenamed;
+        next.Error += OnWatcherError;
+        next.EnableRaisingEvents = true;
+        return next;
+    }
+
+    private void OnWatcherError(object sender, ErrorEventArgs args) => ReportWatcherError(args.GetException());
 
     private void Publish(ObservationDatabaseChanged change)
     {
