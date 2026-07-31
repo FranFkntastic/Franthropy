@@ -22,8 +22,10 @@ public sealed class SqliteObservationReader : IObservationReader, IAsyncDisposab
         var probe = await ObservationDatabaseProbe.ReadAsync(normalized, cancellationToken).ConfigureAwait(false);
         return probe.Status switch
         {
-            ObservationDatabaseProbeStatus.Compatible or ObservationDatabaseProbeStatus.UpgradeRequired =>
+            ObservationDatabaseProbeStatus.Compatible =>
                 new ObservationReaderOpenResult(ObservationStoreOpenStatus.Ready, new SqliteObservationReader(normalized), probe.Message, probe),
+            ObservationDatabaseProbeStatus.UpgradeRequired =>
+                new ObservationReaderOpenResult(ObservationStoreOpenStatus.UpgradeRequired, null, probe.Message, probe),
             ObservationDatabaseProbeStatus.Missing =>
                 new ObservationReaderOpenResult(ObservationStoreOpenStatus.Missing, null, probe.Message, probe),
             ObservationDatabaseProbeStatus.UnsupportedDatabaseVersion =>

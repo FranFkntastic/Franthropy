@@ -48,6 +48,33 @@ public sealed class SqliteObservationStoreTests
     }
 
     [Fact]
+    public async Task Stale_capture_advances_source_order_without_replacing_payload_provenance()
+    {
+        await using var fixture = await StoreFixture.CreateAsync();
+        var first = fixture.CreateListingObservation(1, [new(300, 400, 2, 50, false)]);
+        await fixture.Store.WriteAsync(first);
+        var unavailable = fixture.CreateListingObservation(3, null, ObservationEvidence.CompleteAvailable with
+        {
+            Availability = ObservationAvailability.Transitioning,
+            ContainerLoaded = false,
+        });
+
+        var stale = await fixture.Store.WriteAsync(unavailable);
+        var older = await fixture.Store.WriteAsync(fixture.CreateListingObservation(2, []));
+        var repeated = await fixture.Store.WriteAsync(unavailable);
+        var read = await fixture.Store.ReadCurrentAsync(first.Scope);
+
+        Assert.Equal(ObservationWriteStatus.PreservedAsStale, stale.Status);
+        Assert.Equal(ObservationWriteStatus.IgnoredOlderRevision, older.Status);
+        Assert.Equal(ObservationWriteStatus.IgnoredRepeatedRevision, repeated.Status);
+        Assert.True(read.Observation!.IsStale);
+        Assert.Equal(1, read.Observation.Capture.SourceRevision);
+        Assert.Single(read.Observation.Payload.Deserialize<RetainerMarketListingsPayload>(
+            ObservationPayloadContracts.RetainerMarketListings,
+            1).Listings);
+    }
+
+    [Fact]
     public async Task Identical_newer_payload_advances_confirmation_without_duplicate_full_payload()
     {
         await using var fixture = await StoreFixture.CreateAsync();
@@ -262,8 +289,8 @@ public sealed class SqliteObservationStoreTests
             var legacyPath = Path.Combine(root, "legacy.db");
             await CreateLegacyVersion10DatabaseAsync(legacyPath);
             var legacy = await SqliteObservationReader.OpenAsync(new ObservationStoreOptions { DatabasePath = legacyPath });
-            Assert.True(legacy.IsReady, legacy.Message);
-            await legacy.Reader!.DisposeAsync();
+            Assert.Equal(ObservationStoreOpenStatus.UpgradeRequired, legacy.Status);
+            Assert.Null(legacy.Reader);
             var probe = await ObservationDatabaseProbe.ReadAsync(new ObservationStoreOptions { DatabasePath = legacyPath });
             Assert.Equal(ObservationDatabaseProbeStatus.UpgradeRequired, probe.Status);
         }
@@ -444,6 +471,7 @@ public sealed class SqliteObservationStoreTests
             ALTER TABLE current_projection DROP COLUMN owner_local_content_id;
             ALTER TABLE current_projection DROP COLUMN owner_home_world_id;
             ALTER TABLE current_projection DROP COLUMN container_kind;
+            ALTER TABLE current_projection DROP COLUMN source_order_capture_json;
             DELETE FROM observation_metadata WHERE key = 'change_revision';
             UPDATE observation_metadata SET value = '0' WHERE key = 'schema_minor';
             PRAGMA user_version = 1000;

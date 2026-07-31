@@ -186,6 +186,7 @@ public sealed class SqliteObservationStore : IObservationStore
                         scopeKey,
                         storeRevision,
                         validation.Message,
+                        observation.Capture,
                         observation.Capture.ObservedAtUtc,
                         cancellationToken).ConfigureAwait(false);
                     result = new ObservationWriteResult(
@@ -361,7 +362,7 @@ public sealed class SqliteObservationStore : IObservationStore
             }
 
             var storeRevision = await NextRevisionAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
-            await MarkStaleAsync(connection, transaction, key, storeRevision, reason, invalidatedAtUtc, cancellationToken).ConfigureAwait(false);
+            await MarkStaleAsync(connection, transaction, key, storeRevision, reason, null, invalidatedAtUtc, cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             PublishChange(new ObservationChange(scope, storeRevision, ObservationChangeKind.Invalidated, invalidatedAtUtc));
             return new ObservationWriteResult(ObservationWriteStatus.PreservedAsStale, reason, storeRevision);
@@ -458,6 +459,7 @@ public sealed class SqliteObservationStore : IObservationStore
                 observed_at_utc TEXT NOT NULL,
                 scope_json TEXT NOT NULL,
                 capture_json TEXT NOT NULL,
+                source_order_capture_json TEXT NOT NULL,
                 payload_contract TEXT NOT NULL,
                 payload_version INTEGER NOT NULL,
                 payload_json TEXT NOT NULL,
@@ -522,10 +524,12 @@ public sealed class SqliteObservationStore : IObservationStore
                 ALTER TABLE current_projection ADD COLUMN owner_local_content_id TEXT NOT NULL DEFAULT '';
                 ALTER TABLE current_projection ADD COLUMN owner_home_world_id INTEGER NOT NULL DEFAULT 0;
                 ALTER TABLE current_projection ADD COLUMN container_kind INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE current_projection ADD COLUMN source_order_capture_json TEXT NOT NULL DEFAULT '{}';
                 UPDATE current_projection SET
                     owner_local_content_id = substr(scope_key, 1, 16),
                     owner_home_world_id = CAST(substr(scope_key, 18, instr(substr(scope_key, 18), ':') - 1) AS INTEGER),
-                    container_kind = CAST(json_extract(scope_json, '$.container') AS INTEGER);
+                    container_kind = CAST(json_extract(scope_json, '$.container') AS INTEGER),
+                    source_order_capture_json = capture_json;
                 CREATE INDEX ix_current_projection_owner_container
                     ON current_projection(owner_local_content_id, owner_home_world_id, container_kind);
                 INSERT INTO observation_metadata(key, value)
@@ -593,12 +597,12 @@ public sealed class SqliteObservationStore : IObservationStore
         command.CommandText = """
             INSERT INTO current_projection(
                 scope_key, owner_local_content_id, owner_home_world_id, container_kind,
-                revision, observed_at_utc, scope_json, capture_json,
+                revision, observed_at_utc, scope_json, capture_json, source_order_capture_json,
                 payload_contract, payload_version, payload_json, payload_sha256,
                 is_stale, stale_reason, stale_observed_at_utc, last_confirmed_at_utc, confirmation_count)
             VALUES(
                 $scope_key, $owner_local_content_id, $owner_home_world_id, $container_kind,
-                $revision, $observed_at, $scope_json, $capture_json,
+                $revision, $observed_at, $scope_json, $capture_json, $capture_json,
                 $payload_contract, $payload_version, $payload_json, $payload_sha256,
                 0, NULL, NULL, $observed_at, 1)
             ON CONFLICT(scope_key) DO UPDATE SET
@@ -609,6 +613,7 @@ public sealed class SqliteObservationStore : IObservationStore
                 observed_at_utc = excluded.observed_at_utc,
                 scope_json = excluded.scope_json,
                 capture_json = excluded.capture_json,
+                source_order_capture_json = excluded.source_order_capture_json,
                 payload_contract = excluded.payload_contract,
                 payload_version = excluded.payload_version,
                 payload_json = excluded.payload_json,
@@ -649,6 +654,7 @@ public sealed class SqliteObservationStore : IObservationStore
                 revision = $revision,
                 observed_at_utc = $observed_at,
                 capture_json = $capture_json,
+                source_order_capture_json = $capture_json,
                 is_stale = 0,
                 stale_reason = NULL,
                 stale_observed_at_utc = NULL,
@@ -669,6 +675,7 @@ public sealed class SqliteObservationStore : IObservationStore
         string scopeKey,
         long storeRevision,
         string reason,
+        ObservationCapture? sourceOrderCapture,
         DateTimeOffset observedAtUtc,
         CancellationToken cancellationToken)
     {
@@ -677,6 +684,7 @@ public sealed class SqliteObservationStore : IObservationStore
         command.CommandText = """
             UPDATE current_projection SET
                 revision = $revision,
+                source_order_capture_json = COALESCE($source_order_capture_json, source_order_capture_json),
                 is_stale = 1,
                 stale_reason = $reason,
                 stale_observed_at_utc = $observed_at
@@ -684,6 +692,9 @@ public sealed class SqliteObservationStore : IObservationStore
             """;
         command.Parameters.AddWithValue("$reason", reason);
         command.Parameters.AddWithValue("$revision", storeRevision);
+        command.Parameters.AddWithValue(
+            "$source_order_capture_json",
+            sourceOrderCapture is null ? DBNull.Value : JsonSerializer.Serialize(sourceOrderCapture, JsonOptions));
         command.Parameters.AddWithValue("$observed_at", FormatUtc(observedAtUtc));
         command.Parameters.AddWithValue("$scope_key", scopeKey);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -698,7 +709,7 @@ public sealed class SqliteObservationStore : IObservationStore
         await using var command = connection.CreateCommand();
         command.Transaction = (SqliteTransaction?)transaction;
         command.CommandText = """
-            SELECT revision, scope_json, capture_json, payload_contract, payload_version,
+            SELECT revision, scope_json, capture_json, source_order_capture_json, payload_contract, payload_version,
                    payload_json, payload_sha256, is_stale, stale_reason,
                    stale_observed_at_utc, last_confirmed_at_utc, confirmation_count
             FROM current_projection
@@ -713,14 +724,15 @@ public sealed class SqliteObservationStore : IObservationStore
             reader.GetString(1),
             reader.GetString(2),
             reader.GetString(3),
-            reader.GetInt32(4),
-            reader.GetString(5),
+            reader.GetString(4),
+            reader.GetInt32(5),
             reader.GetString(6),
-            reader.GetBoolean(7),
-            reader.IsDBNull(8) ? null : reader.GetString(8),
+            reader.GetString(7),
+            reader.GetBoolean(8),
             reader.IsDBNull(9) ? null : reader.GetString(9),
-            reader.GetString(10),
-            reader.GetInt32(11));
+            reader.IsDBNull(10) ? null : reader.GetString(10),
+            reader.GetString(11),
+            reader.GetInt32(12));
     }
 
     private static async ValueTask<List<CurrentRow>> ReadCurrentRowsByOwnerAsync(
@@ -731,7 +743,7 @@ public sealed class SqliteObservationStore : IObservationStore
     {
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT revision, scope_json, capture_json, payload_contract, payload_version,
+            SELECT revision, scope_json, capture_json, source_order_capture_json, payload_contract, payload_version,
                    payload_json, payload_sha256, is_stale, stale_reason,
                    stale_observed_at_utc, last_confirmed_at_utc, confirmation_count
             FROM current_projection
@@ -748,9 +760,9 @@ public sealed class SqliteObservationStore : IObservationStore
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             rows.Add(new CurrentRow(
-                reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetInt32(4),
-                reader.GetString(5), reader.GetString(6), reader.GetBoolean(7), reader.IsDBNull(8) ? null : reader.GetString(8),
-                reader.IsDBNull(9) ? null : reader.GetString(9), reader.GetString(10), reader.GetInt32(11)));
+                reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetInt32(5),
+                reader.GetString(6), reader.GetString(7), reader.GetBoolean(8), reader.IsDBNull(9) ? null : reader.GetString(9),
+                reader.IsDBNull(10) ? null : reader.GetString(10), reader.GetString(11), reader.GetInt32(12)));
         }
         return rows;
     }
@@ -770,7 +782,7 @@ public sealed class SqliteObservationStore : IObservationStore
 
     private static int CompareSourceOrder(ObservationCapture incoming, CurrentRow current)
     {
-        var existing = JsonSerializer.Deserialize<ObservationCapture>(current.CaptureJson, JsonOptions)
+        var existing = JsonSerializer.Deserialize<ObservationCapture>(current.SourceOrderCaptureJson, JsonOptions)
             ?? throw new InvalidDataException("Stored observation capture is null.");
         if (string.Equals(
                 incoming.Provenance.PluginInstanceId,
@@ -999,6 +1011,7 @@ public sealed class SqliteObservationStore : IObservationStore
         long Revision,
         string ScopeJson,
         string CaptureJson,
+        string SourceOrderCaptureJson,
         string PayloadContract,
         int PayloadVersion,
         string PayloadJson,

@@ -221,6 +221,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
                 addonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerList", OnRetainerListOpened);
                 addonLifecycle.RegisterListener(AddonEvent.PreFinalize, "InventoryRetainerLarge", OnRetainerInventoryClosing);
                 addonLifecycle.RegisterListener(AddonEvent.PreFinalize, "InventoryRetainer", OnRetainerInventoryClosing);
+                CaptureInitialCharacterState();
             }
             catch
             {
@@ -263,6 +264,19 @@ public sealed class DalamudSharedObservationHost : IDisposable
             catch (Exception ex)
             {
                 diagnostic?.Invoke("A shared inventory observation event could not be captured.", ex);
+            }
+        }
+
+        private void CaptureInitialCharacterState()
+        {
+            try
+            {
+                Enqueue(CaptureCharacterInventory(PlayerContainers, ObservationContainerKind.PlayerInventory, ObservationPayloadContracts.PlayerInventory));
+                Enqueue(CaptureCharacterInventory(SaddlebagContainers, ObservationContainerKind.Saddlebag, ObservationPayloadContracts.Saddlebag));
+            }
+            catch (Exception ex)
+            {
+                diagnostic?.Invoke("Initial shared character observations are unavailable until the next inventory event.", ex);
             }
         }
 

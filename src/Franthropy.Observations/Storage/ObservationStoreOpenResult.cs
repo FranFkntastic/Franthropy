@@ -4,6 +4,7 @@ public enum ObservationStoreOpenStatus
 {
     Ready,
     Missing,
+    UpgradeRequired,
     UnsupportedDatabaseVersion,
     NativeSqliteTooOld,
     IncompatibleWriterCapability,
