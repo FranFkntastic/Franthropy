@@ -67,6 +67,7 @@ public sealed class ObservationDatabaseChangeMonitor : IAsyncDisposable
             var text = File.ReadAllText(signalPath).Trim();
             if (!long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var revision))
                 return;
+            LastNotificationError = null;
             var previous = Interlocked.Read(ref lastRevision);
             while (revision > previous)
             {
