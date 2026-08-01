@@ -1,6 +1,8 @@
 using System.Reflection;
 using System.Reflection.Emit;
 using Dalamud.Plugin.Services;
+using FFXIVClientStructs.FFXIV.Client.Game;
+using Franthropy.Dalamud.Automation.Inventory;
 using Franthropy.Dalamud.Automation.Retainers;
 
 namespace Franthropy.Dalamud.Tests.Automation.Retainers;
@@ -210,6 +212,125 @@ public sealed class RetainerAutomationSessionTests
             observedUnitPrice));
     }
 
+    [Theory]
+    [InlineData(null, 1u, false)]
+    [InlineData(0u, 1u, false)]
+    [InlineData(44u, 0u, false)]
+    [InlineData(44u, 44u, false)]
+    [InlineData(44u, 45u, true)]
+    [InlineData(44u, 999_999_999u, true)]
+    [InlineData(44u, 1_000_000_000u, false)]
+    public void MarketPricePolicy_RequiresAValidChangedLivePrice(
+        uint? observedUnitPrice,
+        uint requestedUnitPrice,
+        bool expected) =>
+        Assert.Equal(
+            expected,
+            RetainerMarketPricePolicy.IsValidMutation(observedUnitPrice, requestedUnitPrice));
+
+    [Fact]
+    public void MarketPriceUpdatePolicy_ConfirmsAtMostOnceWhileTheDialogRemainsReady()
+    {
+        var confirmationSent = false;
+
+        var first = RetainerMarketPriceUpdatePolicy.Decide(false, true, confirmationSent);
+        if (first == RetainerMarketPriceUpdateAction.ConfirmOnce)
+            confirmationSent = true;
+        var repeated = RetainerMarketPriceUpdatePolicy.Decide(false, true, confirmationSent);
+        var committed = RetainerMarketPriceUpdatePolicy.Decide(true, true, confirmationSent);
+
+        Assert.Equal(RetainerMarketPriceUpdateAction.ConfirmOnce, first);
+        Assert.Equal(RetainerMarketPriceUpdateAction.Wait, repeated);
+        Assert.Equal(RetainerMarketPriceUpdateAction.Complete, committed);
+    }
+
+    [Fact]
+    public void MarketListingPostResult_DistinguishesPreSendCommittedAndIndeterminateOutcomes()
+    {
+        var listing = new RetainerMarketListingTarget(4, 5333, 1, false, 1_234_581);
+
+        var failed = RetainerMarketListingPostResult.Failed("NoSend", "Nothing was sent.");
+        var committed = RetainerMarketListingPostResult.Succeeded(listing);
+        var indeterminate = RetainerMarketListingPostResult.Indeterminate(listing, "Unknown", "Re-scan.");
+
+        Assert.Equal(RetainerMarketListingPostOutcome.FailedBeforeSend, failed.Outcome);
+        Assert.False(failed.Success);
+        Assert.False(failed.RequestSent);
+        Assert.Equal(RetainerMarketListingPostOutcome.Committed, committed.Outcome);
+        Assert.True(committed.Success);
+        Assert.True(committed.RequestSent);
+        Assert.Equal(RetainerMarketListingPostOutcome.Indeterminate, indeterminate.Outcome);
+        Assert.False(indeterminate.Success);
+        Assert.True(indeterminate.RequestSent);
+        Assert.Equal(listing, indeterminate.Listing);
+    }
+
+    [Fact]
+    public async Task PriceUpdate_RejectsMissingObservedPriceBeforeTouchingFrameworkState()
+    {
+        var session = CreateSession(
+            "2026.07.16.0001.0000",
+            (method, _) => throw new InvalidOperationException($"Unexpected dependency call: {method.Name}."));
+
+        var result = await session.UpdateSellingListingPriceAsync(
+            new RetainerMarketListingTarget(4, 5333, 1, false, null),
+            1_234_581);
+
+        Assert.False(result.Success);
+        Assert.Equal("InvalidObservedMarketUnitPrice", result.Code);
+    }
+
+    [Fact]
+    public async Task MarketListingPost_RejectsUnsupportedBuildBeforeTouchingFrameworkState()
+    {
+        var session = CreateSession(
+            "unsupported-build",
+            (method, _) => throw new InvalidOperationException($"Unexpected dependency call: {method.Name}."));
+        var source = new DalamudInventoryStack(InventoryType.Inventory1, 0, 5333, 1);
+
+        var result = await session.PostMarketListingAsync(source, 1, 1_234_581);
+
+        Assert.Equal(RetainerMarketListingPostOutcome.FailedBeforeSend, result.Outcome);
+        Assert.False(result.RequestSent);
+        Assert.Equal("UnsupportedGameBuild", result.Code);
+    }
+
+    [Fact]
+    public void MarketListingObservation_RequiresExactPostedIdentityAndPrice()
+    {
+        var expected = new RetainerMarketListingTarget(4, 5333, 1, false, 1_234_581);
+        var missingPrice = expected with { UnitPrice = null };
+
+        Assert.True(RetainerMarketListingObservation.Matches(expected, 5333, 1, false, 1_234_581));
+        Assert.False(RetainerMarketListingObservation.Matches(expected, 5333, 2, false, 1_234_581));
+        Assert.False(RetainerMarketListingObservation.Matches(expected, 5333, 1, true, 1_234_581));
+        Assert.False(RetainerMarketListingObservation.Matches(expected, 5333, 1, false, 1_234_580));
+        Assert.False(RetainerMarketListingObservation.Matches(missingPrice, 5333, 1, false, 1_234_581));
+    }
+
+    [Theory]
+    [InlineData(4, false, 1_234_581, true)]
+    [InlineData(5, false, 1_234_581, false)]
+    [InlineData(4, true, 1_234_581, false)]
+    [InlineData(4, false, 1_234_580, false)]
+    public void MarketPriceCommit_RequiresTheReconciledExactSlotAndClosedEditor(
+        int observedSlotIndex,
+        bool listingEditorReady,
+        ulong observedUnitPrice,
+        bool expected)
+    {
+        var listing = new RetainerMarketListingTarget(4, 5333, 1, false, 1_234_581);
+
+        Assert.Equal(expected, RetainerMarketPriceCommitObservation.Matches(
+            listing,
+            observedSlotIndex,
+            5333,
+            1,
+            false,
+            observedUnitPrice,
+            listingEditorReady));
+    }
+
     [Fact]
     public async Task Session_PropagatesCancellationIntoFrameworkWork()
     {
@@ -239,6 +360,21 @@ public sealed class RetainerAutomationSessionTests
         Assert.False(open.IsCompleted);
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => open.WaitAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    private static DalamudRetainerAutomationSession CreateSession(
+        string currentGameVersion,
+        Func<MethodInfo, object?[]?, object?> dependencyHandler)
+    {
+        return new(
+            CreateProxy<IFramework>(dependencyHandler),
+            CreateProxy<IGameGui>(dependencyHandler),
+            CreateProxy<IDataManager>(dependencyHandler),
+            CreateProxy<IPluginLog>(dependencyHandler),
+            CreateProxy<IObjectTable>(dependencyHandler),
+            CreateProxy<ITargetManager>(dependencyHandler),
+            CreateProxy<ISigScanner>(dependencyHandler),
+            currentGameVersion);
     }
 
     private static T CreateProxy<T>(Func<MethodInfo, object?[]?, object?> handler) where T : class
