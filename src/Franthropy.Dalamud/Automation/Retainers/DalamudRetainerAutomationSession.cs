@@ -1005,37 +1005,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 RetainerAutomationResult.Succeeded("RetainerMarketListingVerified", "The live retainer listing matches the requested listing."),
                 expected.SlotIndex);
 
-        var relocatedSlotIndex = -1;
-        for (var slotIndex = 0; slotIndex < container->Size; slotIndex++)
-        {
-            if (slotIndex == expected.SlotIndex || !MatchesMarketListing(manager, container, slotIndex, expected))
-                continue;
-
-            if (relocatedSlotIndex >= 0)
-            {
-                return (
-                    RetainerAutomationResult.Failed(
-                        "RetainerMarketListingAmbiguous",
-                        "Multiple live listings match the observed identity after its original slot changed."),
-                    -1);
-            }
-
-            relocatedSlotIndex = slotIndex;
-        }
-
-        if (relocatedSlotIndex >= 0)
-        {
-            return (
-                RetainerAutomationResult.Succeeded(
-                    "RetainerMarketListingRelocated",
-                    "The listing moved after observation and was reconciled to its unique live slot."),
-                relocatedSlotIndex);
-        }
-
         return (
             RetainerAutomationResult.Failed(
                 "RetainerMarketListingChanged",
-                "The requested listing is no longer present in the retainer's live market inventory."),
+                "The requested listing no longer matches its exact observed retainer-market slot."),
             -1);
     }
 
