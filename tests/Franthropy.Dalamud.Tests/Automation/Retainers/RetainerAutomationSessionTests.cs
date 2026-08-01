@@ -308,6 +308,29 @@ public sealed class RetainerAutomationSessionTests
         Assert.False(RetainerMarketListingObservation.Matches(missingPrice, 5333, 1, false, 1_234_581));
     }
 
+    [Theory]
+    [InlineData(4, false, 1_234_581, true)]
+    [InlineData(5, false, 1_234_581, false)]
+    [InlineData(4, true, 1_234_581, false)]
+    [InlineData(4, false, 1_234_580, false)]
+    public void MarketPriceCommit_RequiresTheReconciledExactSlotAndClosedEditor(
+        int observedSlotIndex,
+        bool listingEditorReady,
+        ulong observedUnitPrice,
+        bool expected)
+    {
+        var listing = new RetainerMarketListingTarget(4, 5333, 1, false, 1_234_581);
+
+        Assert.Equal(expected, RetainerMarketPriceCommitObservation.Matches(
+            listing,
+            observedSlotIndex,
+            5333,
+            1,
+            false,
+            observedUnitPrice,
+            listingEditorReady));
+    }
+
     [Fact]
     public async Task Session_PropagatesCancellationIntoFrameworkWork()
     {

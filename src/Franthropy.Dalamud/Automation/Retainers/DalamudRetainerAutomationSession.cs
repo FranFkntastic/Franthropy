@@ -316,32 +316,51 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         RetainerMarketListingTarget listing,
         CancellationToken cancellationToken = default)
     {
+        var opened = await OpenSellingListingCoreAsync(listing, cancellationToken).ConfigureAwait(false);
+        return opened.Result;
+    }
+
+    private async Task<(RetainerAutomationResult Result, RetainerMarketListingTarget? Listing)> OpenSellingListingCoreAsync(
+        RetainerMarketListingTarget listing,
+        CancellationToken cancellationToken)
+    {
         if (listing.ItemId == 0 ||
             listing.Quantity <= 0 ||
             listing.UnitPrice is not > 0 or > RetainerMarketPricePolicy.MaximumUnitPrice)
-            return RetainerAutomationResult.Failed("InvalidMarketListing", "A complete physical market-listing identity is required.");
+        {
+            return (
+                RetainerAutomationResult.Failed("InvalidMarketListing", "A complete physical market-listing identity is required."),
+                null);
+        }
 
         var opened = await OpenSellingListAsync(cancellationToken).ConfigureAwait(false);
         if (!opened.Success)
-            return opened;
+            return (opened, null);
 
         var reconciled = await framework.RunOnTick(
             () => ResolveMarketListing(listing),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!reconciled.Result.Success)
-            return reconciled.Result;
+            return (reconciled.Result, null);
 
         var selected = await framework.RunOnTick(
             () => SelectMarketListing(reconciled.SlotIndex),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!selected.Success)
-            return selected;
+            return (selected, null);
 
-        return await WaitUntilAsync(() => IsReady(SellingListingEditor), cancellationToken).ConfigureAwait(false)
-            ? RetainerAutomationResult.Succeeded("RetainerSellingListingReady", "Opened the verified retainer listing.")
-            : RetainerAutomationResult.Failed(
-                "RetainerSellingListingTimeout",
-                "The verified listing was selected, but its editor did not become ready.");
+        if (!await WaitUntilAsync(() => IsReady(SellingListingEditor), cancellationToken).ConfigureAwait(false))
+        {
+            return (
+                RetainerAutomationResult.Failed(
+                    "RetainerSellingListingTimeout",
+                    "The verified listing was selected, but its editor did not become ready."),
+                null);
+        }
+
+        return (
+            RetainerAutomationResult.Succeeded("RetainerSellingListingReady", "Opened the verified retainer listing."),
+            listing with { SlotIndex = reconciled.SlotIndex });
     }
 
     public Task<RetainerMarketListingScanResult> ScanMarketListingsAsync(CancellationToken cancellationToken = default) =>
@@ -372,9 +391,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 "The requested market unit price already matches the observed listing.");
         }
 
-        var opened = await OpenSellingListingAsync(listing, cancellationToken).ConfigureAwait(false);
-        if (!opened.Success)
-            return opened;
+        var opened = await OpenSellingListingCoreAsync(listing, cancellationToken).ConfigureAwait(false);
+        if (!opened.Result.Success || opened.Listing is null)
+            return opened.Result;
 
         var updated = await framework.RunOnTick(
             () => SetSellingListingPrice(newUnitPrice),
@@ -392,7 +411,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 "A confirmation dialog was already open before the verified listing submitted its price change.");
         }
 
-        var expected = listing with { UnitPrice = newUnitPrice };
+        var expected = opened.Listing with { UnitPrice = newUnitPrice };
         var mutationMayHaveBeenSent = false;
         try
         {
@@ -451,6 +470,12 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 expected,
                 exception,
                 cancellationToken);
+        }
+        catch (Exception exception) when (mutationMayHaveBeenSent)
+        {
+            return RetainerAutomationResult.Failed(
+                "RetainerMarketPriceUpdateIndeterminate",
+                $"The price request may have been sent before an observation fault: {exception.Message} Re-scan before retrying.");
         }
     }
 
@@ -530,6 +555,13 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 expected,
                 exception,
                 cancellationToken);
+        }
+        catch (Exception exception) when (requestMayHaveBeenSent)
+        {
+            return RetainerMarketListingPostResult.Indeterminate(
+                expected,
+                "RetainerMarketListingPostIndeterminate",
+                $"The listing request may have been sent before an observation fault: {exception.Message} Re-scan before retrying.");
         }
     }
 
@@ -977,16 +1009,31 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 RetainerAutomationResult.Succeeded("RetainerMarketListingVerified", "The live retainer listing matches the requested listing."),
                 expected.SlotIndex);
 
+        var relocatedSlotIndex = -1;
         for (var slotIndex = 0; slotIndex < container->Size; slotIndex++)
         {
             if (slotIndex == expected.SlotIndex || !MatchesMarketListing(manager, container, slotIndex, expected))
                 continue;
 
+            if (relocatedSlotIndex >= 0)
+            {
+                return (
+                    RetainerAutomationResult.Failed(
+                        "RetainerMarketListingAmbiguous",
+                        "Multiple live listings match the observed identity after its original slot changed."),
+                    -1);
+            }
+
+            relocatedSlotIndex = slotIndex;
+        }
+
+        if (relocatedSlotIndex >= 0)
+        {
             return (
                 RetainerAutomationResult.Succeeded(
                     "RetainerMarketListingRelocated",
-                    "The listing moved after observation and was reconciled to its live slot."),
-                slotIndex);
+                    "The listing moved after observation and was reconciled to its unique live slot."),
+                relocatedSlotIndex);
         }
 
         return (
@@ -1213,9 +1260,29 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private unsafe (bool Committed, bool YesNoReady) ObserveSellingListingPriceCommit(
         RetainerMarketListingTarget expected)
     {
-        var resolved = ResolveMarketListing(expected);
+        var manager = InventoryManager.Instance();
+        var container = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
+        var committed = false;
+        if (manager != null &&
+            container != null &&
+            container->IsLoaded &&
+            expected.SlotIndex >= 0 &&
+            expected.SlotIndex < container->Size)
+        {
+            var slot = container->GetInventorySlot(expected.SlotIndex);
+            committed = slot != null &&
+                RetainerMarketPriceCommitObservation.Matches(
+                    expected,
+                    expected.SlotIndex,
+                    slot->ItemId,
+                    slot->Quantity,
+                    slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality),
+                    manager->GetRetainerMarketPrice(checked((short)expected.SlotIndex)),
+                    IsReady(SellingListingEditor));
+        }
+
         return (
-            resolved.Result.Success && !IsReady(SellingListingEditor),
+            committed,
             IsReady(YesNo));
     }
 

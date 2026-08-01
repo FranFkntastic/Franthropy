@@ -217,6 +217,26 @@ public static class RetainerMarketListingObservation
         expected.UnitPrice == observedUnitPrice;
 }
 
+internal static class RetainerMarketPriceCommitObservation
+{
+    public static bool Matches(
+        RetainerMarketListingTarget expected,
+        int observedSlotIndex,
+        uint observedItemId,
+        int observedQuantity,
+        bool observedIsHq,
+        ulong observedUnitPrice,
+        bool listingEditorReady) =>
+        !listingEditorReady &&
+        expected.SlotIndex == observedSlotIndex &&
+        RetainerMarketListingObservation.Matches(
+            expected,
+            observedItemId,
+            observedQuantity,
+            observedIsHq,
+            observedUnitPrice);
+}
+
 public static class RetainerMarketPricePolicy
 {
     public const uint MaximumUnitPrice = 999_999_999;
