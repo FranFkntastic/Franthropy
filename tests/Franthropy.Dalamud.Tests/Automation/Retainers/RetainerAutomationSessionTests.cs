@@ -229,19 +229,17 @@ public sealed class RetainerAutomationSessionTests
             RetainerMarketPricePolicy.IsValidMutation(observedUnitPrice, requestedUnitPrice));
 
     [Fact]
-    public void MarketPriceUpdatePolicy_ConfirmsAtMostOnceWhileTheDialogRemainsReady()
+    public void MarketPriceUpdatePolicy_RejectsAnyUnownedConfirmation()
     {
-        var confirmationSent = false;
+        var confirmation = RetainerMarketPriceUpdatePolicy.Decide(false, true);
+        var waiting = RetainerMarketPriceUpdatePolicy.Decide(false, false);
+        var committed = RetainerMarketPriceUpdatePolicy.Decide(true, false);
+        var committedWithConfirmation = RetainerMarketPriceUpdatePolicy.Decide(true, true);
 
-        var first = RetainerMarketPriceUpdatePolicy.Decide(false, true, confirmationSent);
-        if (first == RetainerMarketPriceUpdateAction.ConfirmOnce)
-            confirmationSent = true;
-        var repeated = RetainerMarketPriceUpdatePolicy.Decide(false, true, confirmationSent);
-        var committed = RetainerMarketPriceUpdatePolicy.Decide(true, true, confirmationSent);
-
-        Assert.Equal(RetainerMarketPriceUpdateAction.ConfirmOnce, first);
-        Assert.Equal(RetainerMarketPriceUpdateAction.Wait, repeated);
+        Assert.Equal(RetainerMarketPriceUpdateAction.RejectUnexpectedConfirmation, confirmation);
+        Assert.Equal(RetainerMarketPriceUpdateAction.Wait, waiting);
         Assert.Equal(RetainerMarketPriceUpdateAction.Complete, committed);
+        Assert.Equal(RetainerMarketPriceUpdateAction.RejectUnexpectedConfirmation, committedWithConfirmation);
     }
 
     [Fact]
