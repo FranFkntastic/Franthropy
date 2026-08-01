@@ -15,6 +15,13 @@ public sealed record GilVendorOffer(
     Vector3 Position,
     IReadOnlyList<uint> RouteAetheryteIds)
 {
+    public IReadOnlyList<GilVendorTravelRoute> TravelRoutes { get; init; } = [];
+
+    public IReadOnlyList<GilVendorTravelRoute> EffectiveTravelRoutes =>
+        TravelRoutes.Count != 0
+            ? TravelRoutes
+            : RouteAetheryteIds.Select(id => new GilVendorTravelRoute(id)).ToArray();
+
     public bool IsExecutableOrdinaryGilOffer =>
         ItemId != 0 &&
         !string.IsNullOrWhiteSpace(ItemName) &&
@@ -27,6 +34,10 @@ public sealed record GilVendorOffer(
         float.IsFinite(Position.Y) &&
         float.IsFinite(Position.Z);
 }
+
+public sealed record GilVendorTravelRoute(
+    uint AetheryteId,
+    uint? AethernetId = null);
 
 public sealed record GilVendorBuyRequest(
     GilVendorOffer Offer,
@@ -121,7 +132,8 @@ public sealed record GilVendorAccessAssessment(
     GilVendorAccessState State,
     string Code,
     string Message,
-    uint? RouteAetheryteId = null)
+    uint? RouteAetheryteId = null,
+    uint? RouteAethernetId = null)
 {
     public bool IsEligible => State is GilVendorAccessState.Probeable or GilVendorAccessState.Verified;
 }

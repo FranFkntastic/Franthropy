@@ -95,6 +95,48 @@ public sealed class GilVendorEngineTests
             out _));
     }
 
+    [Fact]
+    public void Travel_routes_prefer_a_direct_aetheryte_in_the_vendor_territory()
+    {
+        var routes = DalamudGilVendorCatalogBuilder.ResolveTravelRoutes(
+            200,
+            [
+                new(10, 200, 7, true),
+                new(11, 200, 7, false),
+                new(12, 201, 7, true),
+            ]);
+
+        Assert.Equal([new GilVendorTravelRoute(10)], routes);
+    }
+
+    [Fact]
+    public void Travel_routes_join_a_city_aetheryte_to_a_destination_aethernet_shard()
+    {
+        var routes = DalamudGilVendorCatalogBuilder.ResolveTravelRoutes(
+            200,
+            [
+                new(10, 201, 7, true),
+                new(11, 200, 7, false),
+                new(12, 202, 8, true),
+            ]);
+
+        Assert.Equal([new GilVendorTravelRoute(10, 11)], routes);
+    }
+
+    [Fact]
+    public void Travel_routes_do_not_invent_a_route_without_a_shared_aethernet_group()
+    {
+        var routes = DalamudGilVendorCatalogBuilder.ResolveTravelRoutes(
+            200,
+            [
+                new(10, 201, 7, true),
+                new(11, 200, 0, false),
+                new(12, 202, 8, true),
+            ]);
+
+        Assert.Empty(routes);
+    }
+
     private static GilVendorOffer Offer(
         uint itemId,
         uint npcId = 10,

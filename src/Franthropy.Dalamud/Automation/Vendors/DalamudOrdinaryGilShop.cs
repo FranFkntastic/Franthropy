@@ -120,10 +120,15 @@ public sealed class DalamudGilVendorAccessReader
                 : $"The character's teleport destinations could not be observed ({aetheryteRefreshFailure}).";
             return new(GilVendorAccessState.Unknown, "TeleportListUnavailable", detail);
         }
-        var route = offer.RouteAetheryteIds.FirstOrDefault(attuned.Contains);
-        return route == 0
+        var route = offer.EffectiveTravelRoutes.FirstOrDefault(candidate => attuned.Contains(candidate.AetheryteId));
+        return route is null
             ? new(GilVendorAccessState.Unavailable, "NoAttunedRoute", "No attuned destination reaches this vendor territory.")
-            : new(GilVendorAccessState.Probeable, "AttunedRoute", "An attuned destination can reach this vendor.", route);
+            : new(
+                GilVendorAccessState.Probeable,
+                "AttunedRoute",
+                "An attuned destination can reach this vendor.",
+                route.AetheryteId,
+                route.AethernetId);
     }
 
     private void SynchronizeOwnerAndTerritory()
