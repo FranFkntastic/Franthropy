@@ -1,5 +1,6 @@
 using Dalamud.Plugin.Services;
 using Dalamud.Utility;
+using ECommons.Automation.UIInput;
 using ECommons.UIHelpers.AddonMasterImplementations;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
@@ -26,6 +27,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private const string SellingList = "RetainerSellList";
     private const string MarketList = "RetainerMarketList";
     private const string SellingListingEditor = "RetainerSell";
+    private const string YesNo = "SelectYesno";
     private const string ApprovedGameVersion = "2026.07.16.0001.0000";
     private const string PatchContractId = "franthropy.retainer-ui-callbacks";
     private static readonly IReadOnlyList<InventoryType> PlayerOrdinaryItemContainers =
@@ -45,6 +47,20 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private readonly DalamudRenderedUiTextActionDispatcher renderedUi;
     private readonly string? currentGameVersion;
     private RetainerAutomationTarget? active;
+
+    private enum MarketListingPostDispatchOutcome
+    {
+        FailedBeforeSend,
+        Sent,
+        Indeterminate,
+    }
+
+    private sealed record MarketListingPostDispatchResult(
+        MarketListingPostDispatchOutcome Outcome,
+        RetainerMarketListingTarget? Listing,
+        int SourceQuantityBefore,
+        string Code,
+        string Message);
 
     public DalamudRetainerAutomationSession(
         IFramework framework,
@@ -150,7 +166,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 Menu: IsCommandMenuReady(),
                 Talk: IsReady(Talk),
                 ActiveRetainerId: ReadActiveRetainerId(),
-                Selling: IsReady(SellingList) || IsReady(MarketList) || IsReady(SellingListingEditor)),
+                Selling: IsReady(SellingList) || IsReady(MarketList) || IsReady(SellingListingEditor) || IsReady(YesNo)),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         if (state.List)
@@ -193,6 +209,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             ? RetainerAutomationResult.Succeeded("RetainerListReady", "Retainer list opened.")
             : RetainerAutomationResult.Failed("RetainerListTimeout", "Timed out waiting for the retainer list.");
     }
+
+    public Task<RetainerAutomationRosterResult> ScanAvailableRetainersAsync(CancellationToken cancellationToken = default) =>
+        framework.RunOnTick(ScanAvailableRetainers, cancellationToken: cancellationToken);
 
     public async Task<RetainerAutomationResult> OpenRetainerAsync(RetainerAutomationTarget target, CancellationToken cancellationToken = default)
     {
@@ -297,7 +316,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         RetainerMarketListingTarget listing,
         CancellationToken cancellationToken = default)
     {
-        if (listing.ItemId == 0 || listing.Quantity <= 0 || listing.UnitPrice == 0)
+        if (listing.ItemId == 0 ||
+            listing.Quantity <= 0 ||
+            listing.UnitPrice is not > 0 or > RetainerMarketPricePolicy.MaximumUnitPrice)
             return RetainerAutomationResult.Failed("InvalidMarketListing", "A complete physical market-listing identity is required.");
 
         var opened = await OpenSellingListAsync(cancellationToken).ConfigureAwait(false);
@@ -313,9 +334,203 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         var selected = await framework.RunOnTick(
             () => SelectMarketListing(reconciled.SlotIndex),
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        return selected.Success
+        if (!selected.Success)
+            return selected;
+
+        return await WaitUntilAsync(() => IsReady(SellingListingEditor), cancellationToken).ConfigureAwait(false)
             ? RetainerAutomationResult.Succeeded("RetainerSellingListingReady", "Opened the verified retainer listing.")
-            : selected;
+            : RetainerAutomationResult.Failed(
+                "RetainerSellingListingTimeout",
+                "The verified listing was selected, but its editor did not become ready.");
+    }
+
+    public Task<RetainerMarketListingScanResult> ScanMarketListingsAsync(CancellationToken cancellationToken = default) =>
+        framework.RunOnTick(ScanMarketListings, cancellationToken: cancellationToken);
+
+    public async Task<RetainerAutomationResult> UpdateSellingListingPriceAsync(
+        RetainerMarketListingTarget listing,
+        uint newUnitPrice,
+        CancellationToken cancellationToken = default)
+    {
+        if (!RetainerMarketPricePolicy.IsValidMutation(listing.UnitPrice, newUnitPrice))
+        {
+            if (listing.UnitPrice is not > 0 or > RetainerMarketPricePolicy.MaximumUnitPrice)
+            {
+                return RetainerAutomationResult.Failed(
+                    "InvalidObservedMarketUnitPrice",
+                    "An exact valid live unit price must be observed before changing a listing.");
+            }
+            if (newUnitPrice is 0 or > RetainerMarketPricePolicy.MaximumUnitPrice)
+            {
+                return RetainerAutomationResult.Failed(
+                    "InvalidMarketUnitPrice",
+                    $"The market unit price must be between 1 and {RetainerMarketPricePolicy.MaximumUnitPrice:N0} gil.");
+            }
+
+            return RetainerAutomationResult.Failed(
+                "MarketUnitPriceUnchanged",
+                "The requested market unit price already matches the observed listing.");
+        }
+
+        var opened = await OpenSellingListingAsync(listing, cancellationToken).ConfigureAwait(false);
+        if (!opened.Success)
+            return opened;
+
+        var updated = await framework.RunOnTick(
+            () => SetSellingListingPrice(newUnitPrice),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (!updated.Success)
+            return updated;
+
+        var preexistingConfirmation = await framework.RunOnTick(
+            () => IsReady(YesNo),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (preexistingConfirmation)
+        {
+            return RetainerAutomationResult.Failed(
+                "UnexpectedRetainerMarketConfirmation",
+                "A confirmation dialog was already open before the verified listing submitted its price change.");
+        }
+
+        var expected = listing with { UnitPrice = newUnitPrice };
+        var mutationMayHaveBeenSent = false;
+        try
+        {
+            var confirmed = await framework.RunOnTick(
+                () =>
+                {
+                    mutationMayHaveBeenSent = true;
+                    return ConfirmSellingListingPrice();
+                },
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (!confirmed.Success)
+                return confirmed;
+
+            var confirmationSent = false;
+            for (var attempt = 0; attempt < 180; attempt++)
+            {
+                var observed = await framework.RunOnTick(
+                    () => ObserveSellingListingPriceCommit(expected),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                var action = RetainerMarketPriceUpdatePolicy.Decide(
+                    observed.Committed,
+                    observed.YesNoReady,
+                    confirmationSent);
+                if (action == RetainerMarketPriceUpdateAction.Complete)
+                {
+                    return RetainerAutomationResult.Succeeded(
+                        "RetainerMarketPriceUpdated",
+                        "The exact live retainer listing committed the requested unit price.");
+                }
+                if (action == RetainerMarketPriceUpdateAction.ConfirmOnce)
+                {
+                    confirmationSent = true;
+                    var accepted = await framework.RunOnTick(
+                        ConfirmYesNo,
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                    if (!accepted.Success)
+                    {
+                        return RetainerAutomationResult.Failed(
+                            "RetainerMarketPriceConfirmationIndeterminate",
+                            $"The price request was sent, but its owned confirmation could not be accepted: {accepted.Message} Re-scan before retrying.");
+                    }
+                }
+
+                await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
+            }
+
+            return RetainerAutomationResult.Failed(
+                "RetainerMarketPriceUpdateIndeterminate",
+                "The price request was sent, but its exact live postcondition was not observed. Re-scan before deciding whether to retry.");
+        }
+        catch (OperationCanceledException exception) when (mutationMayHaveBeenSent)
+        {
+            throw new RetainerMarketMutationIndeterminateException(
+                "RetainerMarketPriceUpdateCancelledIndeterminate",
+                "Cancellation occurred after the price request may have been sent. Re-scan before deciding whether to retry.",
+                expected,
+                exception,
+                cancellationToken);
+        }
+    }
+
+    public async Task<RetainerMarketListingPostResult> PostMarketListingAsync(
+        DalamudInventoryStack source,
+        int quantity,
+        uint unitPrice,
+        CancellationToken cancellationToken = default)
+    {
+        var compatibility = EvaluatePatchCompatibility();
+        if (!compatibility.IsApproved)
+            return RetainerMarketListingPostResult.Failed(GamePatchCompatibility.FailureCode, compatibility.Message);
+
+        if (quantity <= 0 || quantity > source.Quantity)
+            return RetainerMarketListingPostResult.Failed(
+                "InvalidMarketListingQuantity",
+                "The listing quantity must be positive and no greater than the exact observed source stack.");
+        if (unitPrice is 0 or > RetainerMarketPricePolicy.MaximumUnitPrice)
+            return RetainerMarketListingPostResult.Failed(
+                "InvalidMarketUnitPrice",
+                $"The market unit price must be between 1 and {RetainerMarketPricePolicy.MaximumUnitPrice:N0} gil.");
+
+        var verified = await framework.RunOnTick(
+            () => VerifyActive(active?.RetainerId ?? 0),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (!verified.Success)
+            return RetainerMarketListingPostResult.Failed(verified.Code, verified.Message);
+
+        var requestMayHaveBeenSent = false;
+        RetainerMarketListingTarget? expected = null;
+        try
+        {
+            var started = await framework.RunOnTick(
+                () =>
+                {
+                    requestMayHaveBeenSent = true;
+                    return StartMarketListingPost(source, quantity, unitPrice);
+                },
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            expected = started.Listing;
+            if (started.Outcome == MarketListingPostDispatchOutcome.FailedBeforeSend)
+                return RetainerMarketListingPostResult.Failed(started.Code, started.Message);
+            if (started.Outcome == MarketListingPostDispatchOutcome.Indeterminate)
+                return RetainerMarketListingPostResult.Indeterminate(started.Listing, started.Code, started.Message);
+            if (started.Listing is null)
+            {
+                return RetainerMarketListingPostResult.Indeterminate(
+                    null,
+                    "RetainerMarketListingPostDispatchInvalid",
+                    "The listing request reported dispatch without an exact expected listing. Re-scan before retrying.");
+            }
+
+            for (var attempt = 0; attempt < 180; attempt++)
+            {
+                var committed = await framework.RunOnTick(
+                    () => ObserveMarketListingPost(
+                        source,
+                        started.SourceQuantityBefore,
+                        started.Listing),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (committed)
+                    return RetainerMarketListingPostResult.Succeeded(started.Listing);
+
+                await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
+            }
+
+            return RetainerMarketListingPostResult.Indeterminate(
+                started.Listing,
+                "RetainerMarketListingPostIndeterminate",
+                "The listing request was sent, but its exact source decrement and live listing were not observed. Re-scan before retrying.");
+        }
+        catch (OperationCanceledException exception) when (requestMayHaveBeenSent)
+        {
+            throw new RetainerMarketMutationIndeterminateException(
+                "RetainerMarketListingPostCancelledIndeterminate",
+                "Cancellation occurred after the listing request may have been sent. Re-scan before deciding whether to retry.",
+                expected,
+                exception,
+                cancellationToken);
+        }
     }
 
     public Task<IReadOnlyList<DalamudInventoryStack>> ScanRetainerAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default) =>
@@ -334,7 +549,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             () => DalamudInventoryStackScanner.ScanLoadedStacks([InventoryType.Crystals], itemIds),
             cancellationToken: cancellationToken);
 
-    public Task<IReadOnlyList<DalamudInventoryStack>> ScanPlayerInventoryAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default) =>
+    public Task<IReadOnlyList<DalamudInventoryStack>> ScanPlayerInventoryAsync(IReadOnlySet<uint>? itemIds = null, CancellationToken cancellationToken = default) =>
         framework.RunOnTick(
             () => DalamudInventoryStackScanner.ScanLoadedStacks(PlayerOrdinaryItemContainers, itemIds),
             cancellationToken: cancellationToken);
@@ -383,6 +598,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 IsReady(MarketList),
                 IsReady(SellingList),
                 IsReady(SellingListingEditor),
+                IsReady(YesNo),
                 IsInventoryReady(),
                 IsCommandMenuReady(),
                 IsReady(RetainerList)),
@@ -400,6 +616,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         await framework.RunOnTick(
             () =>
             {
+                CloseSurface(YesNo);
                 CloseSurface(SellingListingEditor);
                 CloseSurface(SellingList);
                 CloseSurface(MarketList);
@@ -477,7 +694,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     public unsafe void CancelActive()
     {
         CloseInventory();
-        foreach (var addonName in new[] { "InputNumeric", "ContextMenu", SellingListingEditor, SellingList, MarketList, SelectString })
+        foreach (var addonName in new[] { "InputNumeric", "ContextMenu", YesNo, SellingListingEditor, SellingList, MarketList, SelectString })
         {
             var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
             if (addon is not null && addon->IsReady && addon->IsVisible)
@@ -645,6 +862,36 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         return (RetainerAutomationResult.Succeeded("RetainerSelected", $"Selected {name}."), name);
     }
 
+    private unsafe RetainerAutomationRosterResult ScanAvailableRetainers()
+    {
+        if (!IsReady(RetainerList))
+            return RetainerAutomationRosterResult.Failed(
+                "RetainerListUnavailable",
+                "The retainer list is not ready for roster reconciliation.");
+
+        var manager = RetainerManager.Instance();
+        if (manager == null)
+            return RetainerAutomationRosterResult.Failed(
+                "RetainerManagerUnavailable",
+                "The live retainer manager is unavailable.");
+
+        var retainers = new List<RetainerAutomationTarget>();
+        for (var index = 0; index < manager->GetRetainerCount(); index++)
+        {
+            var retainer = manager->Retainers[index];
+            var name = retainer.NameString;
+            if (!retainer.Available || retainer.RetainerId == 0 || string.IsNullOrWhiteSpace(name))
+                continue;
+            retainers.Add(new(retainer.RetainerId, name));
+        }
+
+        return retainers.Count > 0
+            ? RetainerAutomationRosterResult.Succeeded(retainers)
+            : RetainerAutomationRosterResult.Failed(
+                "RetainerRosterEmpty",
+                "No available retainers were present in the reconciled live roster.");
+    }
+
     private unsafe bool IsCommandMenuReady()
     {
         var addon = gameGui.GetAddonByName<AddonSelectString>(SelectString, 1);
@@ -749,6 +996,247 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             -1);
     }
 
+    private unsafe RetainerMarketListingScanResult ScanMarketListings()
+    {
+        var verified = VerifyActive(active?.RetainerId ?? 0);
+        if (!verified.Success)
+            return RetainerMarketListingScanResult.Failed(verified.Code, verified.Message);
+
+        var manager = InventoryManager.Instance();
+        var container = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
+        if (container == null || !container->IsLoaded)
+            return RetainerMarketListingScanResult.Failed(
+                "RetainerMarketUnavailable",
+                "The live retainer market inventory is unavailable.");
+
+        var listings = new List<RetainerMarketListingTarget>();
+        for (var slotIndex = 0; slotIndex < container->Size; slotIndex++)
+        {
+            var slot = container->GetInventorySlot(slotIndex);
+            if (slot == null || slot->ItemId == 0 || slot->Quantity == 0)
+                continue;
+
+            var unitPrice = manager->GetRetainerMarketPrice(checked((short)slotIndex));
+            if (unitPrice is 0 or > RetainerMarketPricePolicy.MaximumUnitPrice)
+                return RetainerMarketListingScanResult.Failed(
+                    "RetainerMarketPriceInvalid",
+                    $"The live listing in slot {slotIndex} has an invalid unit price.");
+
+            listings.Add(new(
+                slotIndex,
+                slot->ItemId,
+                slot->Quantity,
+                slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality),
+                checked((uint)unitPrice)));
+        }
+
+        return RetainerMarketListingScanResult.Succeeded(listings);
+    }
+
+    private unsafe MarketListingPostDispatchResult StartMarketListingPost(
+        DalamudInventoryStack source,
+        int quantity,
+        uint unitPrice)
+    {
+        if (!PlayerOrdinaryItemContainers.Contains(source.Container))
+        {
+            return new(
+                MarketListingPostDispatchOutcome.FailedBeforeSend,
+                null,
+                0,
+                "UnsupportedMarketListingSource",
+                "Only an exact live ordinary player-inventory stack may be posted through this primitive.");
+        }
+
+        var manager = InventoryManager.Instance();
+        var sourceContainer = manager == null ? null : manager->GetInventoryContainer(source.Container);
+        var marketContainer = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
+        if (manager == null ||
+            sourceContainer == null ||
+            !sourceContainer->IsLoaded ||
+            marketContainer == null ||
+            !marketContainer->IsLoaded)
+        {
+            return new(
+                MarketListingPostDispatchOutcome.FailedBeforeSend,
+                null,
+                0,
+                "RetainerMarketInventoryUnavailable",
+                "The exact source or live retainer market inventory is unavailable.");
+        }
+
+        if (source.SlotIndex < 0 || source.SlotIndex >= sourceContainer->Size)
+        {
+            return new(
+                MarketListingPostDispatchOutcome.FailedBeforeSend,
+                null,
+                0,
+                "MarketListingSourceChanged",
+                "The exact source slot is no longer valid.");
+        }
+
+        var sourceSlot = sourceContainer->GetInventorySlot(source.SlotIndex);
+        if (sourceSlot == null ||
+            sourceSlot->ItemId != source.ItemId ||
+            sourceSlot->Quantity != source.Quantity ||
+            sourceSlot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality) != source.IsHighQuality)
+        {
+            return new(
+                MarketListingPostDispatchOutcome.FailedBeforeSend,
+                null,
+                0,
+                "MarketListingSourceChanged",
+                "The exact source stack changed before listing.");
+        }
+
+        var marketSlotIndex = -1;
+        for (var slotIndex = 0; slotIndex < marketContainer->Size; slotIndex++)
+        {
+            var slot = marketContainer->GetInventorySlot(slotIndex);
+            if (slot != null && slot->ItemId == 0)
+            {
+                marketSlotIndex = slotIndex;
+                break;
+            }
+        }
+
+        if (marketSlotIndex < 0)
+        {
+            return new(
+                MarketListingPostDispatchOutcome.FailedBeforeSend,
+                null,
+                0,
+                "RetainerMarketFull",
+                "The active retainer has no empty market-listing slot.");
+        }
+
+        var expected = new RetainerMarketListingTarget(
+            marketSlotIndex,
+            source.ItemId,
+            quantity,
+            source.IsHighQuality,
+            unitPrice);
+        try
+        {
+            manager->MoveToRetainerMarket(
+                source.Container,
+                checked((ushort)source.SlotIndex),
+                InventoryType.RetainerMarket,
+                checked((ushort)marketSlotIndex),
+                checked((uint)quantity),
+                unitPrice);
+            return new(
+                MarketListingPostDispatchOutcome.Sent,
+                expected,
+                source.Quantity,
+                "RetainerMarketListingPostSent",
+                "The exact listing request was sent once; awaiting its live postcondition.");
+        }
+        catch (Exception exception)
+        {
+            return new(
+                MarketListingPostDispatchOutcome.Indeterminate,
+                expected,
+                source.Quantity,
+                "RetainerMarketListingPostDispatchIndeterminate",
+                $"The listing call faulted after dispatch began: {exception.Message} Re-scan before retrying.");
+        }
+    }
+
+    private static unsafe bool ObserveMarketListingPost(
+        DalamudInventoryStack source,
+        int sourceQuantityBefore,
+        RetainerMarketListingTarget expected)
+    {
+        var manager = InventoryManager.Instance();
+        var sourceContainer = manager == null ? null : manager->GetInventoryContainer(source.Container);
+        var marketContainer = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
+        if (manager == null ||
+            sourceContainer == null ||
+            !sourceContainer->IsLoaded ||
+            marketContainer == null ||
+            !marketContainer->IsLoaded ||
+            source.SlotIndex < 0 ||
+            source.SlotIndex >= sourceContainer->Size ||
+            expected.SlotIndex < 0 ||
+            expected.SlotIndex >= marketContainer->Size)
+        {
+            return false;
+        }
+
+        var expectedSourceQuantity = sourceQuantityBefore - expected.Quantity;
+        var sourceSlot = sourceContainer->GetInventorySlot(source.SlotIndex);
+        var sourceMatches = expectedSourceQuantity == 0
+            ? sourceSlot == null || sourceSlot->ItemId != source.ItemId || sourceSlot->Quantity == 0
+            : sourceSlot != null &&
+              sourceSlot->ItemId == source.ItemId &&
+              sourceSlot->Quantity == expectedSourceQuantity &&
+              sourceSlot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality) == source.IsHighQuality;
+        if (!sourceMatches)
+            return false;
+
+        return MatchesMarketListing(manager, marketContainer, expected.SlotIndex, expected);
+    }
+
+    private unsafe RetainerAutomationResult SetSellingListingPrice(uint newUnitPrice)
+    {
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(SellingListingEditor, 1);
+        if (addon == null || !addon->IsReady || !addon->IsVisible)
+            return RetainerAutomationResult.Failed(
+                "RetainerSellingListingUnavailable",
+                "The verified retainer listing editor is unavailable.");
+
+        var values = stackalloc AtkValue[2];
+        values[0] = new() { Type = AtkValueType.Int, Int = 2 };
+        values[1] = new() { Type = AtkValueType.UInt, UInt = newUnitPrice };
+        addon->FireCallback(2, values, true);
+        return RetainerAutomationResult.Succeeded(
+            "RetainerMarketPriceEntered",
+            "Entered the requested unit price in the verified listing editor.");
+    }
+
+    private unsafe RetainerAutomationResult ConfirmSellingListingPrice()
+    {
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(SellingListingEditor, 1);
+        if (addon == null || !addon->IsReady || !addon->IsVisible)
+            return RetainerAutomationResult.Failed(
+                "RetainerSellingListingUnavailable",
+                "The verified retainer listing editor is unavailable at confirmation.");
+
+        var value = new AtkValue { Type = AtkValueType.Int, Int = 0 };
+        addon->FireCallback(1, &value, true);
+        return RetainerAutomationResult.Succeeded(
+            "RetainerMarketPriceConfirmationSent",
+            "Submitted the verified listing price exactly once.");
+    }
+
+    private unsafe (bool Committed, bool YesNoReady) ObserveSellingListingPriceCommit(
+        RetainerMarketListingTarget expected)
+    {
+        var resolved = ResolveMarketListing(expected);
+        return (
+            resolved.Result.Success && !IsReady(SellingListingEditor),
+            IsReady(YesNo));
+    }
+
+    private unsafe RetainerAutomationResult ConfirmYesNo()
+    {
+        var addon = gameGui.GetAddonByName<AddonSelectYesno>(YesNo, 1);
+        if (addon == null ||
+            !addon->AtkUnitBase.IsReady ||
+            !addon->AtkUnitBase.IsVisible ||
+            addon->YesButton == null ||
+            !addon->YesButton->IsEnabled)
+            return RetainerAutomationResult.Failed(
+                "RetainerMarketPriceConfirmationUnavailable",
+                "The owned listing-price confirmation is unavailable or cannot be accepted.");
+
+        addon->YesButton->ClickAddonButton(&addon->AtkUnitBase);
+        return RetainerAutomationResult.Succeeded(
+            "RetainerMarketPriceConfirmationAccepted",
+            "Accepted the listing-price confirmation dialog.");
+    }
+
     private static unsafe bool MatchesMarketListing(
         InventoryManager* manager,
         InventoryContainer* container,
@@ -846,6 +1334,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (observed.MarketListReady) ready.Add(MarketList);
         if (observed.SellListReady) ready.Add(SellingList);
         if (observed.ListingEditorReady) ready.Add(SellingListingEditor);
+        if (observed.ConfirmationReady) ready.Add(YesNo);
         if (observed.InventoryReady) ready.Add("retainer inventory");
         if (observed.CommandMenuReady) ready.Add("retainer command menu");
         if (observed.RetainerListReady) ready.Add(RetainerList);

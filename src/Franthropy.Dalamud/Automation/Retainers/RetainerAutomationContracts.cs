@@ -3,6 +3,18 @@ using Franthropy.Dalamud.Automation.Inventory;
 namespace Franthropy.Dalamud.Automation.Retainers;
 
 public sealed record RetainerAutomationTarget(ulong RetainerId, string RetainerName);
+public sealed record RetainerAutomationRosterResult(
+    bool Success,
+    IReadOnlyList<RetainerAutomationTarget> Retainers,
+    string Code,
+    string Message)
+{
+    public static RetainerAutomationRosterResult Succeeded(IReadOnlyList<RetainerAutomationTarget> retainers) =>
+        new(true, retainers, "RetainerRosterScanned", $"Observed {retainers.Count} available retainer(s).");
+
+    public static RetainerAutomationRosterResult Failed(string code, string message) =>
+        new(false, [], code, message);
+}
 
 public sealed record RetainerAutomationResult(bool Success, string Code, string Message)
 {
@@ -41,10 +53,74 @@ public sealed record RetainerMarketListingTarget(
     int Quantity,
     bool IsHq,
     uint? UnitPrice);
+public sealed record RetainerMarketListingScanResult(
+    bool Success,
+    IReadOnlyList<RetainerMarketListingTarget> Listings,
+    string Code,
+    string Message)
+{
+    public static RetainerMarketListingScanResult Succeeded(IReadOnlyList<RetainerMarketListingTarget> listings) =>
+        new(true, listings, "RetainerMarketListingsScanned", $"Observed {listings.Count} live retainer market listing(s).");
+
+    public static RetainerMarketListingScanResult Failed(string code, string message) =>
+        new(false, [], code, message);
+}
+
+public enum RetainerMarketListingPostOutcome
+{
+    FailedBeforeSend,
+    Committed,
+    Indeterminate,
+}
+
+public sealed record RetainerMarketListingPostResult(
+    RetainerMarketListingPostOutcome Outcome,
+    RetainerMarketListingTarget? Listing,
+    string Code,
+    string Message)
+{
+    public bool Success => Outcome == RetainerMarketListingPostOutcome.Committed;
+    public bool RequestSent => Outcome != RetainerMarketListingPostOutcome.FailedBeforeSend;
+
+    public static RetainerMarketListingPostResult Succeeded(RetainerMarketListingTarget listing) =>
+        new(
+            RetainerMarketListingPostOutcome.Committed,
+            listing,
+            "RetainerMarketListingPosted",
+            "The exact source decrement and live market listing were observed.");
+
+    public static RetainerMarketListingPostResult Failed(string code, string message) =>
+        new(RetainerMarketListingPostOutcome.FailedBeforeSend, null, code, message);
+
+    public static RetainerMarketListingPostResult Indeterminate(
+        RetainerMarketListingTarget? listing,
+        string code,
+        string message) =>
+        new(RetainerMarketListingPostOutcome.Indeterminate, listing, code, message);
+}
+
+public sealed class RetainerMarketMutationIndeterminateException : OperationCanceledException
+{
+    public RetainerMarketMutationIndeterminateException(
+        string code,
+        string message,
+        RetainerMarketListingTarget? listing,
+        OperationCanceledException innerException,
+        CancellationToken cancellationToken)
+        : base(message, innerException, cancellationToken)
+    {
+        Code = code;
+        Listing = listing;
+    }
+
+    public string Code { get; }
+    public RetainerMarketListingTarget? Listing { get; }
+}
 public sealed record RetainerSellingUiObservation(
     bool MarketListReady,
     bool SellListReady,
     bool ListingEditorReady,
+    bool ConfirmationReady,
     bool InventoryReady,
     bool CommandMenuReady,
     bool RetainerListReady);
@@ -57,6 +133,7 @@ public interface IRetainerAutomationSession
 {
     bool IsRetainerListReady { get; }
     Task<RetainerAutomationResult> EnsureRetainerListAsync(CancellationToken cancellationToken = default);
+    Task<RetainerAutomationRosterResult> ScanAvailableRetainersAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationOpenResult> OpenFirstAvailableRetainerAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> OpenRetainerAsync(RetainerAutomationTarget target, CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> WaitForCurrentRetainerMenuAsync(CancellationToken cancellationToken = default);
@@ -65,11 +142,21 @@ public interface IRetainerAutomationSession
     Task<RetainerAutomationResult> OpenSellingListingAsync(
         RetainerMarketListingTarget listing,
         CancellationToken cancellationToken = default);
+    Task<RetainerMarketListingScanResult> ScanMarketListingsAsync(CancellationToken cancellationToken = default);
+    Task<RetainerAutomationResult> UpdateSellingListingPriceAsync(
+        RetainerMarketListingTarget listing,
+        uint newUnitPrice,
+        CancellationToken cancellationToken = default);
+    Task<RetainerMarketListingPostResult> PostMarketListingAsync(
+        DalamudInventoryStack source,
+        int quantity,
+        uint unitPrice,
+        CancellationToken cancellationToken = default);
     Task<RetainerSellingUiObservation> ObserveSellingUiAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> ReturnToRetainerListAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DalamudInventoryStack>> ScanRetainerAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default);
     Task<RetainerRetrievalResult> RetrieveAsync(DalamudInventoryStack stack, int quantity, CancellationToken cancellationToken = default);
-    Task<IReadOnlyList<DalamudInventoryStack>> ScanPlayerInventoryAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<DalamudInventoryStack>> ScanPlayerInventoryAsync(IReadOnlySet<uint>? itemIds = null, CancellationToken cancellationToken = default);
     Task<RetainerDepositResult> DepositAsync(DalamudInventoryStack stack, int quantity, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DalamudInventoryStack>> ScanPlayerCrystalsAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default);
     Task<RetainerCrystalTransferResult> DepositCrystalAsync(DalamudInventoryStack stack, int quantity, CancellationToken cancellationToken = default);
@@ -126,5 +213,38 @@ public static class RetainerMarketListingObservation
         expected.ItemId == observedItemId &&
         expected.Quantity == observedQuantity &&
         expected.IsHq == observedIsHq &&
-        (expected.UnitPrice is null || expected.UnitPrice == observedUnitPrice);
+        expected.UnitPrice is > 0 &&
+        expected.UnitPrice == observedUnitPrice;
+}
+
+public static class RetainerMarketPricePolicy
+{
+    public const uint MaximumUnitPrice = 999_999_999;
+
+    public static bool IsValidMutation(uint? observedUnitPrice, uint requestedUnitPrice) =>
+        requestedUnitPrice is > 0 and <= MaximumUnitPrice &&
+        observedUnitPrice is > 0 &&
+        observedUnitPrice != requestedUnitPrice;
+}
+
+public enum RetainerMarketPriceUpdateAction
+{
+    Wait,
+    ConfirmOnce,
+    Complete,
+}
+
+public static class RetainerMarketPriceUpdatePolicy
+{
+    public static RetainerMarketPriceUpdateAction Decide(
+        bool committed,
+        bool confirmationReady,
+        bool confirmationAlreadySent)
+    {
+        if (committed)
+            return RetainerMarketPriceUpdateAction.Complete;
+        if (confirmationReady && !confirmationAlreadySent)
+            return RetainerMarketPriceUpdateAction.ConfirmOnce;
+        return RetainerMarketPriceUpdateAction.Wait;
+    }
 }

@@ -94,6 +94,7 @@ dotnet test .\Franthropy.sln -c Debug
 
 - [Franthropy Filter Language](docs/design/filter-language.md) - proposed shared filtering engine, canonical FFXIV vocabulary, context binding model, diagnostics, and staged delivery plan.
 - [Canonical FFXIV Filter Vocabulary](docs/design/filter-vocabulary.md) - field semantics, named values, context availability, worked expressions, and vocabulary contribution rules.
+- [Retainer Automation Sessions](docs/design/retainer-automation.md) - shared retainer discovery, inventory transfer, selling-list mutation, exact-evidence, and indeterminate-outcome contracts.
 
 ## Contributing
 
