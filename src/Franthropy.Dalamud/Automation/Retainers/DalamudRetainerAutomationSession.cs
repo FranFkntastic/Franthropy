@@ -416,11 +416,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         try
         {
             var confirmed = await framework.RunOnTick(
-                () =>
-                {
-                    mutationMayHaveBeenSent = true;
-                    return ConfirmSellingListingPrice();
-                },
+                () => ConfirmSellingListingPrice(() => mutationMayHaveBeenSent = true),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             if (!confirmed.Success)
                 return confirmed;
@@ -509,11 +505,11 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         try
         {
             var started = await framework.RunOnTick(
-                () =>
-                {
-                    requestMayHaveBeenSent = true;
-                    return StartMarketListingPost(source, quantity, unitPrice);
-                },
+                () => StartMarketListingPost(
+                    source,
+                    quantity,
+                    unitPrice,
+                    () => requestMayHaveBeenSent = true),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             expected = started.Listing;
             if (started.Outcome == MarketListingPostDispatchOutcome.FailedBeforeSend)
@@ -1083,7 +1079,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private unsafe MarketListingPostDispatchResult StartMarketListingPost(
         DalamudInventoryStack source,
         int quantity,
-        uint unitPrice)
+        uint unitPrice,
+        System.Action markDispatchStarted)
     {
         if (!PlayerOrdinaryItemContainers.Contains(source.Container))
         {
@@ -1165,6 +1162,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             unitPrice);
         try
         {
+            markDispatchStarted();
             manager->MoveToRetainerMarket(
                 source.Container,
                 checked((ushort)source.SlotIndex),
@@ -1242,7 +1240,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             "Entered the requested unit price in the verified listing editor.");
     }
 
-    private unsafe RetainerAutomationResult ConfirmSellingListingPrice()
+    private unsafe RetainerAutomationResult ConfirmSellingListingPrice(System.Action markDispatchStarted)
     {
         var addon = gameGui.GetAddonByName<AtkUnitBase>(SellingListingEditor, 1);
         if (addon == null || !addon->IsReady || !addon->IsVisible)
@@ -1250,6 +1248,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 "RetainerSellingListingUnavailable",
                 "The verified retainer listing editor is unavailable at confirmation.");
 
+        markDispatchStarted();
         var value = new AtkValue { Type = AtkValueType.Int, Int = 0 };
         addon->FireCallback(1, &value, true);
         return RetainerAutomationResult.Succeeded(
