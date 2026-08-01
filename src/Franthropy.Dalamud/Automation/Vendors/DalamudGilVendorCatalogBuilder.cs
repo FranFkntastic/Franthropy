@@ -47,12 +47,27 @@ public static class DalamudGilVendorCatalogBuilder
         var locations = DalamudVendorLocationCatalogBuilder.Build(
             dataManager,
             shopNpcs.Values.SelectMany(npcs => npcs).ToHashSet());
-        var routeAetherytes = dataManager.GetExcelSheet<Aetheryte>()
-            .Where(row => row.IsAetheryte && row.Territory.RowId != 0)
-            .GroupBy(row => row.Territory.RowId)
+        var aetheryteNodes = dataManager.GetExcelSheet<Aetheryte>()
+            .Where(row => row.RowId != 0 && row.Territory.RowId != 0)
+            .Select(row => new GilVendorAetheryteNode(
+                row.RowId,
+                row.Territory.RowId,
+                row.AethernetGroup,
+                row.IsAetheryte))
+            .ToArray();
+        var travelRoutes = locations.Values
+            .SelectMany(npcLocations => npcLocations)
+            .Select(location => location.TerritoryId)
+            .Distinct()
             .ToDictionary(
-                group => group.Key,
-                group => (IReadOnlyList<uint>)group.Select(row => row.RowId).Distinct().Order().ToArray());
+                territoryId => territoryId,
+                territoryId => ResolveTravelRoutes(territoryId, aetheryteNodes));
+        var routeAetheryteIds = travelRoutes.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<uint>)pair.Value
+                .Select(route => route.AetheryteId)
+                .Distinct()
+                .ToArray());
         var items = dataManager.GetExcelSheet<Item>()
             .Where(row => row.RowId != 0)
             .ToDictionary(row => row.RowId);
@@ -84,7 +99,7 @@ public static class DalamudGilVendorCatalogBuilder
 
                     foreach (var location in npcLocations)
                     {
-                        routeAetherytes.TryGetValue(location.TerritoryId, out var aetherytes);
+                        var routes = travelRoutes[location.TerritoryId];
                         offers.Add(new(
                             itemId,
                             item.Name.ToString(),
@@ -96,7 +111,10 @@ public static class DalamudGilVendorCatalogBuilder
                             npcName,
                             location.TerritoryId,
                             location.Position,
-                            aetherytes ?? []));
+                            routeAetheryteIds[location.TerritoryId])
+                        {
+                            TravelRoutes = routes,
+                        });
                     }
                 }
 
@@ -105,6 +123,41 @@ public static class DalamudGilVendorCatalogBuilder
         }
 
         return GilVendorCatalog.Create(offers);
+    }
+
+    internal static IReadOnlyList<GilVendorTravelRoute> ResolveTravelRoutes(
+        uint targetTerritoryId,
+        IReadOnlyList<GilVendorAetheryteNode> nodes)
+    {
+        ArgumentNullException.ThrowIfNull(nodes);
+
+        var direct = nodes
+            .Where(node => node.IsAetheryte && node.TerritoryId == targetTerritoryId)
+            .Select(node => new GilVendorTravelRoute(node.Id))
+            .Distinct()
+            .OrderBy(route => route.AetheryteId)
+            .ToArray();
+        if (direct.Length != 0)
+            return direct;
+
+        var destinationShards = nodes
+            .Where(node => !node.IsAetheryte &&
+                           node.TerritoryId == targetTerritoryId &&
+                           node.AethernetGroup != 0)
+            .OrderBy(node => node.Id)
+            .ToArray();
+        if (destinationShards.Length == 0)
+            return [];
+
+        return destinationShards
+            .SelectMany(shard => nodes
+                .Where(node => node.IsAetheryte &&
+                               node.AethernetGroup == shard.AethernetGroup)
+                .Select(main => new GilVendorTravelRoute(main.Id, shard.Id)))
+            .Distinct()
+            .OrderBy(route => route.AetheryteId)
+            .ThenBy(route => route.AethernetId)
+            .ToArray();
     }
 
     private static void AddShopNpc(Dictionary<uint, List<uint>> shopNpcs, uint shopId, uint npcId)
@@ -116,3 +169,9 @@ public static class DalamudGilVendorCatalogBuilder
     }
 
 }
+
+internal sealed record GilVendorAetheryteNode(
+    uint Id,
+    uint TerritoryId,
+    uint AethernetGroup,
+    bool IsAetheryte);

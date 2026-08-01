@@ -117,6 +117,7 @@
     <Compile Remove="Travel\DalamudLifestreamObjectInteractor.cs" />
     <Compile Remove="Travel\DalamudLifestreamPropertyTravel.cs" />
     <Compile Remove="Travel\DalamudLifestreamAetheryteTravel.cs" />
+    <Compile Remove="Travel\DalamudLifestreamAethernetTravel.cs" />
     <Compile Remove="Travel\DalamudLifestreamLogin.cs" />
     <Compile Remove="Travel\DalamudTravelReadiness.cs" />
     <Compile Remove="Travel\DalamudVNavmeshTravel.cs" />
