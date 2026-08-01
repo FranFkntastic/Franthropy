@@ -421,7 +421,6 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             if (!confirmed.Success)
                 return confirmed;
 
-            var confirmationSent = false;
             for (var attempt = 0; attempt < 180; attempt++)
             {
                 var observed = await framework.RunOnTick(
@@ -429,26 +428,18 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                     cancellationToken: cancellationToken).ConfigureAwait(false);
                 var action = RetainerMarketPriceUpdatePolicy.Decide(
                     observed.Committed,
-                    observed.YesNoReady,
-                    confirmationSent);
+                    observed.YesNoReady);
                 if (action == RetainerMarketPriceUpdateAction.Complete)
                 {
                     return RetainerAutomationResult.Succeeded(
                         "RetainerMarketPriceUpdated",
                         "The exact live retainer listing committed the requested unit price.");
                 }
-                if (action == RetainerMarketPriceUpdateAction.ConfirmOnce)
+                if (action == RetainerMarketPriceUpdateAction.RejectUnexpectedConfirmation)
                 {
-                    confirmationSent = true;
-                    var accepted = await framework.RunOnTick(
-                        ConfirmYesNo,
-                        cancellationToken: cancellationToken).ConfigureAwait(false);
-                    if (!accepted.Success)
-                    {
-                        return RetainerAutomationResult.Failed(
-                            "RetainerMarketPriceConfirmationIndeterminate",
-                            $"The price request was sent, but its owned confirmation could not be accepted: {accepted.Message} Re-scan before retrying.");
-                    }
+                    return RetainerAutomationResult.Failed(
+                        "UnexpectedRetainerMarketConfirmation",
+                        "The price request was sent, but an unowned confirmation dialog appeared before the exact listing committed. It was not accepted or dismissed; re-scan before retrying.");
                 }
 
                 await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
@@ -635,6 +626,12 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     public async Task<RetainerAutomationResult> ReturnToRetainerListAsync(CancellationToken cancellationToken = default)
     {
         var state = await ObserveSellingUiAsync(cancellationToken).ConfigureAwait(false);
+        if (state.ConfirmationReady)
+        {
+            return RetainerAutomationResult.Failed(
+                "RetainerConfirmationOwnershipUnknown",
+                "A confirmation dialog is visible, but this session cannot prove that it owns the dialog. It was left untouched.");
+        }
         if (state.RetainerListReady)
         {
             active = null;
@@ -644,7 +641,6 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         await framework.RunOnTick(
             () =>
             {
-                CloseSurface(YesNo);
                 CloseSurface(SellingListingEditor);
                 CloseSurface(SellingList);
                 CloseSurface(MarketList);
@@ -722,7 +718,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     public unsafe void CancelActive()
     {
         CloseInventory();
-        foreach (var addonName in new[] { "InputNumeric", "ContextMenu", YesNo, SellingListingEditor, SellingList, MarketList, SelectString })
+        foreach (var addonName in new[] { "InputNumeric", "ContextMenu", SellingListingEditor, SellingList, MarketList, SelectString })
         {
             var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
             if (addon is not null && addon->IsReady && addon->IsVisible)
@@ -1256,24 +1252,6 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         return (
             committed,
             IsReady(YesNo));
-    }
-
-    private unsafe RetainerAutomationResult ConfirmYesNo()
-    {
-        var addon = gameGui.GetAddonByName<AddonSelectYesno>(YesNo, 1);
-        if (addon == null ||
-            !addon->AtkUnitBase.IsReady ||
-            !addon->AtkUnitBase.IsVisible ||
-            addon->YesButton == null ||
-            !addon->YesButton->IsEnabled)
-            return RetainerAutomationResult.Failed(
-                "RetainerMarketPriceConfirmationUnavailable",
-                "The owned listing-price confirmation is unavailable or cannot be accepted.");
-
-        addon->YesButton->ClickAddonButton(&addon->AtkUnitBase);
-        return RetainerAutomationResult.Succeeded(
-            "RetainerMarketPriceConfirmationAccepted",
-            "Accepted the listing-price confirmation dialog.");
     }
 
     private static unsafe bool MatchesMarketListing(

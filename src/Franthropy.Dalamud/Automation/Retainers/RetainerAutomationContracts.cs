@@ -250,7 +250,7 @@ public static class RetainerMarketPricePolicy
 public enum RetainerMarketPriceUpdateAction
 {
     Wait,
-    ConfirmOnce,
+    RejectUnexpectedConfirmation,
     Complete,
 }
 
@@ -258,13 +258,12 @@ public static class RetainerMarketPriceUpdatePolicy
 {
     public static RetainerMarketPriceUpdateAction Decide(
         bool committed,
-        bool confirmationReady,
-        bool confirmationAlreadySent)
+        bool confirmationReady)
     {
+        if (confirmationReady)
+            return RetainerMarketPriceUpdateAction.RejectUnexpectedConfirmation;
         if (committed)
             return RetainerMarketPriceUpdateAction.Complete;
-        if (confirmationReady && !confirmationAlreadySent)
-            return RetainerMarketPriceUpdateAction.ConfirmOnce;
         return RetainerMarketPriceUpdateAction.Wait;
     }
 }
