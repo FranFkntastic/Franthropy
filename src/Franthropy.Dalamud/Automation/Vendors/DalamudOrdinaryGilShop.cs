@@ -128,7 +128,8 @@ public sealed class DalamudGilVendorAccessReader
                 "AttunedRoute",
                 "An attuned destination can reach this vendor.",
                 route.AetheryteId,
-                route.AethernetId);
+                route.AethernetId,
+                route.AetheryteTerritoryId);
     }
 
     private void SynchronizeOwnerAndTerritory()

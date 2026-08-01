@@ -37,7 +37,8 @@ public sealed record GilVendorOffer(
 
 public sealed record GilVendorTravelRoute(
     uint AetheryteId,
-    uint? AethernetId = null);
+    uint? AethernetId = null,
+    uint? AetheryteTerritoryId = null);
 
 public sealed record GilVendorBuyRequest(
     GilVendorOffer Offer,
@@ -133,7 +134,8 @@ public sealed record GilVendorAccessAssessment(
     string Code,
     string Message,
     uint? RouteAetheryteId = null,
-    uint? RouteAethernetId = null)
+    uint? RouteAethernetId = null,
+    uint? RouteAetheryteTerritoryId = null)
 {
     public bool IsEligible => State is GilVendorAccessState.Probeable or GilVendorAccessState.Verified;
 }

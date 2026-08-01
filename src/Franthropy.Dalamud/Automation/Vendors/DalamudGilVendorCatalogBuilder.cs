@@ -133,7 +133,9 @@ public static class DalamudGilVendorCatalogBuilder
 
         var direct = nodes
             .Where(node => node.IsAetheryte && node.TerritoryId == targetTerritoryId)
-            .Select(node => new GilVendorTravelRoute(node.Id))
+            .Select(node => new GilVendorTravelRoute(
+                node.Id,
+                AetheryteTerritoryId: node.TerritoryId))
             .Distinct()
             .OrderBy(route => route.AetheryteId)
             .ToArray();
@@ -153,7 +155,10 @@ public static class DalamudGilVendorCatalogBuilder
             .SelectMany(shard => nodes
                 .Where(node => node.IsAetheryte &&
                                node.AethernetGroup == shard.AethernetGroup)
-                .Select(main => new GilVendorTravelRoute(main.Id, shard.Id)))
+                .Select(main => new GilVendorTravelRoute(
+                    main.Id,
+                    shard.Id,
+                    main.TerritoryId)))
             .Distinct()
             .OrderBy(route => route.AetheryteId)
             .ThenBy(route => route.AethernetId)

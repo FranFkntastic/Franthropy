@@ -106,7 +106,7 @@ public sealed class GilVendorEngineTests
                 new(12, 201, 7, true),
             ]);
 
-        Assert.Equal([new GilVendorTravelRoute(10)], routes);
+        Assert.Equal([new GilVendorTravelRoute(10, AetheryteTerritoryId: 200)], routes);
     }
 
     [Fact]
@@ -120,7 +120,7 @@ public sealed class GilVendorEngineTests
                 new(12, 202, 8, true),
             ]);
 
-        Assert.Equal([new GilVendorTravelRoute(10, 11)], routes);
+        Assert.Equal([new GilVendorTravelRoute(10, 11, 201)], routes);
     }
 
     [Fact]
