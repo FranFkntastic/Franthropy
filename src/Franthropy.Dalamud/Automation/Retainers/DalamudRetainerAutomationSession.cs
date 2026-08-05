@@ -69,8 +69,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         IPluginLog log,
         IObjectTable objects,
         ITargetManager targets,
-        ISigScanner sigScanner)
-        : this(framework, gameGui, dataManager, log, objects, targets, sigScanner, null)
+        ISigScanner sigScanner,
+        IGameInventory? gameInventory = null)
+        : this(framework, gameGui, dataManager, log, objects, targets, sigScanner, gameInventory, null)
     {
     }
 
@@ -83,6 +84,20 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         ITargetManager targets,
         ISigScanner sigScanner,
         string? currentGameVersion)
+        : this(framework, gameGui, dataManager, log, objects, targets, sigScanner, null, currentGameVersion)
+    {
+    }
+
+    private DalamudRetainerAutomationSession(
+        IFramework framework,
+        IGameGui gameGui,
+        IDataManager dataManager,
+        IPluginLog log,
+        IObjectTable objects,
+        ITargetManager targets,
+        ISigScanner sigScanner,
+        IGameInventory? gameInventory,
+        string? currentGameVersion)
     {
         this.framework = framework;
         this.gameGui = gameGui;
@@ -90,7 +105,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         bell = new(objects, targets, dataManager);
         crystals = new(sigScanner, gameGui, framework, log);
         items = new(sigScanner, gameGui, framework, log);
-        retrievals = new(sigScanner, gameGui, framework, log);
+        retrievals = new(sigScanner, gameGui, framework, log, gameInventory);
         renderedUi = new(gameGui);
         this.currentGameVersion = currentGameVersion;
     }

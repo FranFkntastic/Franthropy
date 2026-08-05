@@ -1,10 +1,13 @@
 using System.Runtime.InteropServices;
+using Dalamud.Game.Inventory;
+using Dalamud.Game.Inventory.InventoryEventArgTypes;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Franthropy.Dalamud.Automation.Inventory;
 using Franthropy.Dalamud.Diagnostics;
+using GameInventoryType = Dalamud.Game.Inventory.GameInventoryType;
 
 namespace Franthropy.Dalamud.Automation.Retainers;
 
@@ -59,18 +62,21 @@ public sealed class DalamudRetainerItemRetrieval
     private readonly IGameGui gameGui;
     private readonly IFramework framework;
     private readonly IPluginLog log;
+    private readonly IGameInventory? gameInventory;
     private RetainerItemCommandDelegate? retainerItemCommand;
 
     public DalamudRetainerItemRetrieval(
         ISigScanner sigScanner,
         IGameGui gameGui,
         IFramework framework,
-        IPluginLog log)
+        IPluginLog log,
+        IGameInventory? gameInventory = null)
     {
         this.sigScanner = sigScanner;
         this.gameGui = gameGui;
         this.framework = framework;
         this.log = log;
+        this.gameInventory = gameInventory;
     }
 
     public async Task<RetainerRetrievalResult> RetrieveAsync(
@@ -93,6 +99,12 @@ public sealed class DalamudRetainerItemRetrieval
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        // Subscribe before submitting the native command. Dalamud reports the
+        // source and destination changes as immutable snapshots, which lets us
+        // prove the transfer even when the game immediately repopulates the slot.
+        using var mutation = gameInventory is null
+            ? null
+            : new RetainerRetrievalMutationTracker(gameInventory, stack.ItemId, stack.IsHighQuality);
         var pending = await framework.RunOnTick(
             () => BeginRetrieval(stack, requestedQuantity, retainerVariantQuantityBefore),
             cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -107,6 +119,9 @@ public sealed class DalamudRetainerItemRetrieval
             if (immediate.Success)
                 return immediate;
 
+            if (mutation?.Matches(pending.Requested) == true)
+                return MutationVerified(stack.ItemId, pending.Requested, mutation);
+
             if (pending.NeedsQuantityInput)
             {
                 var submitted = await framework.RunOnTick(
@@ -117,6 +132,7 @@ public sealed class DalamudRetainerItemRetrieval
                     return await WaitForCompletionAsync(
                         stack,
                         pending with { Requested = submitted.Transferred },
+                        mutation,
                         cancellationToken).ConfigureAwait(false);
                 }
             }
@@ -124,12 +140,13 @@ public sealed class DalamudRetainerItemRetrieval
             await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
         }
 
-        return await ReconcileAfterTimeoutAsync(stack, pending, cancellationToken).ConfigureAwait(false);
+        return await ReconcileAfterTimeoutAsync(stack, pending, mutation, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<RetainerRetrievalResult> WaitForCompletionAsync(
         DalamudInventoryStack stack,
         PendingRetainerRetrieval pending,
+        RetainerRetrievalMutationTracker? mutation,
         CancellationToken cancellationToken)
     {
         RetainerRetrievalResult last = new(false, 0, "TransferPending", $"Retrieval did not complete for item {stack.ItemId}.");
@@ -141,10 +158,13 @@ public sealed class DalamudRetainerItemRetrieval
             if (last.Success)
                 return last;
 
+            if (mutation?.Matches(pending.Requested) == true)
+                return MutationVerified(stack.ItemId, pending.Requested, mutation);
+
             await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
         }
 
-        return await ReconcileAfterTimeoutAsync(stack, pending, cancellationToken).ConfigureAwait(false);
+        return await ReconcileAfterTimeoutAsync(stack, pending, mutation, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -312,10 +332,26 @@ public sealed class DalamudRetainerItemRetrieval
     private async Task<RetainerRetrievalResult> ReconcileAfterTimeoutAsync(
         DalamudInventoryStack original,
         PendingRetainerRetrieval pending,
+        RetainerRetrievalMutationTracker? mutation,
         CancellationToken cancellationToken) =>
-        await framework.RunOnTick(
-            () => VerifyAggregateCompleted(original, pending),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+        mutation?.Matches(pending.Requested) == true
+            ? MutationVerified(original.ItemId, pending.Requested, mutation)
+            : await framework.RunOnTick(
+                () => VerifyAggregateCompleted(original, pending),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+    private static RetainerRetrievalResult MutationVerified(
+        uint itemId,
+        int requested,
+        RetainerRetrievalMutationTracker mutation)
+    {
+        var evidence = mutation.Snapshot();
+        return new(
+            true,
+            requested,
+            "TransferVerified",
+            $"Retrieved {requested}x item {itemId}; command-scoped inventory changes confirmed retainer {evidence.RetainerDelta:+#;-#;0}, player {evidence.PlayerDelta:+#;-#;0}.");
+    }
 
     /// <summary>
     /// Accepts the timeout recovery only when the retainer and player report equal,
@@ -352,7 +388,7 @@ public sealed class DalamudRetainerItemRetrieval
             false,
             0,
             "RetrievalNotObserved",
-            $"Retrieval of item {original.ItemId} could not be proven after one aggregate reconciliation.");
+            $"Retrieval of item {original.ItemId} could not be proven after one aggregate reconciliation: retainer {pending.RetainerQuantityBefore}->{retainerAfter}, player {pending.PlayerQuantityBefore}->{playerAfter}, expected {pending.Requested}.");
     }
 
     /// <summary>Counts the affected item variant across the player's loaded bags.</summary>
@@ -411,5 +447,127 @@ public sealed class DalamudRetainerItemRetrieval
     {
         public static PendingRetainerRetrieval Fail(string code, string message) =>
             new(false, 0, 0, 0, false, code, message);
+    }
+}
+
+/// <summary>
+/// Accumulates the net item movement emitted while one retrieval command is in
+/// flight. Internal rearrangement produces equal additions and removals, so it
+/// cannot masquerade as stock crossing the retainer boundary.
+/// </summary>
+internal sealed class RetainerRetrievalMutationAccumulator
+{
+    private int playerDelta;
+    private int retainerDelta;
+
+    public void RecordPlayer(int quantityDelta) => playerDelta += quantityDelta;
+    public void RecordRetainer(int quantityDelta) => retainerDelta += quantityDelta;
+    public RetainerRetrievalMutationEvidence Snapshot() => new(retainerDelta, playerDelta);
+    public bool Matches(int requested) =>
+        RetainerRetrievalObservation.MatchesMutation(requested, retainerDelta, playerDelta);
+}
+
+internal readonly record struct RetainerRetrievalMutationEvidence(
+    int RetainerDelta,
+    int PlayerDelta);
+
+/// <summary>
+/// Converts Dalamud's per-slot inventory events into one command-scoped net
+/// movement. The subscription is deliberately short-lived and is disposed as
+/// soon as the retrieval reaches a terminal result.
+/// </summary>
+internal sealed class RetainerRetrievalMutationTracker : IDisposable
+{
+    private static readonly IReadOnlySet<GameInventoryType> PlayerContainers = new HashSet<GameInventoryType>
+    {
+        GameInventoryType.Inventory1,
+        GameInventoryType.Inventory2,
+        GameInventoryType.Inventory3,
+        GameInventoryType.Inventory4,
+    };
+    private static readonly IReadOnlySet<GameInventoryType> RetainerContainers = new HashSet<GameInventoryType>
+    {
+        GameInventoryType.RetainerPage1,
+        GameInventoryType.RetainerPage2,
+        GameInventoryType.RetainerPage3,
+        GameInventoryType.RetainerPage4,
+        GameInventoryType.RetainerPage5,
+        GameInventoryType.RetainerPage6,
+        GameInventoryType.RetainerPage7,
+        GameInventoryType.RetainerCrystals,
+    };
+
+    private readonly IGameInventory inventory;
+    private readonly uint itemId;
+    private readonly bool isHighQuality;
+    private readonly object gate = new();
+    private readonly RetainerRetrievalMutationAccumulator accumulator = new();
+
+    public RetainerRetrievalMutationTracker(IGameInventory inventory, uint itemId, bool isHighQuality)
+    {
+        this.inventory = inventory;
+        this.itemId = itemId;
+        this.isHighQuality = isHighQuality;
+        inventory.InventoryChanged += OnInventoryChanged;
+    }
+
+    public bool Matches(int requested)
+    {
+        lock (gate)
+            return accumulator.Matches(requested);
+    }
+
+    public RetainerRetrievalMutationEvidence Snapshot()
+    {
+        lock (gate)
+            return accumulator.Snapshot();
+    }
+
+    public void Dispose() => inventory.InventoryChanged -= OnInventoryChanged;
+
+    private void OnInventoryChanged(IReadOnlyCollection<InventoryEventArgs> events)
+    {
+        lock (gate)
+        {
+            foreach (var change in events.SelectMany(Flatten))
+            {
+                var quantityDelta = QuantityDelta(change);
+                if (quantityDelta == 0)
+                    continue;
+                if (PlayerContainers.Contains(change.Item.ContainerType))
+                    accumulator.RecordPlayer(quantityDelta);
+                else if (RetainerContainers.Contains(change.Item.ContainerType))
+                    accumulator.RecordRetainer(quantityDelta);
+            }
+        }
+    }
+
+    private int QuantityDelta(InventoryEventArgs change)
+    {
+        if (change is InventoryItemChangedArgs changed)
+            return TrackedQuantity(change.Item) - TrackedQuantity(changed.OldItemState);
+        if (change.Type == GameInventoryEvent.Added)
+            return TrackedQuantity(change.Item);
+        if (change.Type == GameInventoryEvent.Removed)
+            return -TrackedQuantity(change.Item);
+        return 0;
+    }
+
+    private int TrackedQuantity(GameInventoryItem item) =>
+        item.BaseItemId == itemId && item.IsHq == isHighQuality
+            ? checked((int)item.Quantity)
+            : 0;
+
+    private static IEnumerable<InventoryEventArgs> Flatten(InventoryEventArgs change)
+    {
+        if (change is InventoryComplexEventArgs complex)
+        {
+            foreach (var source in Flatten(complex.SourceEvent))
+                yield return source;
+            foreach (var target in Flatten(complex.TargetEvent))
+                yield return target;
+            yield break;
+        }
+        yield return change;
     }
 }
