@@ -5,7 +5,7 @@ namespace Franthropy.Observations.V1;
 public static class ObservationContract
 {
     public static ObservationVersion Version { get; } = new(1, 0);
-    public static ObservationVersion SchemaVersion { get; } = new(1, 1);
+    public static ObservationVersion SchemaVersion { get; } = new(1, 2);
 }
 
 public readonly record struct ObservationVersion(int Major, int Minor) : IComparable<ObservationVersion>
@@ -138,6 +138,33 @@ public sealed record InventoryObservationPayload(
     IReadOnlyList<int> ObservedContainerIds,
     IReadOnlyList<InventoryItemObservation> Items);
 
+public sealed record InventorySlotValue(
+    uint ItemId,
+    int Quantity,
+    bool IsHighQuality);
+
+public sealed record InventorySlotUpdate(
+    int ContainerId,
+    int SlotIndex,
+    InventorySlotValue? Current);
+
+public sealed record InventoryObservationDelta(
+    ObservationScope Scope,
+    ObservationCapture Capture,
+    IReadOnlyList<InventorySlotUpdate> Updates);
+
+public sealed record InventorySlotChange(
+    int ContainerId,
+    int SlotIndex,
+    InventorySlotValue? Previous,
+    InventorySlotValue? Current);
+
+public sealed record InventoryChangeBatch(
+    long Revision,
+    ObservationScope Scope,
+    ObservationCapture Capture,
+    IReadOnlyList<InventorySlotChange> Changes);
+
 public sealed record RetainerRosterObservation(
     ulong RetainerId,
     string Name,
@@ -161,5 +188,6 @@ public static class ObservationPayloadContracts
     public const string RetainerInventory = "franthropy.retainer-inventory.v1";
     public const string RetainerMarketListings = "franthropy.retainer-market-listings.v1";
     public const string Saddlebag = "franthropy.saddlebag.v1";
+    public const string InventorySlotDelta = "franthropy.inventory-slot-delta.v1";
     public const int Version = 1;
 }

@@ -9,7 +9,7 @@ namespace Franthropy.Observations.Storage;
 
 public sealed class SqliteObservationStore : IObservationStore
 {
-    private const int SchemaUserVersion = 1001;
+    private const int SchemaUserVersion = 1002;
     private const int SqliteBusy = 5;
     private const int SqliteLocked = 6;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -66,7 +66,7 @@ public sealed class SqliteObservationStore : IObservationStore
             }
 
             var userVersion = await ExecuteScalarInt64Async(connection, "PRAGMA user_version;", cancellationToken).ConfigureAwait(false);
-            if (userVersion is not 0 and not 1000 and not SchemaUserVersion)
+            if (userVersion is not 0 and not 1000 and not 1001 and not SchemaUserVersion)
             {
                 return new ObservationStoreOpenResult(
                     ObservationStoreOpenStatus.UnsupportedDatabaseVersion,
@@ -91,10 +91,36 @@ public sealed class SqliteObservationStore : IObservationStore
                 }
             }
 
+            if (userVersion is 1000 or 1001 && options.WriterCapability < 2)
+            {
+                return new ObservationStoreOpenResult(
+                    ObservationStoreOpenStatus.IncompatibleWriterCapability,
+                    null,
+                    $"Writer capability {options.WriterCapability} cannot migrate the database to schema 1.2, which requires capability 2.",
+                    nativeVersion);
+            }
+
+            if (userVersion == 0 && options.WriterCapability < 2)
+            {
+                return new ObservationStoreOpenResult(
+                    ObservationStoreOpenStatus.IncompatibleWriterCapability,
+                    null,
+                    $"Writer capability {options.WriterCapability} is below the database minimum 2.",
+                    nativeVersion);
+            }
+
             if (userVersion == 0)
                 await CreateSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
-            else if (userVersion == 1000)
-                await MigrateFrom1000Async(connection, options, cancellationToken).ConfigureAwait(false);
+            else
+            {
+                if (userVersion == 1000)
+                {
+                    await MigrateFrom1000Async(connection, options, cancellationToken).ConfigureAwait(false);
+                    userVersion = 1001;
+                }
+                if (userVersion == 1001)
+                    await MigrateFrom1001Async(connection, options, cancellationToken).ConfigureAwait(false);
+            }
 
             var schemaMajor = await ReadMetadataIntAsync(connection, "schema_major", cancellationToken).ConfigureAwait(false);
             var schemaMinor = await ReadMetadataIntAsync(connection, "schema_minor", cancellationToken).ConfigureAwait(false);
@@ -211,7 +237,26 @@ public sealed class SqliteObservationStore : IObservationStore
             {
                 var payload = observation.Payload!;
                 var payloadHash = Hash(payload.Json);
-                if (current is not null && string.Equals(current.PayloadSha256, payloadHash, StringComparison.Ordinal))
+                if (IsInventoryContainer(observation.Scope.Container))
+                {
+                    var storeRevision = await NextRevisionAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+                    var inventory = payload.Deserialize<InventoryObservationPayload>(payload.Contract, payload.Version);
+                    await InsertHistoryAsync(connection, transaction, observation, validation, storeRevision, payload.Json, payloadHash, cancellationToken).ConfigureAwait(false);
+                    await ReplaceCurrentAsync(connection, transaction, observation, storeRevision, payloadHash, cancellationToken).ConfigureAwait(false);
+                    await ReplaceInventoryBaselineAsync(connection, transaction, scopeKey, storeRevision, inventory, cancellationToken).ConfigureAwait(false);
+                    result = new ObservationWriteResult(
+                        ObservationWriteStatus.AcceptedChanged,
+                        current is null
+                            ? "The first trusted inventory baseline was accepted."
+                            : "The trusted inventory baseline was reconciled atomically.",
+                        storeRevision);
+                    change = new ObservationChange(
+                        observation.Scope,
+                        storeRevision,
+                        ObservationChangeKind.Replaced,
+                        observation.Capture.ObservedAtUtc);
+                }
+                else if (current is not null && string.Equals(current.PayloadSha256, payloadHash, StringComparison.Ordinal))
                 {
                     var storeRevision = await NextRevisionAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
                     await InsertHistoryAsync(connection, transaction, observation, validation, storeRevision, null, payloadHash, cancellationToken).ConfigureAwait(false);
@@ -285,18 +330,7 @@ public sealed class SqliteObservationStore : IObservationStore
             if (row is null)
                 return new ObservationReadResult(ObservationReadStatus.NotObserved, null, "No trusted observation exists for this scope.");
 
-            var observation = new TrustedObservation(
-                row.Revision,
-                JsonSerializer.Deserialize<ObservationScope>(row.ScopeJson, JsonOptions)
-                    ?? throw new InvalidDataException("Stored observation scope is null."),
-                JsonSerializer.Deserialize<ObservationCapture>(row.CaptureJson, JsonOptions)
-                    ?? throw new InvalidDataException("Stored observation capture is null."),
-                new ObservationPayload(row.PayloadContract, row.PayloadVersion, row.PayloadJson),
-                row.IsStale,
-                row.StaleReason,
-                ParseNullableUtc(row.StaleObservedAtUtc),
-                ParseUtc(row.LastConfirmedAtUtc),
-                row.ConfirmationCount);
+            var observation = await ToTrustedObservationAsync(connection, row, cancellationToken).ConfigureAwait(false);
             return new ObservationReadResult(ObservationReadStatus.Found, observation, "The latest trusted observation was found.");
         }
         catch (SqliteException ex) when (IsBusy(ex))
@@ -321,9 +355,12 @@ public sealed class SqliteObservationStore : IObservationStore
             await using var connection = CreateConnection(options, readOnly: true);
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
             var rows = await ReadCurrentRowsByOwnerAsync(connection, owner, container, cancellationToken).ConfigureAwait(false);
+            var observations = new List<TrustedObservation>(rows.Count);
+            foreach (var row in rows)
+                observations.Add(await ToTrustedObservationAsync(connection, row, cancellationToken).ConfigureAwait(false));
             return new ObservationCollectionReadResult(
                 ObservationReadStatus.Found,
-                rows.Select(ToTrustedObservation).ToArray(),
+                observations,
                 $"Found {rows.Count} trusted observation(s) for the owner and container.");
         }
         catch (SqliteException ex) when (IsBusy(ex))
@@ -399,7 +436,7 @@ public sealed class SqliteObservationStore : IObservationStore
         {
             DataSource = options.DatabasePath,
             Mode = readOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared,
+            Cache = readOnly ? SqliteCacheMode.Private : SqliteCacheMode.Shared,
             Pooling = pooling,
             DefaultTimeout = Math.Max(1, (int)Math.Ceiling(options.BusyTimeout.TotalSeconds)),
         };
@@ -424,10 +461,10 @@ public sealed class SqliteObservationStore : IObservationStore
             );
             INSERT INTO observation_metadata(key, value) VALUES
                 ('schema_major', '1'),
-                ('schema_minor', '1'),
+                ('schema_minor', '2'),
                 ('contract_major', '1'),
                 ('contract_minor', '0'),
-                ('minimum_writer_capability', '1'),
+                ('minimum_writer_capability', '2'),
                 ('next_revision', '0'),
                 ('change_revision', '0');
             CREATE TABLE observation_history (
@@ -472,7 +509,40 @@ public sealed class SqliteObservationStore : IObservationStore
             );
             CREATE INDEX ix_current_projection_owner_container
                 ON current_projection(owner_local_content_id, owner_home_world_id, container_kind);
-            PRAGMA user_version = 1001;
+            CREATE TABLE inventory_scope_projection (
+                scope_key TEXT PRIMARY KEY,
+                base_revision INTEGER NOT NULL,
+                requested_container_ids_json TEXT NOT NULL,
+                observed_container_ids_json TEXT NOT NULL
+            );
+            CREATE TABLE inventory_slot_projection (
+                scope_key TEXT NOT NULL,
+                container_id INTEGER NOT NULL,
+                slot_index INTEGER NOT NULL,
+                item_id INTEGER NOT NULL,
+                quantity INTEGER NOT NULL,
+                is_high_quality INTEGER NOT NULL,
+                PRIMARY KEY(scope_key, container_id, slot_index)
+            );
+            CREATE INDEX ix_inventory_slot_projection_scope_item
+                ON inventory_slot_projection(scope_key, item_id, is_high_quality);
+            CREATE TABLE inventory_slot_change (
+                store_revision INTEGER NOT NULL,
+                scope_key TEXT NOT NULL,
+                capture_json TEXT NOT NULL,
+                container_id INTEGER NOT NULL,
+                slot_index INTEGER NOT NULL,
+                previous_item_id INTEGER NULL,
+                previous_quantity INTEGER NULL,
+                previous_is_high_quality INTEGER NULL,
+                current_item_id INTEGER NULL,
+                current_quantity INTEGER NULL,
+                current_is_high_quality INTEGER NULL,
+                PRIMARY KEY(store_revision, scope_key, container_id, slot_index)
+            );
+            CREATE INDEX ix_inventory_slot_change_scope_revision
+                ON inventory_slot_change(scope_key, store_revision);
+            PRAGMA user_version = 1002;
             """;
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -539,6 +609,326 @@ public sealed class SqliteObservationStore : IObservationStore
                 PRAGMA user_version = 1001;
                 """;
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            options.BeforeMigrationCommit?.Invoke();
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            migrationLock.Unlock(0, 1);
+        }
+    }
+
+    public async ValueTask<ObservationWriteResult> WriteInventoryDeltaAsync(
+        InventoryObservationDelta observation,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        ArgumentNullException.ThrowIfNull(observation);
+        var validation = ValidateInventoryDelta(observation, out var validationEnvelope);
+        if (!validation.IsAuthoritative)
+            return new ObservationWriteResult(ObservationWriteStatus.Rejected, validation.Message);
+
+        var scopeKey = CreateScopeKey(observation.Scope);
+        ObservationChange? notification = null;
+        try
+        {
+            await using var connection = CreateConnection(options, readOnly: false);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            var current = await ReadCurrentRowAsync(connection, transaction, scopeKey, cancellationToken).ConfigureAwait(false);
+            var observedContainers = await ReadObservedInventoryContainersAsync(
+                connection,
+                transaction,
+                scopeKey,
+                cancellationToken).ConfigureAwait(false);
+            if (current is null || current.IsStale || observedContainers is null)
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new ObservationWriteResult(
+                    ObservationWriteStatus.Rejected,
+                    "A fresh complete inventory baseline is required before slot changes can be applied.",
+                    current?.Revision);
+            }
+
+            var unobservedContainer = observation.Updates
+                .Select(update => update.ContainerId)
+                .Cast<int?>()
+                .FirstOrDefault(containerId => !observedContainers.Contains(containerId!.Value));
+            if (unobservedContainer is { } missingContainer)
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new ObservationWriteResult(
+                    ObservationWriteStatus.Rejected,
+                    $"Inventory container {missingContainer} was not observed by the current baseline; a fresh complete baseline is required.",
+                    current.Revision);
+            }
+
+            var sourceOrder = CompareSourceOrder(observation.Capture, current);
+            if (sourceOrder < 0)
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new ObservationWriteResult(
+                    ObservationWriteStatus.IgnoredOlderRevision,
+                    "An older inventory revision cannot change trusted slots.",
+                    current.Revision);
+            }
+            if (sourceOrder == 0)
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new ObservationWriteResult(
+                    ObservationWriteStatus.IgnoredRepeatedRevision,
+                    "A repeated inventory revision cannot change trusted slots.",
+                    current.Revision);
+            }
+
+            var changes = new List<InventorySlotChange>();
+            foreach (var update in observation.Updates)
+            {
+                var previous = await ReadInventorySlotAsync(
+                    connection,
+                    transaction,
+                    scopeKey,
+                    update.ContainerId,
+                    update.SlotIndex,
+                    cancellationToken).ConfigureAwait(false);
+                if (previous == update.Current)
+                    continue;
+                changes.Add(new InventorySlotChange(update.ContainerId, update.SlotIndex, previous, update.Current));
+            }
+
+            var storeRevision = await NextRevisionAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+            if (changes.Count == 0)
+            {
+                await InsertHistoryAsync(
+                    connection,
+                    transaction,
+                    validationEnvelope,
+                    validation,
+                    storeRevision,
+                    null,
+                    Hash(validationEnvelope.Payload!.Json),
+                    cancellationToken).ConfigureAwait(false);
+                await ConfirmCurrentAsync(connection, transaction, scopeKey, storeRevision, observation.Capture, cancellationToken).ConfigureAwait(false);
+                notification = new ObservationChange(observation.Scope, storeRevision, ObservationChangeKind.Confirmed, observation.Capture.ObservedAtUtc);
+            }
+            else
+            {
+                await InsertInventoryDeltaHistoryAsync(connection, transaction, observation, validation, storeRevision, cancellationToken).ConfigureAwait(false);
+                foreach (var change in changes)
+                {
+                    await ApplyInventorySlotChangeAsync(connection, transaction, scopeKey, storeRevision, observation.Capture, change, cancellationToken).ConfigureAwait(false);
+                }
+                await AdvanceInventoryCurrentAsync(connection, transaction, scopeKey, storeRevision, observation.Capture, cancellationToken).ConfigureAwait(false);
+                notification = new ObservationChange(observation.Scope, storeRevision, ObservationChangeKind.Replaced, observation.Capture.ObservedAtUtc);
+            }
+
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            PublishChange(notification);
+            try
+            {
+                await RunDueCleanupAsync(connection, observation.Capture.ObservedAtUtc, cancellationToken).ConfigureAwait(false);
+                LastMaintenanceError = null;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SqliteException)
+            {
+                LastMaintenanceError = ex.Message;
+            }
+            return new ObservationWriteResult(
+                changes.Count == 0 ? ObservationWriteStatus.AcceptedConfirmed : ObservationWriteStatus.AcceptedChanged,
+                changes.Count == 0
+                    ? "The newer inventory revision confirms the current slots."
+                    : $"Applied {changes.Count} changed inventory slot(s) atomically.",
+                storeRevision);
+        }
+        catch (SqliteException ex) when (IsBusy(ex))
+        {
+            return new ObservationWriteResult(ObservationWriteStatus.Busy, "The observation database remained busy beyond the bounded wait.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SqliteException or JsonException)
+        {
+            return new ObservationWriteResult(ObservationWriteStatus.Unavailable, ex.Message);
+        }
+    }
+
+    public async ValueTask<InventoryChangeReadResult> ReadInventoryChangesAsync(
+        ObservationOwner owner,
+        long afterRevision,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        ArgumentNullException.ThrowIfNull(owner);
+        ArgumentOutOfRangeException.ThrowIfNegative(afterRevision);
+        try
+        {
+            await using var connection = CreateConnection(options, readOnly: true);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            var currentRevision = await ReadMetadataLongAsync(connection, transaction, "next_revision", cancellationToken).ConfigureAwait(false);
+            var baselines = await ReadInventoryBaselinesAsync(connection, transaction, owner, cancellationToken).ConfigureAwait(false);
+            if (baselines.Count == 0)
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new InventoryChangeReadResult(
+                    InventoryChangeReadStatus.NotObserved,
+                    currentRevision,
+                    null,
+                    [],
+                    "No trusted inventory observation exists for this owner.");
+            }
+
+            var requiredBaseline = baselines.Where(revision => revision > afterRevision).DefaultIfEmpty().Max();
+            if (requiredBaseline > 0)
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new InventoryChangeReadResult(
+                    InventoryChangeReadStatus.SnapshotRequired,
+                    currentRevision,
+                    requiredBaseline,
+                    [],
+                    $"Inventory baseline revision {requiredBaseline} is newer than consumer revision {afterRevision}; a current snapshot is required.");
+            }
+
+            var batches = await ReadInventoryChangeBatchesAsync(
+                connection,
+                transaction,
+                owner,
+                afterRevision,
+                currentRevision,
+                cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new InventoryChangeReadResult(
+                batches.Count == 0 ? InventoryChangeReadStatus.NoChanges : InventoryChangeReadStatus.Found,
+                currentRevision,
+                null,
+                batches,
+                batches.Count == 0
+                    ? "No inventory slot changes exist after the requested revision."
+                    : $"Found {batches.Count} inventory change batch(es) after revision {afterRevision}.");
+        }
+        catch (SqliteException ex) when (IsBusy(ex))
+        {
+            return new InventoryChangeReadResult(InventoryChangeReadStatus.Busy, afterRevision, null, [], "The observation database remained busy beyond the bounded wait.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SqliteException or JsonException)
+        {
+            return new InventoryChangeReadResult(InventoryChangeReadStatus.Unavailable, afterRevision, null, [], ex.Message);
+        }
+    }
+
+    private static async ValueTask MigrateFrom1001Async(
+        SqliteConnection connection,
+        ObservationStoreOptions options,
+        CancellationToken cancellationToken)
+    {
+        var databasePath = Path.GetFullPath(options.DatabasePath);
+        var directory = Path.GetDirectoryName(databasePath)!;
+        var lockPath = Path.GetFullPath(options.MigrationLockPath ?? Path.Combine(directory, "migration.lock"));
+        var backupDirectory = Path.GetFullPath(options.BackupDirectory ?? Path.Combine(directory, "backups"));
+        Directory.CreateDirectory(Path.GetDirectoryName(lockPath)!);
+        Directory.CreateDirectory(backupDirectory);
+
+        await using var migrationLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+        try
+        {
+            migrationLock.Lock(0, 1);
+        }
+        catch (IOException ex)
+        {
+            throw new InvalidOperationException("Another compatible host is migrating the shared observation database.", ex);
+        }
+
+        try
+        {
+            var backupPath = Path.Combine(
+                backupDirectory,
+                $"observations-v1.1-{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}.db");
+            var backupBuilder = new SqliteConnectionStringBuilder
+            {
+                DataSource = backupPath,
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Pooling = false,
+            };
+            await using (var backup = new SqliteConnection(backupBuilder.ToString()))
+            {
+                await backup.OpenAsync(cancellationToken).ConfigureAwait(false);
+                connection.BackupDatabase(backup);
+            }
+
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using (var schema = connection.CreateCommand())
+            {
+                schema.Transaction = (SqliteTransaction)transaction;
+                schema.CommandText = """
+                    CREATE TABLE inventory_scope_projection (
+                        scope_key TEXT PRIMARY KEY,
+                        base_revision INTEGER NOT NULL,
+                        requested_container_ids_json TEXT NOT NULL,
+                        observed_container_ids_json TEXT NOT NULL
+                    );
+                    CREATE TABLE inventory_slot_projection (
+                        scope_key TEXT NOT NULL,
+                        container_id INTEGER NOT NULL,
+                        slot_index INTEGER NOT NULL,
+                        item_id INTEGER NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        is_high_quality INTEGER NOT NULL,
+                        PRIMARY KEY(scope_key, container_id, slot_index)
+                    );
+                    CREATE INDEX ix_inventory_slot_projection_scope_item
+                        ON inventory_slot_projection(scope_key, item_id, is_high_quality);
+                    CREATE TABLE inventory_slot_change (
+                        store_revision INTEGER NOT NULL,
+                        scope_key TEXT NOT NULL,
+                        capture_json TEXT NOT NULL,
+                        container_id INTEGER NOT NULL,
+                        slot_index INTEGER NOT NULL,
+                        previous_item_id INTEGER NULL,
+                        previous_quantity INTEGER NULL,
+                        previous_is_high_quality INTEGER NULL,
+                        current_item_id INTEGER NULL,
+                        current_quantity INTEGER NULL,
+                        current_is_high_quality INTEGER NULL,
+                        PRIMARY KEY(store_revision, scope_key, container_id, slot_index)
+                    );
+                    CREATE INDEX ix_inventory_slot_change_scope_revision
+                        ON inventory_slot_change(scope_key, store_revision);
+                    """;
+                await schema.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            var baselines = new List<(string ScopeKey, long Revision, InventoryObservationPayload Payload)>();
+            await using (var select = connection.CreateCommand())
+            {
+                select.Transaction = (SqliteTransaction)transaction;
+                select.CommandText = """
+                    SELECT scope_key, revision, payload_contract, payload_version, payload_json
+                    FROM current_projection
+                    WHERE container_kind IN ($player, $retainer, $saddlebag);
+                    """;
+                select.Parameters.AddWithValue("$player", (int)ObservationContainerKind.PlayerInventory);
+                select.Parameters.AddWithValue("$retainer", (int)ObservationContainerKind.RetainerInventory);
+                select.Parameters.AddWithValue("$saddlebag", (int)ObservationContainerKind.Saddlebag);
+                await using var reader = await select.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    var payload = new ObservationPayload(reader.GetString(2), reader.GetInt32(3), reader.GetString(4));
+                    baselines.Add((reader.GetString(0), reader.GetInt64(1), payload.Deserialize<InventoryObservationPayload>(payload.Contract, payload.Version)));
+                }
+            }
+
+            foreach (var baseline in baselines)
+                await ReplaceInventoryBaselineAsync(connection, transaction, baseline.ScopeKey, baseline.Revision, baseline.Payload, cancellationToken).ConfigureAwait(false);
+
+            await using (var metadata = connection.CreateCommand())
+            {
+                metadata.Transaction = (SqliteTransaction)transaction;
+                metadata.CommandText = """
+                    UPDATE observation_metadata SET value = '2' WHERE key = 'schema_minor';
+                    UPDATE observation_metadata SET value = '2' WHERE key = 'minimum_writer_capability';
+                    PRAGMA user_version = 1002;
+                    """;
+                await metadata.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
             options.BeforeMigrationCommit?.Invoke();
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -636,6 +1026,233 @@ public sealed class SqliteObservationStore : IObservationStore
         command.Parameters.AddWithValue("$payload_version", observation.Payload.Version);
         command.Parameters.AddWithValue("$payload_json", observation.Payload.Json);
         command.Parameters.AddWithValue("$payload_sha256", payloadHash);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async ValueTask ReplaceInventoryBaselineAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        string scopeKey,
+        long storeRevision,
+        InventoryObservationPayload payload,
+        CancellationToken cancellationToken)
+    {
+        await using (var clear = connection.CreateCommand())
+        {
+            clear.Transaction = (SqliteTransaction)transaction;
+            clear.CommandText = """
+                DELETE FROM inventory_slot_change WHERE scope_key = $scope_key;
+                DELETE FROM inventory_slot_projection WHERE scope_key = $scope_key;
+                DELETE FROM inventory_scope_projection WHERE scope_key = $scope_key;
+                """;
+            clear.Parameters.AddWithValue("$scope_key", scopeKey);
+            await clear.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var scope = connection.CreateCommand())
+        {
+            scope.Transaction = (SqliteTransaction)transaction;
+            scope.CommandText = """
+                INSERT INTO inventory_scope_projection(
+                    scope_key, base_revision, requested_container_ids_json, observed_container_ids_json)
+                VALUES($scope_key, $base_revision, $requested, $observed);
+                """;
+            scope.Parameters.AddWithValue("$scope_key", scopeKey);
+            scope.Parameters.AddWithValue("$base_revision", storeRevision);
+            scope.Parameters.AddWithValue("$requested", JsonSerializer.Serialize(payload.RequestedContainerIds, JsonOptions));
+            scope.Parameters.AddWithValue("$observed", JsonSerializer.Serialize(payload.ObservedContainerIds, JsonOptions));
+            await scope.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        foreach (var item in payload.Items)
+        {
+            await using var insert = connection.CreateCommand();
+            insert.Transaction = (SqliteTransaction)transaction;
+            insert.CommandText = """
+                INSERT INTO inventory_slot_projection(
+                    scope_key, container_id, slot_index, item_id, quantity, is_high_quality)
+                VALUES($scope_key, $container_id, $slot_index, $item_id, $quantity, $is_high_quality);
+                """;
+            insert.Parameters.AddWithValue("$scope_key", scopeKey);
+            insert.Parameters.AddWithValue("$container_id", item.ContainerId);
+            insert.Parameters.AddWithValue("$slot_index", item.SlotIndex);
+            insert.Parameters.AddWithValue("$item_id", item.ItemId);
+            insert.Parameters.AddWithValue("$quantity", item.Quantity);
+            insert.Parameters.AddWithValue("$is_high_quality", item.IsHighQuality);
+            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static async ValueTask<HashSet<int>?> ReadObservedInventoryContainersAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        string scopeKey,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = "SELECT observed_container_ids_json FROM inventory_scope_projection WHERE scope_key = $scope_key;";
+        command.Parameters.AddWithValue("$scope_key", scopeKey);
+        var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        if (value is null or DBNull)
+            return null;
+        return (JsonSerializer.Deserialize<int[]>((string)value, JsonOptions)
+                ?? throw new InvalidDataException("Stored observed inventory containers are null."))
+            .ToHashSet();
+    }
+
+    private static async ValueTask<InventorySlotValue?> ReadInventorySlotAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        string scopeKey,
+        int containerId,
+        int slotIndex,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = """
+            SELECT item_id, quantity, is_high_quality
+            FROM inventory_slot_projection
+            WHERE scope_key = $scope_key AND container_id = $container_id AND slot_index = $slot_index;
+            """;
+        command.Parameters.AddWithValue("$scope_key", scopeKey);
+        command.Parameters.AddWithValue("$container_id", containerId);
+        command.Parameters.AddWithValue("$slot_index", slotIndex);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ? new InventorySlotValue(checked((uint)reader.GetInt64(0)), reader.GetInt32(1), reader.GetBoolean(2))
+            : null;
+    }
+
+    private static async ValueTask ApplyInventorySlotChangeAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        string scopeKey,
+        long storeRevision,
+        ObservationCapture capture,
+        InventorySlotChange change,
+        CancellationToken cancellationToken)
+    {
+        await using (var projection = connection.CreateCommand())
+        {
+            projection.Transaction = (SqliteTransaction)transaction;
+            projection.CommandText = change.Current is null
+                ? "DELETE FROM inventory_slot_projection WHERE scope_key = $scope_key AND container_id = $container_id AND slot_index = $slot_index;"
+                : """
+                    INSERT INTO inventory_slot_projection(
+                        scope_key, container_id, slot_index, item_id, quantity, is_high_quality)
+                    VALUES($scope_key, $container_id, $slot_index, $item_id, $quantity, $is_high_quality)
+                    ON CONFLICT(scope_key, container_id, slot_index) DO UPDATE SET
+                        item_id = excluded.item_id,
+                        quantity = excluded.quantity,
+                        is_high_quality = excluded.is_high_quality;
+                    """;
+            projection.Parameters.AddWithValue("$scope_key", scopeKey);
+            projection.Parameters.AddWithValue("$container_id", change.ContainerId);
+            projection.Parameters.AddWithValue("$slot_index", change.SlotIndex);
+            if (change.Current is { } current)
+            {
+                projection.Parameters.AddWithValue("$item_id", current.ItemId);
+                projection.Parameters.AddWithValue("$quantity", current.Quantity);
+                projection.Parameters.AddWithValue("$is_high_quality", current.IsHighQuality);
+            }
+            await projection.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using var history = connection.CreateCommand();
+        history.Transaction = (SqliteTransaction)transaction;
+        history.CommandText = """
+            INSERT INTO inventory_slot_change(
+                store_revision, scope_key, capture_json, container_id, slot_index,
+                previous_item_id, previous_quantity, previous_is_high_quality,
+                current_item_id, current_quantity, current_is_high_quality)
+            VALUES(
+                $store_revision, $scope_key, $capture_json, $container_id, $slot_index,
+                $previous_item_id, $previous_quantity, $previous_is_high_quality,
+                $current_item_id, $current_quantity, $current_is_high_quality);
+            """;
+        history.Parameters.AddWithValue("$store_revision", storeRevision);
+        history.Parameters.AddWithValue("$scope_key", scopeKey);
+        history.Parameters.AddWithValue("$capture_json", JsonSerializer.Serialize(capture, JsonOptions));
+        history.Parameters.AddWithValue("$container_id", change.ContainerId);
+        history.Parameters.AddWithValue("$slot_index", change.SlotIndex);
+        AddSlotParameters(history, "previous", change.Previous);
+        AddSlotParameters(history, "current", change.Current);
+        await history.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void AddSlotParameters(SqliteCommand command, string prefix, InventorySlotValue? value)
+    {
+        command.Parameters.AddWithValue($"${prefix}_item_id", value is null ? DBNull.Value : value.ItemId);
+        command.Parameters.AddWithValue($"${prefix}_quantity", value is null ? DBNull.Value : value.Quantity);
+        command.Parameters.AddWithValue($"${prefix}_is_high_quality", value is null ? DBNull.Value : value.IsHighQuality);
+    }
+
+    private static async ValueTask AdvanceInventoryCurrentAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        string scopeKey,
+        long storeRevision,
+        ObservationCapture capture,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = """
+            UPDATE current_projection SET
+                revision = $revision,
+                observed_at_utc = $observed_at,
+                capture_json = $capture_json,
+                source_order_capture_json = $capture_json,
+                payload_sha256 = $payload_sha256,
+                is_stale = 0,
+                stale_reason = NULL,
+                stale_observed_at_utc = NULL,
+                last_confirmed_at_utc = $observed_at,
+                confirmation_count = 1
+            WHERE scope_key = $scope_key;
+            """;
+        command.Parameters.AddWithValue("$revision", storeRevision);
+        command.Parameters.AddWithValue("$observed_at", FormatUtc(capture.ObservedAtUtc));
+        command.Parameters.AddWithValue("$capture_json", JsonSerializer.Serialize(capture, JsonOptions));
+        command.Parameters.AddWithValue("$payload_sha256", Hash($"inventory-delta:{storeRevision.ToString(CultureInfo.InvariantCulture)}"));
+        command.Parameters.AddWithValue("$scope_key", scopeKey);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async ValueTask InsertInventoryDeltaHistoryAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        InventoryObservationDelta observation,
+        ObservationValidationResult validation,
+        long storeRevision,
+        CancellationToken cancellationToken)
+    {
+        var payload = ObservationPayload.Create(ObservationPayloadContracts.InventorySlotDelta, ObservationPayloadContracts.Version, observation.Updates);
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = """
+            INSERT INTO observation_history(
+                scope_key, source_revision, store_revision, observed_at_utc, status, validation_code, message,
+                scope_json, capture_json, payload_contract, payload_version, payload_json, payload_sha256)
+            VALUES(
+                $scope_key, $source_revision, $store_revision, $observed_at, $status, $code, $message,
+                $scope_json, $capture_json, $payload_contract, $payload_version, $payload_json, $payload_sha256);
+            """;
+        command.Parameters.AddWithValue("$scope_key", CreateScopeKey(observation.Scope));
+        command.Parameters.AddWithValue("$source_revision", observation.Capture.SourceRevision);
+        command.Parameters.AddWithValue("$store_revision", storeRevision);
+        command.Parameters.AddWithValue("$observed_at", FormatUtc(observation.Capture.ObservedAtUtc));
+        command.Parameters.AddWithValue("$status", (int)validation.Status);
+        command.Parameters.AddWithValue("$code", (int)validation.Code);
+        command.Parameters.AddWithValue("$message", validation.Message);
+        command.Parameters.AddWithValue("$scope_json", JsonSerializer.Serialize(observation.Scope, JsonOptions));
+        command.Parameters.AddWithValue("$capture_json", JsonSerializer.Serialize(observation.Capture, JsonOptions));
+        command.Parameters.AddWithValue("$payload_contract", payload.Contract);
+        command.Parameters.AddWithValue("$payload_version", payload.Version);
+        command.Parameters.AddWithValue("$payload_json", payload.Json);
+        command.Parameters.AddWithValue("$payload_sha256", Hash(payload.Json));
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -767,18 +1384,234 @@ public sealed class SqliteObservationStore : IObservationStore
         return rows;
     }
 
-    private static TrustedObservation ToTrustedObservation(CurrentRow row) => new(
-        row.Revision,
-        JsonSerializer.Deserialize<ObservationScope>(row.ScopeJson, JsonOptions)
-            ?? throw new InvalidDataException("Stored observation scope is null."),
-        JsonSerializer.Deserialize<ObservationCapture>(row.CaptureJson, JsonOptions)
-            ?? throw new InvalidDataException("Stored observation capture is null."),
-        new ObservationPayload(row.PayloadContract, row.PayloadVersion, row.PayloadJson),
-        row.IsStale,
-        row.StaleReason,
-        ParseNullableUtc(row.StaleObservedAtUtc),
-        ParseUtc(row.LastConfirmedAtUtc),
-        row.ConfirmationCount);
+    private static async ValueTask<TrustedObservation> ToTrustedObservationAsync(
+        SqliteConnection connection,
+        CurrentRow row,
+        CancellationToken cancellationToken)
+    {
+        var scope = JsonSerializer.Deserialize<ObservationScope>(row.ScopeJson, JsonOptions)
+            ?? throw new InvalidDataException("Stored observation scope is null.");
+        var payload = IsInventoryContainer(scope.Container)
+            ? await ReadInventoryPayloadAsync(connection, null, CreateScopeKey(scope), row.PayloadContract, row.PayloadVersion, cancellationToken).ConfigureAwait(false)
+            : new ObservationPayload(row.PayloadContract, row.PayloadVersion, row.PayloadJson);
+        return new TrustedObservation(
+            row.Revision,
+            scope,
+            JsonSerializer.Deserialize<ObservationCapture>(row.CaptureJson, JsonOptions)
+                ?? throw new InvalidDataException("Stored observation capture is null."),
+            payload,
+            row.IsStale,
+            row.StaleReason,
+            ParseNullableUtc(row.StaleObservedAtUtc),
+            ParseUtc(row.LastConfirmedAtUtc),
+            row.ConfirmationCount);
+    }
+
+    private static async ValueTask<ObservationPayload> ReadInventoryPayloadAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction? transaction,
+        string scopeKey,
+        string payloadContract,
+        int payloadVersion,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<int> requested;
+        IReadOnlyList<int> observed;
+        await using (var scope = connection.CreateCommand())
+        {
+            scope.Transaction = (SqliteTransaction?)transaction;
+            scope.CommandText = """
+                SELECT requested_container_ids_json, observed_container_ids_json
+                FROM inventory_scope_projection
+                WHERE scope_key = $scope_key;
+                """;
+            scope.Parameters.AddWithValue("$scope_key", scopeKey);
+            await using var reader = await scope.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                throw new InvalidDataException("The normalized inventory baseline is missing for a trusted inventory scope.");
+            requested = JsonSerializer.Deserialize<int[]>(reader.GetString(0), JsonOptions)
+                ?? throw new InvalidDataException("Stored requested inventory containers are null.");
+            observed = JsonSerializer.Deserialize<int[]>(reader.GetString(1), JsonOptions)
+                ?? throw new InvalidDataException("Stored observed inventory containers are null.");
+        }
+
+        var items = new List<InventoryItemObservation>();
+        await using (var slots = connection.CreateCommand())
+        {
+            slots.Transaction = (SqliteTransaction?)transaction;
+            slots.CommandText = """
+                SELECT container_id, slot_index, item_id, quantity, is_high_quality
+                FROM inventory_slot_projection
+                WHERE scope_key = $scope_key
+                ORDER BY container_id, slot_index;
+                """;
+            slots.Parameters.AddWithValue("$scope_key", scopeKey);
+            await using var reader = await slots.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                items.Add(new InventoryItemObservation(
+                    reader.GetInt32(0),
+                    reader.GetInt32(1),
+                    checked((uint)reader.GetInt64(2)),
+                    reader.GetInt32(3),
+                    reader.GetBoolean(4)));
+            }
+        }
+
+        return ObservationPayload.Create(
+            payloadContract,
+            payloadVersion,
+            new InventoryObservationPayload(requested, observed, items));
+    }
+
+    private static async ValueTask<long> ReadMetadataLongAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        string key,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = "SELECT value FROM observation_metadata WHERE key = $key;";
+        command.Parameters.AddWithValue("$key", key);
+        var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        if (value is null or DBNull)
+            throw new InvalidDataException($"Observation database metadata '{key}' is missing.");
+        return Convert.ToInt64(value, CultureInfo.InvariantCulture);
+    }
+
+    private static async ValueTask<List<long>> ReadInventoryBaselinesAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        ObservationOwner owner,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = """
+            SELECT inventory.base_revision
+            FROM inventory_scope_projection inventory
+            JOIN current_projection current ON current.scope_key = inventory.scope_key
+            WHERE current.owner_local_content_id = $owner_local_content_id
+              AND current.owner_home_world_id = $owner_home_world_id
+            ORDER BY inventory.scope_key;
+            """;
+        command.Parameters.AddWithValue("$owner_local_content_id", FormatOwnerId(owner.LocalContentId));
+        command.Parameters.AddWithValue("$owner_home_world_id", owner.HomeWorldId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        var revisions = new List<long>();
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            revisions.Add(reader.GetInt64(0));
+        return revisions;
+    }
+
+    private static async ValueTask<List<InventoryChangeBatch>> ReadInventoryChangeBatchesAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction transaction,
+        ObservationOwner owner,
+        long afterRevision,
+        long currentRevision,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = """
+            SELECT changes.store_revision, current.scope_json, changes.capture_json,
+                   changes.container_id, changes.slot_index,
+                   changes.previous_item_id, changes.previous_quantity, changes.previous_is_high_quality,
+                   changes.current_item_id, changes.current_quantity, changes.current_is_high_quality
+            FROM inventory_slot_change changes
+            JOIN current_projection current ON current.scope_key = changes.scope_key
+            WHERE current.owner_local_content_id = $owner_local_content_id
+              AND current.owner_home_world_id = $owner_home_world_id
+              AND changes.store_revision > $after_revision
+              AND changes.store_revision <= $current_revision
+            ORDER BY changes.store_revision, changes.scope_key, changes.container_id, changes.slot_index;
+            """;
+        command.Parameters.AddWithValue("$owner_local_content_id", FormatOwnerId(owner.LocalContentId));
+        command.Parameters.AddWithValue("$owner_home_world_id", owner.HomeWorldId);
+        command.Parameters.AddWithValue("$after_revision", afterRevision);
+        command.Parameters.AddWithValue("$current_revision", currentRevision);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        var rows = new List<(long Revision, ObservationScope Scope, ObservationCapture Capture, InventorySlotChange Change)>();
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var scope = JsonSerializer.Deserialize<ObservationScope>(reader.GetString(1), JsonOptions)
+                ?? throw new InvalidDataException("Stored inventory change scope is null.");
+            var capture = JsonSerializer.Deserialize<ObservationCapture>(reader.GetString(2), JsonOptions)
+                ?? throw new InvalidDataException("Stored inventory change capture is null.");
+            rows.Add((
+                reader.GetInt64(0),
+                scope,
+                capture,
+                new InventorySlotChange(
+                    reader.GetInt32(3),
+                    reader.GetInt32(4),
+                    ReadSlotValue(reader, 5),
+                    ReadSlotValue(reader, 8))));
+        }
+
+        return rows
+            .GroupBy(row => (row.Revision, row.Scope, row.Capture))
+            .Select(group => new InventoryChangeBatch(
+                group.Key.Revision,
+                group.Key.Scope,
+                group.Key.Capture,
+                group.Select(row => row.Change).ToArray()))
+            .ToList();
+    }
+
+    private static InventorySlotValue? ReadSlotValue(SqliteDataReader reader, int offset) =>
+        reader.IsDBNull(offset)
+            ? null
+            : new InventorySlotValue(
+                checked((uint)reader.GetInt64(offset)),
+                reader.GetInt32(offset + 1),
+                reader.GetBoolean(offset + 2));
+
+    private static ObservationValidationResult ValidateInventoryDelta(
+        InventoryObservationDelta observation,
+        out ObservationEnvelope validationEnvelope)
+    {
+        var updates = observation.Updates ?? [];
+        var containers = updates.Select(update => update.ContainerId).Distinct().Order().ToArray();
+        var payloadContract = observation.Scope.Container switch
+        {
+            ObservationContainerKind.PlayerInventory => ObservationPayloadContracts.PlayerInventory,
+            ObservationContainerKind.RetainerInventory => ObservationPayloadContracts.RetainerInventory,
+            ObservationContainerKind.Saddlebag => ObservationPayloadContracts.Saddlebag,
+            _ => ObservationPayloadContracts.InventorySlotDelta,
+        };
+        var payload = new InventoryObservationPayload(
+            containers,
+            containers,
+            updates
+                .Where(update => update.Current is not null)
+                .Select(update => new InventoryItemObservation(
+                    update.ContainerId,
+                    update.SlotIndex,
+                    update.Current!.ItemId,
+                    update.Current.Quantity,
+                    update.Current.IsHighQuality))
+                .ToArray());
+        validationEnvelope = new ObservationEnvelope(
+            observation.Scope,
+            observation.Capture,
+            ObservationPayload.Create(payloadContract, ObservationPayloadContracts.Version, payload));
+        if (!IsInventoryContainer(observation.Scope.Container))
+            return new ObservationValidationResult(ObservationValidationStatus.Invalid, ObservationValidationCode.ContainerSubjectMismatch, "Slot changes require an inventory observation scope.");
+        if (updates.Count == 0)
+            return new ObservationValidationResult(ObservationValidationStatus.Invalid, ObservationValidationCode.PayloadInvalid, "An inventory delta must name at least one changed slot.");
+        if (updates.Any(update => update.SlotIndex < 0 || update.Current is { ItemId: 0 } or { Quantity: <= 0 }) ||
+            updates.Select(update => (update.ContainerId, update.SlotIndex)).Distinct().Count() != updates.Count)
+        {
+            return new ObservationValidationResult(ObservationValidationStatus.Invalid, ObservationValidationCode.PayloadInvalid, "An inventory delta contains an invalid or duplicated slot update.");
+        }
+        return ObservationValidator.Validate(validationEnvelope);
+    }
+
+    private static bool IsInventoryContainer(ObservationContainerKind container) =>
+        container is ObservationContainerKind.PlayerInventory or ObservationContainerKind.RetainerInventory or ObservationContainerKind.Saddlebag;
 
     private static int CompareSourceOrder(ObservationCapture incoming, CurrentRow current)
     {
