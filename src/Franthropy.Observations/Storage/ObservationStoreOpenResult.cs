@@ -38,7 +38,9 @@ public sealed record ObservationStoreOptions
     public string? ChangeSignalPath { get; init; }
     public int WriterCapability { get; init; } = 2;
     public TimeSpan BusyTimeout { get; init; } = TimeSpan.FromSeconds(1);
-    public Version MinimumNativeSqliteVersion { get; init; } = new(3, 51, 3);
+    // RETURNING is the newest SQLite feature used by the store and arrived in 3.35.0.
+    // Dalamud processes may already have a compatible native SQLite loaded by another plugin.
+    public Version MinimumNativeSqliteVersion { get; init; } = new(3, 35, 0);
     public long HistorySoftLimitBytes { get; init; } = 256L * 1024 * 1024;
 
     internal Action? BeforeMigrationCommit { get; init; }

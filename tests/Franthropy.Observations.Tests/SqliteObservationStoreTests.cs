@@ -7,6 +7,14 @@ namespace Franthropy.Observations.Tests;
 public sealed class SqliteObservationStoreTests
 {
     [Fact]
+    public void Default_native_sqlite_floor_matches_store_features()
+    {
+        var options = new ObservationStoreOptions { DatabasePath = "unused.db" };
+
+        Assert.Equal(new Version(3, 35, 0), options.MinimumNativeSqliteVersion);
+    }
+
+    [Fact]
     public async Task Inventory_delta_updates_only_named_slots_and_exposes_exact_change_batch()
     {
         await using var fixture = await StoreFixture.CreateAsync();
