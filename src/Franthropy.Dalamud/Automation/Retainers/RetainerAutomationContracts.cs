@@ -234,6 +234,19 @@ public static class RetainerRetrievalObservation
         transferred > 0 &&
         retainerQuantityBefore - retainerQuantityAfter == transferred &&
         playerQuantityAfter - playerQuantityBefore == transferred;
+
+    /// <summary>
+    /// Proves a retrieval from the inventory changes emitted for that command.
+    /// Slot moves and stack compaction cancel out of the net deltas, leaving only
+    /// the quantity that crossed from the retainer to the player.
+    /// </summary>
+    public static bool MatchesMutation(
+        int transferred,
+        int retainerQuantityDelta,
+        int playerQuantityDelta) =>
+        transferred > 0 &&
+        retainerQuantityDelta == -transferred &&
+        playerQuantityDelta == transferred;
 }
 
 public static class RetainerMarketListingObservation

@@ -172,6 +172,35 @@ public sealed class RetainerAutomationSessionTests
             playerAfter));
 
     [Theory]
+    [InlineData(999, -999, 999, true)]
+    [InlineData(999, 0, 999, false)]
+    [InlineData(999, -999, 0, false)]
+    [InlineData(999, -1998, 999, false)]
+    public void RetrievalObservation_CommandEventsRequireExactTwoSidedMovement(
+        int transferred,
+        int retainerDelta,
+        int playerDelta,
+        bool expected) =>
+        Assert.Equal(expected, RetainerRetrievalObservation.MatchesMutation(
+            transferred,
+            retainerDelta,
+            playerDelta));
+
+    [Fact]
+    public void RetrievalMutationAccumulator_IgnoresBalancedSlotRearrangement()
+    {
+        var evidence = new RetainerRetrievalMutationAccumulator();
+
+        evidence.RecordRetainer(-999);
+        evidence.RecordRetainer(999);
+        evidence.RecordRetainer(-999);
+        evidence.RecordPlayer(999);
+
+        Assert.True(evidence.Matches(999));
+        Assert.Equal(new(-999, 999), evidence.Snapshot());
+    }
+
+    [Theory]
     [InlineData(false, 999, 400, 3, true)]
     [InlineData(false, 400, 400, 0, false)]
     [InlineData(true, 9999, 7000, 0, true)]
