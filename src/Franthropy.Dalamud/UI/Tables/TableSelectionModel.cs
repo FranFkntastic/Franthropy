@@ -77,6 +77,34 @@ public sealed class TableSelectionModel<TKey>
         return changed;
     }
 
+    public bool ApplyClick(
+        IReadOnlyList<TKey> orderedKeys,
+        int rowIndex,
+        DalamudTableSelectionMode mode,
+        bool control,
+        bool shift)
+    {
+        switch (mode)
+        {
+            case DalamudTableSelectionMode.None:
+                return false;
+            case DalamudTableSelectionMode.Multi:
+                return ApplyClick(orderedKeys, rowIndex, control, shift);
+            case DalamudTableSelectionMode.Single:
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mode));
+        }
+
+        ValidateRowIndex(orderedKeys, rowIndex);
+        var key = orderedKeys[rowIndex];
+        var changed = SelectOnly(key);
+        anchor = key;
+        hasAnchor = true;
+        dragStart = -1;
+        return changed;
+    }
+
     public bool ApplyDrag(IReadOnlyList<TKey> orderedKeys, int rowIndex)
     {
         ValidateRowIndex(orderedKeys, rowIndex);

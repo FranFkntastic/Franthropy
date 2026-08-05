@@ -1,5 +1,6 @@
 using Dalamud.Bindings.ImGui;
 using Franthropy.Dalamud.UI.Tables;
+using System.Reflection;
 
 namespace Franthropy.Dalamud.Tests.UI.Tables;
 
@@ -58,5 +59,28 @@ public sealed class DalamudTableLayoutTests
 
         Assert.NotSame(first, third);
         Assert.Equal(2, table.ApplyCount);
+    }
+
+    [Fact]
+    public void Projection_owns_one_table_level_selection_mode()
+    {
+        var selection = new TableSelectionModel<int>();
+        var table = new DalamudTableProjection<int>(
+            [new("Value", 80f, value => value.ToString())],
+            DalamudTableSelection<int>.Single(selection, value => value));
+
+        Assert.Equal(DalamudTableSelectionMode.Single, table.SelectionMode);
+    }
+
+    [Theory]
+    [InlineData(nameof(DalamudTableProjection<int>.DrawRow))]
+    [InlineData(nameof(DalamudTableProjection<int>.DrawSelectableRow))]
+    public void Legacy_row_entry_points_are_explicitly_deprecated(string methodName)
+    {
+        var methods = typeof(DalamudTableProjection<int>)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .Where(method => method.Name == methodName);
+
+        Assert.All(methods, method => Assert.NotNull(method.GetCustomAttribute<ObsoleteAttribute>()));
     }
 }
