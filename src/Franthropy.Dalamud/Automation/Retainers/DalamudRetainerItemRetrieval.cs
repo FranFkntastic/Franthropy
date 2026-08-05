@@ -37,7 +37,9 @@ internal static class RetainerRetrievalCommandPolicy
 
 /// <summary>
 /// Retrieves an exact quantity from the currently open retainer using the
-/// game's typed retainer command, then verifies both inventory deltas.
+/// game's typed retainer command. The normal verifier watches the addressed
+/// slot; a single aggregate reconciliation handles slot reordering only when
+/// that cheap path times out.
 /// </summary>
 public sealed class DalamudRetainerItemRetrieval
 {
@@ -74,11 +76,25 @@ public sealed class DalamudRetainerItemRetrieval
     public async Task<RetainerRetrievalResult> RetrieveAsync(
         DalamudInventoryStack stack,
         int requestedQuantity,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        await RetrieveAsync(stack, requestedQuantity, null, cancellationToken).ConfigureAwait(false);
+
+    public async Task<RetainerRetrievalResult> RetrieveAsync(
+        DalamudInventoryStack stack,
+        int requestedQuantity,
+        int retainerVariantQuantityBefore,
+        CancellationToken cancellationToken = default) =>
+        await RetrieveAsync(stack, requestedQuantity, (int?)retainerVariantQuantityBefore, cancellationToken).ConfigureAwait(false);
+
+    private async Task<RetainerRetrievalResult> RetrieveAsync(
+        DalamudInventoryStack stack,
+        int requestedQuantity,
+        int? retainerVariantQuantityBefore,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var pending = await framework.RunOnTick(
-            () => BeginRetrieval(stack, requestedQuantity),
+            () => BeginRetrieval(stack, requestedQuantity, retainerVariantQuantityBefore),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!pending.Success)
             return new(false, 0, pending.Code, pending.Message);
@@ -108,7 +124,7 @@ public sealed class DalamudRetainerItemRetrieval
             await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
         }
 
-        return new(false, 0, "RetrievalNotObserved", $"Retrieval did not complete for item {stack.ItemId}.");
+        return await ReconcileAfterTimeoutAsync(stack, pending, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<RetainerRetrievalResult> WaitForCompletionAsync(
@@ -128,12 +144,17 @@ public sealed class DalamudRetainerItemRetrieval
             await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
         }
 
-        return last;
+        return await ReconcileAfterTimeoutAsync(stack, pending, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Validates the selected source, captures both verification baselines, and
+    /// submits exactly one native retrieval command.
+    /// </summary>
     private unsafe PendingRetainerRetrieval BeginRetrieval(
         DalamudInventoryStack stack,
-        int requestedQuantity)
+        int requestedQuantity,
+        int? knownRetainerVariantQuantity)
     {
         var compatibility = GamePatchCompatibilityGate.Evaluate(PatchContractId, ApprovedGameVersion);
         if (!compatibility.IsApproved)
@@ -174,6 +195,26 @@ public sealed class DalamudRetainerItemRetrieval
             stack.Quantity,
             transfer);
         var playerBefore = CountPlayer(stack);
+        // Quartermaster already owns this total from its route scan. Other consumers
+        // retain compatibility by paying for one baseline scan before mutation.
+        int retainerBefore;
+        if (knownRetainerVariantQuantity is { } knownQuantity)
+        {
+            if (knownQuantity < stack.Quantity)
+            {
+                return PendingRetainerRetrieval.Fail(
+                    "InvalidRetainerBaseline",
+                    $"The known item total {knownQuantity} is smaller than source stack quantity {stack.Quantity}.");
+            }
+
+            retainerBefore = knownQuantity;
+        }
+        else if (!TryCountRetainer(stack, out retainerBefore))
+        {
+            return PendingRetainerRetrieval.Fail(
+                "RetainerInventoryUnavailable",
+                "Every retainer inventory container must be loaded before retrieval can be verified.");
+        }
         var retainerAgent = AgentModule.Instance()->GetAgentByInternalId(AgentId.Retainer);
         if (retainerAgent == null || !retainerAgent->IsAgentActive())
             return PendingRetainerRetrieval.Fail("RetainerAgentUnavailable", "Retainer agent is unavailable.");
@@ -201,6 +242,7 @@ public sealed class DalamudRetainerItemRetrieval
             true,
             transfer,
             playerBefore,
+            retainerBefore,
             selection.NeedsQuantityInput,
             "CommandSubmitted",
             $"Submitted retrieval command for item {stack.ItemId}.");
@@ -221,6 +263,10 @@ public sealed class DalamudRetainerItemRetrieval
         return new(true, submitted, "QuantitySubmitted", $"Submitted {submitted}x item {itemId} for retrieval.");
     }
 
+    /// <summary>
+    /// Polls the inexpensive common-path evidence: the addressed source slot and
+    /// the player's total for the same item variant.
+    /// </summary>
     private static unsafe RetainerRetrievalResult VerifyCompleted(
         DalamudInventoryStack original,
         PendingRetainerRetrieval pending)
@@ -257,11 +303,95 @@ public sealed class DalamudRetainerItemRetrieval
         return new(false, 0, "TransferPending", "Waiting for matching retainer-slot and player-inventory deltas.");
     }
 
+    /// <summary>
+    /// Performs one bounded recovery read after exact-slot polling has failed. This
+    /// is intentionally outside the polling loop: aggregate retainer scans are
+    /// reserved for the rare case where the game moved the item but changed which
+    /// physical slot represents the remaining stack.
+    /// </summary>
+    private async Task<RetainerRetrievalResult> ReconcileAfterTimeoutAsync(
+        DalamudInventoryStack original,
+        PendingRetainerRetrieval pending,
+        CancellationToken cancellationToken) =>
+        await framework.RunOnTick(
+            () => VerifyAggregateCompleted(original, pending),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Accepts the timeout recovery only when the retainer and player report equal,
+    /// opposite, exact deltas for the requested quantity.
+    /// </summary>
+    private static RetainerRetrievalResult VerifyAggregateCompleted(
+        DalamudInventoryStack original,
+        PendingRetainerRetrieval pending)
+    {
+        var playerAfter = CountPlayer(original);
+        if (!TryCountRetainer(original, out var retainerAfter))
+        {
+            return new(
+                false,
+                0,
+                "RetrievalNotObserved",
+                $"Retrieval of item {original.ItemId} could not be reconciled because retainer inventory became unavailable.");
+        }
+        if (RetainerRetrievalObservation.MatchesAggregate(
+                pending.Requested,
+                pending.RetainerQuantityBefore,
+                retainerAfter,
+                pending.PlayerQuantityBefore,
+                playerAfter))
+        {
+            return new(
+                true,
+                pending.Requested,
+                "TransferVerified",
+                $"Retrieved {pending.Requested}x item {original.ItemId}; aggregate inventories confirmed a reordered source slot.");
+        }
+
+        return new(
+            false,
+            0,
+            "RetrievalNotObserved",
+            $"Retrieval of item {original.ItemId} could not be proven after one aggregate reconciliation.");
+    }
+
+    /// <summary>Counts the affected item variant across the player's loaded bags.</summary>
     private static int CountPlayer(DalamudInventoryStack stack) =>
         stack.Container == InventoryType.RetainerCrystals
             ? DalamudInventoryStackScanner.CountLoadedItem(InventoryType.Crystals, stack.ItemId)
             : PlayerOrdinaryItemContainers.Sum(
                 type => DalamudInventoryStackScanner.CountLoadedItem(type, stack.ItemId, stack.IsHighQuality));
+
+    /// <summary>
+    /// Counts only the affected item variant across the currently open retainer.
+    /// Callers should supply their existing route-scan total for the before value;
+    /// this reader is retained for the single timeout reconciliation and compatible
+    /// consumers that do not already own such a snapshot.
+    /// </summary>
+    private static unsafe bool TryCountRetainer(DalamudInventoryStack stack, out int quantity)
+    {
+        quantity = 0;
+        var inventoryManager = InventoryManager.Instance();
+        if (inventoryManager == null)
+            return false;
+
+        IReadOnlyList<InventoryType> containers = stack.Container == InventoryType.RetainerCrystals
+            ? [InventoryType.RetainerCrystals]
+            : DalamudRetainerInventory.OrdinaryItemContainers;
+        foreach (var inventoryType in containers)
+        {
+            var container = inventoryManager->GetInventoryContainer(inventoryType);
+            if (container == null || !container->IsLoaded)
+                return false;
+
+            quantity += DalamudInventoryStackScanner.CountLoadedItem(
+                inventoryType,
+                stack.ItemId,
+                stack.Container == InventoryType.RetainerCrystals ? null : stack.IsHighQuality);
+        }
+
+        return true;
+    }
 
     private delegate void RetainerItemCommandDelegate(
         nint AgentRetainerItemCommandModule,
@@ -274,11 +404,12 @@ public sealed class DalamudRetainerItemRetrieval
         bool Success,
         int Requested,
         int PlayerQuantityBefore,
+        int RetainerQuantityBefore,
         bool NeedsQuantityInput,
         string Code,
         string Message)
     {
         public static PendingRetainerRetrieval Fail(string code, string message) =>
-            new(false, 0, 0, false, code, message);
+            new(false, 0, 0, 0, false, code, message);
     }
 }

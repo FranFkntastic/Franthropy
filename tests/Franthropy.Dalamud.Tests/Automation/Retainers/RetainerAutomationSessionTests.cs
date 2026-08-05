@@ -153,6 +153,25 @@ public sealed class RetainerAutomationSessionTests
             playerAfter));
 
     [Theory]
+    [InlineData(999, 19980, 18981, 11996, 12995, true)]
+    [InlineData(999, 19980, 19980, 11996, 12995, false)]
+    [InlineData(999, 19980, 18981, 11996, 11996, false)]
+    [InlineData(999, 19980, 17982, 11996, 12995, false)]
+    public void RetrievalObservation_AggregateFallbackRequiresExactTwoSidedMovement(
+        int transferred,
+        int retainerBefore,
+        int retainerAfter,
+        int playerBefore,
+        int playerAfter,
+        bool expected) =>
+        Assert.Equal(expected, RetainerRetrievalObservation.MatchesAggregate(
+            transferred,
+            retainerBefore,
+            retainerAfter,
+            playerBefore,
+            playerAfter));
+
+    [Theory]
     [InlineData(false, 999, 400, 3, true)]
     [InlineData(false, 400, 400, 0, false)]
     [InlineData(true, 9999, 7000, 0, true)]
