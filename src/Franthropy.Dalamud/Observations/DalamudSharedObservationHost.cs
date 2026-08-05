@@ -22,7 +22,7 @@ public sealed record DalamudSharedObservationHostOptions
     public required IPlayerState PlayerState { get; init; }
     public required IAddonLifecycle AddonLifecycle { get; init; }
     public Action<string, Exception?>? Diagnostic { get; init; }
-    public int WriterCapability { get; init; } = 1;
+    public int WriterCapability { get; init; } = 2;
 }
 
 public sealed class DalamudSharedObservationHost : IDisposable
@@ -156,11 +156,37 @@ public sealed class DalamudSharedObservationHost : IDisposable
             GameInventoryType.Inventory2,
             GameInventoryType.Inventory3,
             GameInventoryType.Inventory4,
+            GameInventoryType.EquippedItems,
+            GameInventoryType.Crystals,
+            GameInventoryType.ArmoryOffHand,
+            GameInventoryType.ArmoryHead,
+            GameInventoryType.ArmoryBody,
+            GameInventoryType.ArmoryHands,
+            GameInventoryType.ArmoryLegs,
+            GameInventoryType.ArmoryFeets,
+            GameInventoryType.ArmoryEar,
+            GameInventoryType.ArmoryNeck,
+            GameInventoryType.ArmoryWrist,
+            GameInventoryType.ArmoryRings,
+            GameInventoryType.ArmorySoulCrystal,
+            GameInventoryType.ArmoryMainHand,
         ];
         private static readonly GameInventoryType[] SaddlebagContainers =
         [
             GameInventoryType.SaddleBag1,
             GameInventoryType.SaddleBag2,
+            GameInventoryType.PremiumSaddleBag1,
+            GameInventoryType.PremiumSaddleBag2,
+        ];
+        private static readonly GameInventoryType[] RequiredSaddlebagContainers =
+        [
+            GameInventoryType.SaddleBag1,
+            GameInventoryType.SaddleBag2,
+        ];
+        private static readonly GameInventoryType[] OptionalSaddlebagContainers =
+        [
+            GameInventoryType.PremiumSaddleBag1,
+            GameInventoryType.PremiumSaddleBag2,
         ];
         private static readonly GameInventoryType[] RetainerContainers =
         [
@@ -171,6 +197,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
             GameInventoryType.RetainerPage5,
             GameInventoryType.RetainerPage6,
             GameInventoryType.RetainerPage7,
+            GameInventoryType.RetainerCrystals,
         ];
 
         private readonly IGameInventory gameInventory;
@@ -180,7 +207,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
         private readonly ObservationProvenance provenance;
         private readonly Action<string> fault;
         private readonly Action<string, Exception?>? diagnostic;
-        private readonly Channel<ObservationEnvelope> queue = Channel.CreateBounded<ObservationEnvelope>(new BoundedChannelOptions(256)
+        private readonly Channel<PendingObservation> queue = Channel.CreateBounded<PendingObservation>(new BoundedChannelOptions(256)
         {
             SingleReader = true,
             SingleWriter = false,
@@ -251,14 +278,10 @@ public sealed class DalamudSharedObservationHost : IDisposable
         {
             try
             {
-                var types = events.Select(change => change.Item.ContainerType).ToHashSet();
-                if (types.Overlaps(PlayerContainers))
-                    Enqueue(CaptureCharacterInventory(PlayerContainers, ObservationContainerKind.PlayerInventory, ObservationPayloadContracts.PlayerInventory));
-                if (types.Overlaps(SaddlebagContainers))
-                    Enqueue(CaptureCharacterInventory(SaddlebagContainers, ObservationContainerKind.Saddlebag, ObservationPayloadContracts.Saddlebag));
-                if (types.Overlaps(RetainerContainers))
-                    Enqueue(CaptureRetainerInventory());
-                if (types.Contains(GameInventoryType.RetainerMarket))
+                var flattened = events.SelectMany(FlattenEvent).ToArray();
+                foreach (var delta in CaptureInventoryDeltas(flattened))
+                    Enqueue(delta);
+                if (flattened.Any(change => change.Item.ContainerType == GameInventoryType.RetainerMarket))
                     Enqueue(CaptureRetainerListings());
             }
             catch (Exception ex)
@@ -267,12 +290,79 @@ public sealed class DalamudSharedObservationHost : IDisposable
             }
         }
 
+        private IEnumerable<InventoryObservationDelta> CaptureInventoryDeltas(IReadOnlyList<InventoryEventArgs> events)
+        {
+            var player = CoalesceUpdates(events, PlayerContainers);
+            if (player.Count > 0)
+            {
+                var owner = CurrentOwner();
+                yield return Delta(
+                    new ObservationScope(owner, ObservationSubject.Character(owner), ObservationContainerKind.PlayerInventory),
+                    player);
+            }
+
+            var saddlebag = CoalesceUpdates(events, SaddlebagContainers);
+            if (saddlebag.Count > 0)
+            {
+                var owner = CurrentOwner();
+                yield return Delta(
+                    new ObservationScope(owner, ObservationSubject.Character(owner), ObservationContainerKind.Saddlebag),
+                    saddlebag);
+            }
+
+            var retainer = CoalesceUpdates(events, RetainerContainers);
+            if (retainer.Count > 0)
+            {
+                var (owner, retainerId) = CurrentRetainer();
+                yield return Delta(
+                    new ObservationScope(owner, ObservationSubject.Retainer(retainerId, owner), ObservationContainerKind.RetainerInventory),
+                    retainer);
+            }
+        }
+
+        private static IReadOnlyList<InventorySlotUpdate> CoalesceUpdates(
+            IReadOnlyList<InventoryEventArgs> events,
+            IReadOnlyCollection<GameInventoryType> containers)
+        {
+            var accepted = containers.ToHashSet();
+            var updates = new Dictionary<(int ContainerId, int SlotIndex), InventorySlotUpdate>();
+            foreach (var change in events)
+            {
+                var item = change.Item;
+                if (!accepted.Contains(item.ContainerType))
+                    continue;
+                var key = ((int)item.ContainerType, checked((int)item.InventorySlot));
+                var current = change.Type == GameInventoryEvent.Removed || item.IsEmpty || item.ItemId == 0 || item.Quantity <= 0
+                    ? null
+                    : new InventorySlotValue(item.BaseItemId, item.Quantity, item.IsHq);
+                updates[key] = new InventorySlotUpdate(key.Item1, key.Item2, current);
+            }
+            return updates.Values.OrderBy(update => update.ContainerId).ThenBy(update => update.SlotIndex).ToArray();
+        }
+
+        private static IEnumerable<InventoryEventArgs> FlattenEvent(InventoryEventArgs change)
+        {
+            if (change is InventoryComplexEventArgs complex)
+            {
+                foreach (var source in FlattenEvent(complex.SourceEvent))
+                    yield return source;
+                foreach (var target in FlattenEvent(complex.TargetEvent))
+                    yield return target;
+                yield break;
+            }
+            yield return change;
+        }
+
         private void CaptureInitialCharacterState()
         {
             try
             {
                 Enqueue(CaptureCharacterInventory(PlayerContainers, ObservationContainerKind.PlayerInventory, ObservationPayloadContracts.PlayerInventory));
-                Enqueue(CaptureCharacterInventory(SaddlebagContainers, ObservationContainerKind.Saddlebag, ObservationPayloadContracts.Saddlebag));
+                Enqueue(CaptureCharacterInventory(
+                    RequiredSaddlebagContainers,
+                    ObservationContainerKind.Saddlebag,
+                    ObservationPayloadContracts.Saddlebag,
+                    OptionalSaddlebagContainers));
             }
             catch (Exception ex)
             {
@@ -302,12 +392,13 @@ public sealed class DalamudSharedObservationHost : IDisposable
         private ObservationEnvelope CaptureCharacterInventory(
             IReadOnlyList<GameInventoryType> requested,
             ObservationContainerKind kind,
-            string payloadContract)
+            string payloadContract,
+            IReadOnlyList<GameInventoryType>? optional = null)
         {
             var owner = CurrentOwner();
             var observed = new List<int>();
             var rows = new List<InventoryItemObservation>();
-            foreach (var type in requested)
+            foreach (var type in requested.Concat(optional ?? []).Distinct())
             {
                 var items = gameInventory.GetInventoryItems(type);
                 if (items.Length == 0)
@@ -320,14 +411,19 @@ public sealed class DalamudSharedObservationHost : IDisposable
                     rows.Add(new InventoryItemObservation((int)type, checked((int)item.InventorySlot), item.BaseItemId, item.Quantity, item.IsHq));
                 }
             }
-            var complete = observed.Count == requested.Count;
+            var requiredIds = requested.Select(type => (int)type).ToHashSet();
+            var complete = requiredIds.All(observed.Contains);
+            var requestedIds = requiredIds
+                .Concat((optional ?? []).Select(type => (int)type).Where(observed.Contains))
+                .Order()
+                .ToArray();
             return Envelope(
                 new ObservationScope(owner, ObservationSubject.Character(owner), kind),
                 Evidence(complete),
                 ObservationPayload.Create(
                     payloadContract,
                     ObservationPayloadContracts.Version,
-                    new InventoryObservationPayload(requested.Select(type => (int)type).ToArray(), observed, rows)));
+                    new InventoryObservationPayload(requestedIds, observed, rows)));
         }
 
         private unsafe ObservationEnvelope CaptureRetainerRoster()
@@ -426,6 +522,16 @@ public sealed class DalamudSharedObservationHost : IDisposable
                     evidence),
                 payload);
 
+        private InventoryObservationDelta Delta(ObservationScope scope, IReadOnlyList<InventorySlotUpdate> updates) =>
+            new(
+                scope,
+                new ObservationCapture(
+                    Interlocked.Increment(ref sourceRevision),
+                    DateTimeOffset.UtcNow,
+                    provenance,
+                    ObservationEvidence.CompleteAvailable),
+                updates);
+
         private static ObservationEvidence Evidence(bool complete) => ObservationEvidence.CompleteAvailable with
         {
             Availability = complete ? ObservationAvailability.Available : ObservationAvailability.Unavailable,
@@ -453,7 +559,13 @@ public sealed class DalamudSharedObservationHost : IDisposable
 
         private void Enqueue(ObservationEnvelope observation)
         {
-            if (!queue.Writer.TryWrite(observation))
+            if (!queue.Writer.TryWrite(new PendingObservation(observation, null)))
+                fault("The bounded shared-observation queue is full; collection stopped before evidence could be dropped silently.");
+        }
+
+        private void Enqueue(InventoryObservationDelta observation)
+        {
+            if (!queue.Writer.TryWrite(new PendingObservation(null, observation)))
                 fault("The bounded shared-observation queue is full; collection stopped before evidence could be dropped silently.");
         }
 
@@ -463,7 +575,9 @@ public sealed class DalamudSharedObservationHost : IDisposable
             {
                 await foreach (var observation in queue.Reader.ReadAllAsync().ConfigureAwait(false))
                 {
-                    var result = await store.WriteAsync(observation).ConfigureAwait(false);
+                    var result = observation.Snapshot is not null
+                        ? await store.WriteAsync(observation.Snapshot).ConfigureAwait(false)
+                        : await store.WriteInventoryDeltaAsync(observation.Delta!).ConfigureAwait(false);
                     if (result.Status is ObservationWriteStatus.Busy or ObservationWriteStatus.Unavailable or ObservationWriteStatus.UnsupportedDatabaseVersion)
                     {
                         fault($"Shared observation writer failed: {result.Message}");
@@ -478,5 +592,9 @@ public sealed class DalamudSharedObservationHost : IDisposable
                 fault($"The shared observation writer stopped unexpectedly: {ex.Message}");
             }
         }
+
+        private sealed record PendingObservation(
+            ObservationEnvelope? Snapshot,
+            InventoryObservationDelta? Delta);
     }
 }

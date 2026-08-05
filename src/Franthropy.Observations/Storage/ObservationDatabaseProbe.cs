@@ -47,7 +47,7 @@ public static class ObservationDatabaseProbe
                 ObservationDatabaseProbeStatus.Missing,
                 null,
                 null,
-                1,
+                2,
                 0,
                 "No shared observation database exists yet.");
         }
@@ -78,7 +78,7 @@ public static class ObservationDatabaseProbe
                 return Result(ObservationDatabaseProbeStatus.CorruptDatabase, null, null, 1, 0, $"SQLite quick_check failed: {integrity}", nativeVersion);
 
             var userVersion = Convert.ToInt32(await ScalarAsync(connection, "PRAGMA user_version;", cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
-            if (userVersion is not 1000 and not 1001)
+            if (userVersion is not 1000 and not 1001 and not 1002)
                 return Result(ObservationDatabaseProbeStatus.UnsupportedDatabaseVersion, null, null, int.MaxValue, 0,
                     $"Database schema user_version {userVersion} is unsupported.", nativeVersion);
 

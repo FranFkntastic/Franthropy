@@ -51,6 +51,23 @@ public sealed record ObservationCollectionReadResult(
     IReadOnlyList<TrustedObservation> Observations,
     string Message);
 
+public enum InventoryChangeReadStatus
+{
+    Found,
+    NoChanges,
+    SnapshotRequired,
+    NotObserved,
+    Busy,
+    Unavailable,
+}
+
+public sealed record InventoryChangeReadResult(
+    InventoryChangeReadStatus Status,
+    long CurrentRevision,
+    long? RequiredSnapshotRevision,
+    IReadOnlyList<InventoryChangeBatch> Batches,
+    string Message);
+
 public enum ObservationChangeKind
 {
     Replaced,
@@ -77,10 +94,25 @@ public interface IObservationReader
         CancellationToken cancellationToken = default);
 }
 
+public interface IInventoryObservationReader
+{
+    ValueTask<InventoryChangeReadResult> ReadInventoryChangesAsync(
+        ObservationOwner owner,
+        long afterRevision,
+        CancellationToken cancellationToken = default);
+}
+
 public interface IObservationWriter
 {
     ValueTask<ObservationWriteResult> WriteAsync(
         ObservationEnvelope observation,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IInventoryObservationWriter
+{
+    ValueTask<ObservationWriteResult> WriteInventoryDeltaAsync(
+        InventoryObservationDelta observation,
         CancellationToken cancellationToken = default);
 
     ValueTask<ObservationWriteResult> InvalidateAsync(
@@ -90,7 +122,7 @@ public interface IObservationWriter
         CancellationToken cancellationToken = default);
 }
 
-public interface IObservationStore : IObservationReader, IObservationWriter, IAsyncDisposable
+public interface IObservationStore : IObservationReader, IObservationWriter, IInventoryObservationReader, IInventoryObservationWriter, IAsyncDisposable
 {
     event EventHandler<ObservationChange>? Changed;
 }

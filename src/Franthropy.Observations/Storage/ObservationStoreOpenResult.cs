@@ -36,7 +36,7 @@ public sealed record ObservationStoreOptions
     public string? BackupDirectory { get; init; }
     public string? MigrationLockPath { get; init; }
     public string? ChangeSignalPath { get; init; }
-    public int WriterCapability { get; init; } = 1;
+    public int WriterCapability { get; init; } = 2;
     public TimeSpan BusyTimeout { get; init; } = TimeSpan.FromSeconds(1);
     public Version MinimumNativeSqliteVersion { get; init; } = new(3, 51, 3);
     public long HistorySoftLimitBytes { get; init; } = 256L * 1024 * 1024;
