@@ -155,7 +155,21 @@ public interface IRetainerAutomationSession
     Task<RetainerSellingUiObservation> ObserveSellingUiAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> ReturnToRetainerListAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DalamudInventoryStack>> ScanRetainerAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default);
-    Task<RetainerRetrievalResult> RetrieveAsync(DalamudInventoryStack stack, int quantity, CancellationToken cancellationToken = default);
+    Task<RetainerRetrievalResult> RetrieveAsync(
+        DalamudInventoryStack stack,
+        int quantity,
+        CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Retrieves from one source stack using a variant total from the caller's
+    /// existing retainer scan. The default keeps older session implementations
+    /// compatible; live implementations use the total to avoid a redundant scan.
+    /// </summary>
+    Task<RetainerRetrievalResult> RetrieveAsync(
+        DalamudInventoryStack stack,
+        int quantity,
+        int retainerVariantQuantityBefore,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(stack, quantity, cancellationToken);
     Task<IReadOnlyList<DalamudInventoryStack>> ScanPlayerInventoryAsync(IReadOnlySet<uint>? itemIds = null, CancellationToken cancellationToken = default);
     Task<RetainerDepositResult> DepositAsync(DalamudInventoryStack stack, int quantity, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DalamudInventoryStack>> ScanPlayerCrystalsAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default);
@@ -181,6 +195,11 @@ public static class RetainerDepositObservation
 
 public static class RetainerRetrievalObservation
 {
+    /// <summary>
+    /// Proves the common retrieval path from the exact source slot and the player's
+    /// aggregate inventory. This is deliberately cheap enough to poll while the game
+    /// is applying the command.
+    /// </summary>
     public static bool Matches(
         uint itemId,
         int originalQuantity,
@@ -200,6 +219,21 @@ public static class RetainerRetrievalObservation
 
         return slotMatches && playerQuantityAfter - playerQuantityBefore == transferred;
     }
+
+    /// <summary>
+    /// Proves a retrieval after the game has reordered or repopulated the original
+    /// source slot. Both inventories must report the same exact movement, so an
+    /// unrelated player-inventory change cannot be mistaken for success.
+    /// </summary>
+    public static bool MatchesAggregate(
+        int transferred,
+        int retainerQuantityBefore,
+        int retainerQuantityAfter,
+        int playerQuantityBefore,
+        int playerQuantityAfter) =>
+        transferred > 0 &&
+        retainerQuantityBefore - retainerQuantityAfter == transferred &&
+        playerQuantityAfter - playerQuantityBefore == transferred;
 }
 
 public static class RetainerMarketListingObservation

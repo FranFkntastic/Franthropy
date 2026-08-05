@@ -555,12 +555,32 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     public Task<IReadOnlyList<DalamudInventoryStack>> ScanRetainerAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default) =>
         framework.RunOnTick(() => DalamudRetainerInventory.ScanLoadedStacks(itemIds), cancellationToken: cancellationToken);
 
-    public async Task<RetainerRetrievalResult> RetrieveAsync(DalamudInventoryStack stack, int quantity, CancellationToken cancellationToken = default)
+    public async Task<RetainerRetrievalResult> RetrieveAsync(
+        DalamudInventoryStack stack,
+        int quantity,
+        CancellationToken cancellationToken = default) =>
+        await RetrieveAsync(stack, quantity, null, cancellationToken).ConfigureAwait(false);
+
+    public async Task<RetainerRetrievalResult> RetrieveAsync(
+        DalamudInventoryStack stack,
+        int quantity,
+        int retainerVariantQuantityBefore,
+        CancellationToken cancellationToken = default) =>
+        await RetrieveAsync(stack, quantity, (int?)retainerVariantQuantityBefore, cancellationToken).ConfigureAwait(false);
+
+    private async Task<RetainerRetrievalResult> RetrieveAsync(
+        DalamudInventoryStack stack,
+        int quantity,
+        int? retainerVariantQuantityBefore,
+        CancellationToken cancellationToken)
     {
         var verified = await framework.RunOnTick(() => VerifyActive(active?.RetainerId ?? 0), cancellationToken: cancellationToken).ConfigureAwait(false);
-        return verified.Success
-            ? await retrievals.RetrieveAsync(stack, quantity, cancellationToken).ConfigureAwait(false)
-            : new(false, 0, "RetainerIdentityMismatch", verified.Message);
+        if (!verified.Success)
+            return new(false, 0, "RetainerIdentityMismatch", verified.Message);
+
+        return retainerVariantQuantityBefore is { } knownQuantity
+            ? await retrievals.RetrieveAsync(stack, quantity, knownQuantity, cancellationToken).ConfigureAwait(false)
+            : await retrievals.RetrieveAsync(stack, quantity, cancellationToken).ConfigureAwait(false);
     }
 
     public Task<IReadOnlyList<DalamudInventoryStack>> ScanPlayerCrystalsAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default) =>
