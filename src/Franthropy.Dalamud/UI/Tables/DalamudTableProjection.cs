@@ -53,6 +53,11 @@ public sealed class DalamudTableProjection<TRow>
 {
     private readonly IReadOnlyList<DalamudTableColumn<TRow>> columns;
     private readonly string[] filters;
+    private IEnumerable<TRow>? appliedSource;
+    private IReadOnlyList<TRow> appliedRows = [];
+    private string[] appliedFilters = [];
+    private int appliedSortColumn = -1;
+    private ImGuiSortDirection appliedSortDirection = ImGuiSortDirection.None;
 
     public DalamudTableProjection(IReadOnlyList<DalamudTableColumn<TRow>> columns)
     {
@@ -64,6 +69,7 @@ public sealed class DalamudTableProjection<TRow>
     }
 
     public int ColumnCount => columns.Count;
+    public int ApplyCount { get; private set; }
 
     public IReadOnlyList<string> Filters => filters;
 
@@ -278,22 +284,49 @@ public sealed class DalamudTableProjection<TRow>
             ImGui.TextUnformatted(text);
     }
 
+    public IReadOnlyList<TRow> Apply(IEnumerable<TRow> rows)
+    {
+        unsafe
+        {
+            return Apply(rows, ImGuiTableSortSpecsPtr.Null);
+        }
+    }
+
     public unsafe IReadOnlyList<TRow> Apply(IEnumerable<TRow> rows, ImGuiTableSortSpecsPtr sortSpecs)
     {
+        ArgumentNullException.ThrowIfNull(rows);
+        var hasSort = sortSpecs.Handle != null && sortSpecs.SpecsCount > 0;
+        var sortColumn = hasSort ? (int)sortSpecs.Specs.ColumnIndex : -1;
+        var sortDirection = hasSort ? sortSpecs.Specs.SortDirection : ImGuiSortDirection.None;
+        if (ReferenceEquals(rows, appliedSource) &&
+            sortColumn == appliedSortColumn &&
+            sortDirection == appliedSortDirection &&
+            filters.SequenceEqual(appliedFilters, StringComparer.Ordinal))
+        {
+            if (sortSpecs.Handle != null)
+                sortSpecs.SpecsDirty = false;
+            return appliedRows;
+        }
+
         var filtered = rows.Where(MatchesAllFilters).ToArray();
-        if (sortSpecs.Handle == null || sortSpecs.SpecsCount == 0)
-            return filtered;
+        IReadOnlyList<TRow> result = filtered;
+        if (sortColumn >= 0 && sortColumn < columns.Count)
+        {
+            var key = columns[sortColumn].SortKey ?? (row => columns[sortColumn].Text(row));
+            result = sortDirection == ImGuiSortDirection.Descending
+                ? filtered.OrderByDescending(row => key(row)).ToArray()
+                : filtered.OrderBy(row => key(row)).ToArray();
+        }
 
-        var spec = sortSpecs.Specs;
-        var columnIndex = (int)spec.ColumnIndex;
-        if (columnIndex < 0 || columnIndex >= columns.Count)
-            return filtered;
-
-        var key = columns[columnIndex].SortKey ?? (row => columns[columnIndex].Text(row));
-        var sorted = spec.SortDirection == ImGuiSortDirection.Descending
-            ? filtered.OrderByDescending(row => key(row))
-            : filtered.OrderBy(row => key(row));
-        return sorted.ToArray();
+        appliedSource = rows;
+        appliedRows = result;
+        appliedFilters = [.. filters];
+        appliedSortColumn = sortColumn;
+        appliedSortDirection = sortDirection;
+        ApplyCount++;
+        if (sortSpecs.Handle != null)
+            sortSpecs.SpecsDirty = false;
+        return result;
     }
 
     private bool MatchesAllFilters(TRow row)
