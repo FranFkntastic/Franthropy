@@ -53,6 +53,11 @@ public sealed class DalamudTableProjection<TRow>
 {
     private readonly IReadOnlyList<DalamudTableColumn<TRow>> columns;
     private readonly string[] filters;
+    private IEnumerable<TRow>? appliedSource;
+    private IReadOnlyList<TRow> appliedRows = [];
+    private string[] appliedFilters = [];
+    private int appliedSortColumn = -1;
+    private ImGuiSortDirection appliedSortDirection = ImGuiSortDirection.None;
 
     public DalamudTableProjection(IReadOnlyList<DalamudTableColumn<TRow>> columns)
     {
@@ -64,6 +69,7 @@ public sealed class DalamudTableProjection<TRow>
     }
 
     public int ColumnCount => columns.Count;
+    public int ApplyCount { get; private set; }
 
     public IReadOnlyList<string> Filters => filters;
 
@@ -90,7 +96,8 @@ public sealed class DalamudTableProjection<TRow>
     {
         for (var index = 0; index < columns.Count; index++)
         {
-            ImGui.TableNextColumn();
+            if (!ImGui.TableNextColumn())
+                continue;
             var current = filters[index];
             if (ImGui.InputTextWithHint($"##filter{index}", columns[index].Label, ref current, 64))
                 filters[index] = current;
@@ -126,8 +133,8 @@ public sealed class DalamudTableProjection<TRow>
         ImGui.TableNextRow(ImGuiTableRowFlags.None, minimumHeight);
         for (var index = 0; index < columns.Count; index++)
         {
-            ImGui.TableNextColumn();
-            if (index != columnIndex)
+            var shouldDraw = ImGui.TableNextColumn();
+            if (!shouldDraw || index != columnIndex)
                 continue;
             if (textColor is { } color)
                 ImGui.TextColored(color, message);
@@ -155,33 +162,68 @@ public sealed class DalamudTableProjection<TRow>
                 ImGui.GetColorU32(rowBackground));
         }
 
-        ImGui.TableNextColumn();
-        var cellCursor = ImGui.GetCursorPos();
-        DalamudTableSelectionRenderer.DrawRow(
-            selection,
-            orderedKeys,
-            rowIndex,
-            id,
-            new Vector2(0, Math.Max(minimumHeight, ImGui.GetTextLineHeightWithSpacing())),
-            enabled);
-        var clicked = enabled && ImGui.IsItemClicked(ImGuiMouseButton.Left);
-        ImGui.SetCursorPos(cellCursor);
-        DrawCell(columns[0], row, $"{id}:cell:0");
+        var clicked = false;
+        if (ImGui.TableNextColumn())
+        {
+            var cellCursor = ImGui.GetCursorPos();
+            DalamudTableSelectionRenderer.DrawRow(
+                selection,
+                orderedKeys,
+                rowIndex,
+                id,
+                new Vector2(0, Math.Max(minimumHeight, ImGui.GetTextLineHeightWithSpacing())),
+                enabled);
+            clicked = enabled && ImGui.IsItemClicked(ImGuiMouseButton.Left);
+            ImGui.SetCursorPos(cellCursor);
+            DrawCell(columns[0], row, $"{id}:cell:0");
+        }
 
         for (var index = 1; index < columns.Count; index++)
         {
-            ImGui.TableNextColumn();
-            DrawCell(columns[index], row, $"{id}:cell:{index}");
+            if (ImGui.TableNextColumn())
+                DrawCell(columns[index], row, $"{id}:cell:{index}");
         }
         return clicked;
+    }
+
+    public unsafe int DrawClippedRows(
+        IReadOnlyList<TRow> rows,
+        Action<TRow, int> drawRow,
+        float rowHeight = -1f)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        ArgumentNullException.ThrowIfNull(drawRow);
+        if (rows.Count == 0)
+            return 0;
+
+        var rendered = 0;
+        var clipper = ImGui.ImGuiListClipper();
+        try
+        {
+            clipper.Begin(rows.Count, rowHeight);
+            while (clipper.Step())
+            {
+                for (var index = clipper.DisplayStart; index < clipper.DisplayEnd; index++)
+                {
+                    drawRow(rows[index], index);
+                    rendered++;
+                }
+            }
+        }
+        finally
+        {
+            clipper.Destroy();
+        }
+
+        return rendered;
     }
 
     private void DrawCells(TRow row, string? id)
     {
         for (var index = 0; index < columns.Count; index++)
         {
-            ImGui.TableNextColumn();
-            DrawCell(columns[index], row, id is null ? null : $"{id}:cell:{index}");
+            if (ImGui.TableNextColumn())
+                DrawCell(columns[index], row, id is null ? null : $"{id}:cell:{index}");
         }
     }
 
@@ -242,22 +284,49 @@ public sealed class DalamudTableProjection<TRow>
             ImGui.TextUnformatted(text);
     }
 
+    public IReadOnlyList<TRow> Apply(IEnumerable<TRow> rows)
+    {
+        unsafe
+        {
+            return Apply(rows, ImGuiTableSortSpecsPtr.Null);
+        }
+    }
+
     public unsafe IReadOnlyList<TRow> Apply(IEnumerable<TRow> rows, ImGuiTableSortSpecsPtr sortSpecs)
     {
+        ArgumentNullException.ThrowIfNull(rows);
+        var hasSort = sortSpecs.Handle != null && sortSpecs.SpecsCount > 0;
+        var sortColumn = hasSort ? (int)sortSpecs.Specs.ColumnIndex : -1;
+        var sortDirection = hasSort ? sortSpecs.Specs.SortDirection : ImGuiSortDirection.None;
+        if (ReferenceEquals(rows, appliedSource) &&
+            sortColumn == appliedSortColumn &&
+            sortDirection == appliedSortDirection &&
+            filters.SequenceEqual(appliedFilters, StringComparer.Ordinal))
+        {
+            if (sortSpecs.Handle != null)
+                sortSpecs.SpecsDirty = false;
+            return appliedRows;
+        }
+
         var filtered = rows.Where(MatchesAllFilters).ToArray();
-        if (sortSpecs.Handle == null || sortSpecs.SpecsCount == 0)
-            return filtered;
+        IReadOnlyList<TRow> result = filtered;
+        if (sortColumn >= 0 && sortColumn < columns.Count)
+        {
+            var key = columns[sortColumn].SortKey ?? (row => columns[sortColumn].Text(row));
+            result = sortDirection == ImGuiSortDirection.Descending
+                ? filtered.OrderByDescending(row => key(row)).ToArray()
+                : filtered.OrderBy(row => key(row)).ToArray();
+        }
 
-        var spec = sortSpecs.Specs;
-        var columnIndex = (int)spec.ColumnIndex;
-        if (columnIndex < 0 || columnIndex >= columns.Count)
-            return filtered;
-
-        var key = columns[columnIndex].SortKey ?? (row => columns[columnIndex].Text(row));
-        var sorted = spec.SortDirection == ImGuiSortDirection.Descending
-            ? filtered.OrderByDescending(row => key(row))
-            : filtered.OrderBy(row => key(row));
-        return sorted.ToArray();
+        appliedSource = rows;
+        appliedRows = result;
+        appliedFilters = [.. filters];
+        appliedSortColumn = sortColumn;
+        appliedSortDirection = sortDirection;
+        ApplyCount++;
+        if (sortSpecs.Handle != null)
+            sortSpecs.SpecsDirty = false;
+        return result;
     }
 
     private bool MatchesAllFilters(TRow row)

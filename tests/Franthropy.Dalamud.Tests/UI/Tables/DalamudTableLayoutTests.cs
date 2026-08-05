@@ -37,4 +37,26 @@ public sealed class DalamudTableLayoutTests
             expected,
             DalamudTableSelectionRenderer.ResolveBackground(selected, hovered, active));
     }
+
+    [Fact]
+    public void Projection_is_reused_until_its_source_identity_changes()
+    {
+        var table = new DalamudTableProjection<int>(
+        [
+            new("Value", 80f, value => value.ToString(), value => value),
+        ]);
+        int[] rows = [3, 1, 2];
+
+        var first = table.Apply(rows);
+        var second = table.Apply(rows);
+
+        Assert.Same(first, second);
+        Assert.Equal(1, table.ApplyCount);
+
+        var replacement = rows.ToArray();
+        var third = table.Apply(replacement);
+
+        Assert.NotSame(first, third);
+        Assert.Equal(2, table.ApplyCount);
+    }
 }
