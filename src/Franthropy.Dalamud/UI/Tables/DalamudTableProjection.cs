@@ -1,4 +1,6 @@
 using System.Numerics;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using Dalamud.Bindings.ImGui;
 
 namespace Franthropy.Dalamud.UI.Tables;
@@ -52,6 +54,7 @@ public readonly record struct DalamudTableLayout(
 public sealed class DalamudTableProjection<TRow>
 {
     private readonly IReadOnlyList<DalamudTableColumn<TRow>> columns;
+    private readonly DalamudTableSelection<TRow> selection;
     private readonly string[] filters;
     private IEnumerable<TRow>? appliedSource;
     private IReadOnlyList<TRow> appliedRows = [];
@@ -59,17 +62,21 @@ public sealed class DalamudTableProjection<TRow>
     private int appliedSortColumn = -1;
     private ImGuiSortDirection appliedSortDirection = ImGuiSortDirection.None;
 
-    public DalamudTableProjection(IReadOnlyList<DalamudTableColumn<TRow>> columns)
+    public DalamudTableProjection(
+        IReadOnlyList<DalamudTableColumn<TRow>> columns,
+        DalamudTableSelection<TRow>? selection = null)
     {
         if (columns.Count == 0)
             throw new ArgumentException("A table projection requires at least one column.", nameof(columns));
         this.columns = columns;
+        this.selection = selection ?? DalamudTableSelection<TRow>.None;
         filters = new string[columns.Count];
         Array.Fill(filters, string.Empty);
     }
 
     public int ColumnCount => columns.Count;
     public int ApplyCount { get; private set; }
+    public DalamudTableSelectionMode SelectionMode => selection.Mode;
 
     public IReadOnlyList<string> Filters => filters;
 
@@ -90,7 +97,12 @@ public sealed class DalamudTableProjection<TRow>
         return true;
     }
 
-    public void End() => ImGui.EndTable();
+    public void End()
+    {
+        if (selection.IsDragging && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
+            selection.EndDrag();
+        ImGui.EndTable();
+    }
 
     public void DrawFilterRow()
     {
@@ -104,12 +116,15 @@ public sealed class DalamudTableProjection<TRow>
         }
     }
 
+    [Obsolete("DrawRow bypasses table-level selection. Configure DalamudTableSelection and use DrawSaneRow.")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public void DrawRow(
         TRow row,
         Vector4? background = null,
         float minimumHeight = 0f,
         string? id = null)
     {
+        DalamudTableLegacyUsage.Warn(nameof(DrawRow), Assembly.GetCallingAssembly());
         ImGui.TableNextRow(ImGuiTableRowFlags.None, minimumHeight);
         if (background is { } rowBackground)
         {
@@ -118,6 +133,68 @@ public sealed class DalamudTableProjection<TRow>
                 ImGui.GetColorU32(rowBackground));
         }
         DrawCells(row, id);
+    }
+
+    public bool DrawSaneRow(
+        IReadOnlyList<TRow> orderedRows,
+        int rowIndex,
+        string id,
+        Vector4? background = null,
+        float minimumHeight = 0f,
+        bool selectable = true,
+        bool enabled = true)
+    {
+        ArgumentNullException.ThrowIfNull(orderedRows);
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        if ((uint)rowIndex >= (uint)orderedRows.Count)
+            throw new ArgumentOutOfRangeException(nameof(rowIndex));
+        var row = orderedRows[rowIndex];
+
+        ImGui.TableNextRow(ImGuiTableRowFlags.None, minimumHeight);
+        if (background is { } rowBackground)
+        {
+            ImGui.TableSetBgColor(
+                ImGuiTableBgTarget.RowBg0,
+                ImGui.GetColorU32(rowBackground));
+        }
+
+        var activated = false;
+        var usesSelection = selectable && selection.Mode != DalamudTableSelectionMode.None;
+        if (ImGui.TableNextColumn())
+        {
+            if (usesSelection)
+            {
+                var cellCursor = ImGui.GetCursorPos();
+                var interaction = DalamudTableSelectionRenderer.DrawRow(
+                    id,
+                    selection.IsSelected(row),
+                    new Vector2(0, Math.Max(minimumHeight, ImGui.GetTextLineHeightWithSpacing())),
+                    enabled);
+                activated = interaction.Activated;
+                if (interaction.Activated)
+                {
+                    var io = ImGui.GetIO();
+                    selection.ApplyClick(orderedRows, rowIndex, io.KeyCtrl, io.KeyShift);
+                }
+                if (enabled &&
+                    selection.IsDragging &&
+                    interaction.Hovered &&
+                    ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+                {
+                    selection.ApplyDrag(orderedRows, rowIndex);
+                }
+                ImGui.SetCursorPos(cellCursor);
+            }
+
+            DrawCell(columns[0], row, $"{id}:cell:0");
+        }
+
+        for (var index = 1; index < columns.Count; index++)
+        {
+            if (ImGui.TableNextColumn())
+                DrawCell(columns[index], row, $"{id}:cell:{index}");
+        }
+        return activated;
     }
 
     public void DrawMessageRow(
@@ -143,6 +220,8 @@ public sealed class DalamudTableProjection<TRow>
         }
     }
 
+    [Obsolete("DrawSelectableRow duplicates row behavior. Configure DalamudTableSelection and use DrawSaneRow.")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public bool DrawSelectableRow<TKey>(
         TRow row,
         TableSelectionModel<TKey> selection,
@@ -154,6 +233,7 @@ public sealed class DalamudTableProjection<TRow>
         bool enabled = true)
         where TKey : notnull
     {
+        DalamudTableLegacyUsage.Warn(nameof(DrawSelectableRow), Assembly.GetCallingAssembly());
         ImGui.TableNextRow(ImGuiTableRowFlags.None, minimumHeight);
         if (background is { } rowBackground)
         {
