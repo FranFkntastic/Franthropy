@@ -436,7 +436,9 @@ public sealed class SqliteObservationStore : IObservationStore
         {
             DataSource = options.DatabasePath,
             Mode = readOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWriteCreate,
-            Cache = readOnly ? SqliteCacheMode.Private : SqliteCacheMode.Shared,
+            // WAL provides cross-connection concurrency. A named shared page cache allows an
+            // older read-only participant to contaminate a writer with SQLITE_READONLY.
+            Cache = SqliteCacheMode.Private,
             Pooling = pooling,
             DefaultTimeout = Math.Max(1, (int)Math.Ceiling(options.BusyTimeout.TotalSeconds)),
         };

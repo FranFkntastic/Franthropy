@@ -59,7 +59,10 @@ public static class ObservationDatabaseProbe
             {
                 DataSource = path,
                 Mode = SqliteOpenMode.ReadOnly,
-                Cache = SqliteCacheMode.Shared,
+                // A read-only shared cache can survive the probe connection and cause the
+                // elected collector's subsequent writer connection to inherit read-only state.
+                // The probe is diagnostic and must never participate in the writer's cache.
+                Cache = SqliteCacheMode.Private,
                 Pooling = false,
                 DefaultTimeout = Math.Max(1, (int)Math.Ceiling(options.BusyTimeout.TotalSeconds)),
             };
