@@ -41,7 +41,7 @@ public static class ObservationDatabaseProbe
     {
         ArgumentNullException.ThrowIfNull(options);
         var path = Path.GetFullPath(options.DatabasePath);
-        if (!File.Exists(path))
+        if (!File.Exists(path) || new FileInfo(path).Length == 0)
         {
             return new ObservationDatabaseProbeResult(
                 ObservationDatabaseProbeStatus.Missing,
