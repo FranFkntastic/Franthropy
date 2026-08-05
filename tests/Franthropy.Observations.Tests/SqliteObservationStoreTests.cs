@@ -443,6 +443,56 @@ public sealed class SqliteObservationStoreTests
     }
 
     [Fact]
+    public async Task Read_only_shared_cache_cannot_poison_the_following_writer_connection()
+    {
+        var root = CreateTemporaryDirectory();
+        var path = Path.Combine(root, "observations.db");
+        var owner = new ObservationOwner(100, 74);
+        var scope = new ObservationScope(owner, ObservationSubject.Retainer(200, owner), ObservationContainerKind.RetainerMarketListings);
+        try
+        {
+            var created = await SqliteObservationStore.OpenAsync(new ObservationStoreOptions { DatabasePath = path });
+            Assert.True(created.IsReady, created.Message);
+            var initial = await created.Store!.WriteAsync(ObservationForInstance(
+                scope,
+                "initial-writer",
+                1,
+                new DateTimeOffset(2026, 8, 5, 10, 0, 0, TimeSpan.Zero)));
+            Assert.Equal(ObservationWriteStatus.AcceptedChanged, initial.Status);
+            await created.Store.DisposeAsync();
+            SqliteConnection.ClearAllPools();
+
+            var legacyReaderBuilder = new SqliteConnectionStringBuilder
+            {
+                DataSource = path,
+                Mode = SqliteOpenMode.ReadOnly,
+                Cache = SqliteCacheMode.Shared,
+                Pooling = false,
+            };
+            await using var legacyReader = new SqliteConnection(legacyReaderBuilder.ToString());
+            await legacyReader.OpenAsync();
+
+            var probe = await ObservationDatabaseProbe.ReadAsync(new ObservationStoreOptions { DatabasePath = path });
+            Assert.Equal(ObservationDatabaseProbeStatus.Compatible, probe.Status);
+
+            var reopened = await SqliteObservationStore.OpenAsync(new ObservationStoreOptions { DatabasePath = path });
+            Assert.True(reopened.IsReady, reopened.Message);
+            var committed = await reopened.Store!.WriteAsync(ObservationForInstance(
+                scope,
+                "following-writer",
+                2,
+                new DateTimeOffset(2026, 8, 5, 10, 0, 1, TimeSpan.Zero)));
+            Assert.Equal(ObservationWriteStatus.AcceptedConfirmed, committed.Status);
+            await reopened.Store.DisposeAsync();
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Empty_database_left_by_an_interrupted_open_is_recreated()
     {
         var root = CreateTemporaryDirectory();
