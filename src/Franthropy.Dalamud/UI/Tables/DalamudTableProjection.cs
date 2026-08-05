@@ -90,7 +90,8 @@ public sealed class DalamudTableProjection<TRow>
     {
         for (var index = 0; index < columns.Count; index++)
         {
-            ImGui.TableNextColumn();
+            if (!ImGui.TableNextColumn())
+                continue;
             var current = filters[index];
             if (ImGui.InputTextWithHint($"##filter{index}", columns[index].Label, ref current, 64))
                 filters[index] = current;
@@ -126,8 +127,8 @@ public sealed class DalamudTableProjection<TRow>
         ImGui.TableNextRow(ImGuiTableRowFlags.None, minimumHeight);
         for (var index = 0; index < columns.Count; index++)
         {
-            ImGui.TableNextColumn();
-            if (index != columnIndex)
+            var shouldDraw = ImGui.TableNextColumn();
+            if (!shouldDraw || index != columnIndex)
                 continue;
             if (textColor is { } color)
                 ImGui.TextColored(color, message);
@@ -155,33 +156,68 @@ public sealed class DalamudTableProjection<TRow>
                 ImGui.GetColorU32(rowBackground));
         }
 
-        ImGui.TableNextColumn();
-        var cellCursor = ImGui.GetCursorPos();
-        DalamudTableSelectionRenderer.DrawRow(
-            selection,
-            orderedKeys,
-            rowIndex,
-            id,
-            new Vector2(0, Math.Max(minimumHeight, ImGui.GetTextLineHeightWithSpacing())),
-            enabled);
-        var clicked = enabled && ImGui.IsItemClicked(ImGuiMouseButton.Left);
-        ImGui.SetCursorPos(cellCursor);
-        DrawCell(columns[0], row, $"{id}:cell:0");
+        var clicked = false;
+        if (ImGui.TableNextColumn())
+        {
+            var cellCursor = ImGui.GetCursorPos();
+            DalamudTableSelectionRenderer.DrawRow(
+                selection,
+                orderedKeys,
+                rowIndex,
+                id,
+                new Vector2(0, Math.Max(minimumHeight, ImGui.GetTextLineHeightWithSpacing())),
+                enabled);
+            clicked = enabled && ImGui.IsItemClicked(ImGuiMouseButton.Left);
+            ImGui.SetCursorPos(cellCursor);
+            DrawCell(columns[0], row, $"{id}:cell:0");
+        }
 
         for (var index = 1; index < columns.Count; index++)
         {
-            ImGui.TableNextColumn();
-            DrawCell(columns[index], row, $"{id}:cell:{index}");
+            if (ImGui.TableNextColumn())
+                DrawCell(columns[index], row, $"{id}:cell:{index}");
         }
         return clicked;
+    }
+
+    public unsafe int DrawClippedRows(
+        IReadOnlyList<TRow> rows,
+        Action<TRow, int> drawRow,
+        float rowHeight = -1f)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        ArgumentNullException.ThrowIfNull(drawRow);
+        if (rows.Count == 0)
+            return 0;
+
+        var rendered = 0;
+        var clipper = ImGui.ImGuiListClipper();
+        try
+        {
+            clipper.Begin(rows.Count, rowHeight);
+            while (clipper.Step())
+            {
+                for (var index = clipper.DisplayStart; index < clipper.DisplayEnd; index++)
+                {
+                    drawRow(rows[index], index);
+                    rendered++;
+                }
+            }
+        }
+        finally
+        {
+            clipper.Destroy();
+        }
+
+        return rendered;
     }
 
     private void DrawCells(TRow row, string? id)
     {
         for (var index = 0; index < columns.Count; index++)
         {
-            ImGui.TableNextColumn();
-            DrawCell(columns[index], row, id is null ? null : $"{id}:cell:{index}");
+            if (ImGui.TableNextColumn())
+                DrawCell(columns[index], row, id is null ? null : $"{id}:cell:{index}");
         }
     }
 
