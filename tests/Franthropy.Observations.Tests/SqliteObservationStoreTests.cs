@@ -443,6 +443,31 @@ public sealed class SqliteObservationStoreTests
     }
 
     [Fact]
+    public async Task Empty_database_left_by_an_interrupted_open_is_recreated()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var path = Path.Combine(root, "observations.db");
+            await File.WriteAllBytesAsync(path, []);
+
+            var probe = await ObservationDatabaseProbe.ReadAsync(new ObservationStoreOptions { DatabasePath = path });
+            var open = await SqliteObservationStore.OpenAsync(new ObservationStoreOptions { DatabasePath = path });
+            Assert.True(open.IsReady, open.Message);
+            await open.Store!.DisposeAsync();
+            var repaired = await ObservationDatabaseProbe.ReadAsync(new ObservationStoreOptions { DatabasePath = path });
+
+            Assert.Equal(ObservationDatabaseProbeStatus.Missing, probe.Status);
+            Assert.Equal(ObservationDatabaseProbeStatus.Compatible, repaired.Status);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Read_only_open_never_creates_or_migrates_state()
     {
         var root = CreateTemporaryDirectory();
