@@ -1,0 +1,16 @@
+The sources in this directory were absorbed verbatim from Miosuke
+(https://github.com/Elypha/Miosuke), copyright Elypha, licensed
+GPL-3.0-or-later, at upstream commit ebc47e2e746dec28778c2e04336a89cef82d56ac
+(2026-05-01). They keep their original Miosuke.* namespaces as a quarantine
+marker: consumers bind to them unchanged while types are migrated into
+idiomatic Franthropy primitives piecemeal.
+
+Deliberately not absorbed:
+
+- Miosuke/GlobalUsings.cs - assembly-wide usings would leak into
+  Franthropy.Dalamud; each absorbed file carries its own using directives.
+- HostSystem/WindowFunctions.cs - a verbatim copy of
+  ECommons/Interop/WindowFunctions.cs (per its own header); the original is
+  already available through Franthropy.Dalamud's ECommons package reference.
+- Miosuke.csproj - the submodule and project reference are replaced by this
+  in-tree copy.
