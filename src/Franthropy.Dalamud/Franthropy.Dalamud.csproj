@@ -126,6 +126,16 @@
     <Compile Remove="Automation\Vendors\DalamudOrdinaryGilShop.cs" />
     <Compile Remove="Automation\MarketBoard\DalamudMarketBoardListingObserver.cs" />
     <Compile Remove="Observations\DalamudSharedObservationHost.cs" />
+    <Compile Remove="Legacy\Miosuke\Miosuke.cs" />
+    <Compile Remove="Legacy\Miosuke\Service.cs" />
+    <Compile Remove="Legacy\Miosuke\Action\Hotkey.cs" />
+    <Compile Remove="Legacy\Miosuke\Configuration\MioConfig.cs" />
+    <Compile Remove="Legacy\Miosuke\Extensions\General.cs" />
+    <Compile Remove="Legacy\Miosuke\Messages\Chat.cs" />
+    <Compile Remove="Legacy\Miosuke\Messages\Notification.cs" />
+    <Compile Remove="Legacy\Miosuke\Messages\Toast.cs" />
+    <Compile Remove="Legacy\Miosuke\UIHelper\HotkeyUI.cs" />
+    <Compile Remove="Legacy\Miosuke\UIHelper\UI.cs" />
   </ItemGroup>
 
 </Project>
