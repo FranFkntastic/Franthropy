@@ -14,3 +14,9 @@ Deliberately not absorbed:
   already available through Franthropy.Dalamud's ECommons package reference.
 - Miosuke.csproj - the submodule and project reference are replaced by this
   in-tree copy.
+
+Retired after absorption:
+
+- Configuration/MioConfig.cs - CMB migrated to
+  Franthropy.Dalamud/Persistence/JsonConfigStore.cs, which keeps the
+  MioConfig serialization shape and migration behavior.
