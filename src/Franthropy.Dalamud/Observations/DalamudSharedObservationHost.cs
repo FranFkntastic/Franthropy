@@ -27,7 +27,7 @@ public sealed record DalamudSharedObservationHostOptions
 
 public sealed class DalamudSharedObservationHost : IDisposable
 {
-    public const string ApprovedGameBuild = "2026.07.16.0001.0000";
+    public const string ApprovedGameBuild = "2026.08.05.0000.0000";
     private readonly DalamudSharedObservationHostOptions options;
     private readonly SharedObservationPaths paths;
     private readonly ObservationStoreOptions storeOptions;

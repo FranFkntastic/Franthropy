@@ -315,7 +315,7 @@ public sealed class RetainerAutomationSessionTests
     public async Task PriceUpdate_RejectsMissingObservedPriceBeforeTouchingFrameworkState()
     {
         var session = CreateSession(
-            "2026.07.16.0001.0000",
+            "2026.08.05.0000.0000",
             (method, _) => throw new InvalidOperationException($"Unexpected dependency call: {method.Name}."));
 
         var result = await session.UpdateSellingListingPriceAsync(
@@ -398,7 +398,7 @@ public sealed class RetainerAutomationSessionTests
             CreateProxy<IObjectTable>(unused),
             CreateProxy<ITargetManager>(unused),
             CreateProxy<ISigScanner>(unused),
-            "2026.07.16.0001.0000");
+            "2026.08.05.0000.0000");
 
         var open = session.OpenInventoryAsync(cancellation.Token);
 
