@@ -14,7 +14,7 @@ namespace Franthropy.Dalamud.Diagnostics;
 public sealed unsafe class DalamudRenderControl : IDisposable
 {
     private static readonly IntPtr ActiveRenderFlagOffset = new(0x38358);
-    private const string ApprovedGameVersion = "2026.07.16.0001.0000";
+    private const string ApprovedGameVersion = "2026.08.05.0000.0000";
     private const string PatchContractId = "franthropy.render-manager-active-flag";
 
     private readonly IPluginLog log;
