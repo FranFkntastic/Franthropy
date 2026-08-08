@@ -279,44 +279,38 @@ public sealed class DalamudSharedObservationHost : IDisposable
             try
             {
                 var flattened = events.SelectMany(FlattenEvent).ToArray();
-                foreach (var delta in CaptureInventoryDeltas(flattened))
-                    Enqueue(delta);
-                if (flattened.Any(change => change.Item.ContainerType == GameInventoryType.RetainerMarket))
-                    Enqueue(CaptureRetainerListings());
+                var player = CoalesceUpdates(flattened, PlayerContainers);
+                var saddlebag = CoalesceUpdates(flattened, SaddlebagContainers);
+                var retainer = CoalesceUpdates(flattened, RetainerContainers);
+                var hasRetainerListings = flattened.Any(change => change.Item.ContainerType == GameInventoryType.RetainerMarket);
+                var owner = CurrentOwnerOrDefault();
+                var retainerId = owner is null || (!hasRetainerListings && retainer.Count == 0)
+                    ? null
+                    : CurrentRetainerIdOrDefault();
+                var plan = SharedObservationCapturePlan.Create(
+                    player.Count > 0,
+                    saddlebag.Count > 0,
+                    retainer.Count > 0,
+                    hasRetainerListings,
+                    owner,
+                    retainerId);
+
+                plan.Execute(
+                    capturePlayerInventory: () => Enqueue(Delta(
+                        new ObservationScope(owner!, ObservationSubject.Character(owner!), ObservationContainerKind.PlayerInventory),
+                        player)),
+                    captureSaddlebag: () => Enqueue(Delta(
+                        new ObservationScope(owner!, ObservationSubject.Character(owner!), ObservationContainerKind.Saddlebag),
+                        saddlebag)),
+                    captureRetainerInventory: () => Enqueue(Delta(
+                        new ObservationScope(owner!, ObservationSubject.Retainer(retainerId!.Value, owner!), ObservationContainerKind.RetainerInventory),
+                        retainer)),
+                    captureRetainerListings: () => Enqueue(CaptureRetainerListings(owner!, retainerId!.Value)),
+                    reportFailure: ex => diagnostic?.Invoke("A shared inventory observation event could not be captured.", ex));
             }
             catch (Exception ex)
             {
                 diagnostic?.Invoke("A shared inventory observation event could not be captured.", ex);
-            }
-        }
-
-        private IEnumerable<InventoryObservationDelta> CaptureInventoryDeltas(IReadOnlyList<InventoryEventArgs> events)
-        {
-            var player = CoalesceUpdates(events, PlayerContainers);
-            if (player.Count > 0)
-            {
-                var owner = CurrentOwner();
-                yield return Delta(
-                    new ObservationScope(owner, ObservationSubject.Character(owner), ObservationContainerKind.PlayerInventory),
-                    player);
-            }
-
-            var saddlebag = CoalesceUpdates(events, SaddlebagContainers);
-            if (saddlebag.Count > 0)
-            {
-                var owner = CurrentOwner();
-                yield return Delta(
-                    new ObservationScope(owner, ObservationSubject.Character(owner), ObservationContainerKind.Saddlebag),
-                    saddlebag);
-            }
-
-            var retainer = CoalesceUpdates(events, RetainerContainers);
-            if (retainer.Count > 0)
-            {
-                var (owner, retainerId) = CurrentRetainer();
-                yield return Delta(
-                    new ObservationScope(owner, ObservationSubject.Retainer(retainerId, owner), ObservationContainerKind.RetainerInventory),
-                    retainer);
             }
         }
 
@@ -380,8 +374,15 @@ public sealed class DalamudSharedObservationHost : IDisposable
         {
             try
             {
-                Enqueue(CaptureRetainerInventory());
-                Enqueue(CaptureRetainerListings());
+                var owner = CurrentOwnerOrDefault();
+                var retainerId = owner is null ? null : CurrentRetainerIdOrDefault();
+                var plan = SharedObservationCapturePlan.Create(false, false, true, true, owner, retainerId);
+                plan.Execute(
+                    capturePlayerInventory: static () => { },
+                    captureSaddlebag: static () => { },
+                    captureRetainerInventory: () => Enqueue(CaptureRetainerInventory(owner!, retainerId!.Value)),
+                    captureRetainerListings: () => Enqueue(CaptureRetainerListings(owner!, retainerId!.Value)),
+                    reportFailure: ex => diagnostic?.Invoke("The closing retainer observation could not be captured.", ex));
             }
             catch (Exception ex)
             {
@@ -452,9 +453,8 @@ public sealed class DalamudSharedObservationHost : IDisposable
                 ObservationPayload.Create(ObservationPayloadContracts.RetainerRoster, ObservationPayloadContracts.Version, new RetainerRosterPayload(rows)));
         }
 
-        private ObservationEnvelope CaptureRetainerInventory()
+        private ObservationEnvelope CaptureRetainerInventory(ObservationOwner owner, ulong retainerId)
         {
-            var (owner, retainerId) = CurrentRetainer();
             var observed = new List<int>();
             var rows = new List<InventoryItemObservation>();
             foreach (var type in RetainerContainers)
@@ -480,9 +480,8 @@ public sealed class DalamudSharedObservationHost : IDisposable
                     new InventoryObservationPayload(RetainerContainers.Select(type => (int)type).ToArray(), observed, rows)));
         }
 
-        private unsafe ObservationEnvelope CaptureRetainerListings()
+        private unsafe ObservationEnvelope CaptureRetainerListings(ObservationOwner owner, ulong retainerId)
         {
-            var (owner, retainerId) = CurrentRetainer();
             var items = gameInventory.GetInventoryItems(GameInventoryType.RetainerMarket);
             var manager = InventoryManager.Instance();
             var complete = items.Length > 0 && manager is not null;
@@ -542,19 +541,26 @@ public sealed class DalamudSharedObservationHost : IDisposable
 
         private ObservationOwner CurrentOwner()
         {
-            if (playerState.ContentId == 0 || !playerState.HomeWorld.IsValid)
+            var owner = CurrentOwnerOrDefault();
+            if (owner is null)
                 throw new InvalidOperationException("The current character identity is not stable.");
+            return owner;
+        }
+
+        private ObservationOwner? CurrentOwnerOrDefault()
+        {
+            if (playerState.ContentId == 0 || !playerState.HomeWorld.IsValid)
+                return null;
             return new ObservationOwner(playerState.ContentId, playerState.HomeWorld.Value.RowId);
         }
 
-        private unsafe (ObservationOwner Owner, ulong RetainerId) CurrentRetainer()
+        private static unsafe ulong? CurrentRetainerIdOrDefault()
         {
-            var owner = CurrentOwner();
             var manager = RetainerManager.Instance();
             var retainer = manager is null ? null : manager->GetActiveRetainer();
             if (retainer is null || retainer->RetainerId == 0)
-                throw new InvalidOperationException("No stable active retainer identity is available.");
-            return (owner, retainer->RetainerId);
+                return null;
+            return retainer->RetainerId;
         }
 
         private void Enqueue(ObservationEnvelope observation)
