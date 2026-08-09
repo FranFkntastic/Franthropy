@@ -176,16 +176,16 @@ public sealed class GilVendorBuyCoordinator : IDisposable
 
     private void TickRefreshPreconditions(GilVendorBuyRunSnapshot run)
     {
-        var quantities = RemainingPurchaseQuantities(run);
-        if (quantities.Count == 0)
-        {
-            Complete("Vendor buy completed.");
-            return;
-        }
         var snapshot = runtime.CaptureInventory(run.Lines.Select(line => line.ItemId).ToArray());
         if (!snapshot.IsComplete)
         {
             run.Message = snapshot.Message;
+            return;
+        }
+        var quantities = RemainingPurchaseQuantities(run, snapshot.ItemCounts);
+        if (quantities.Count == 0)
+        {
+            Complete("Vendor buy completed.");
             return;
         }
         if (snapshot.Gil is null)
@@ -193,7 +193,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             Pause("Player gil is temporarily unavailable; vendor buy will resume after it can be observed.");
             return;
         }
-        var remainingGil = RemainingApprovedGil(run);
+        var remainingGil = RemainingApprovedGil(run, snapshot.ItemCounts);
         if (snapshot.Gil.Value < remainingGil)
         {
             Fail(GilVendorBuyPhase.Failed, $"Remaining purchases require up to {remainingGil:N0} gil, but only {snapshot.Gil.Value:N0} gil is available.");
@@ -205,7 +205,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             return;
         }
 
-        NormalizeCurrentStop(run);
+        NormalizeCurrentStop(run, snapshot.ItemCounts);
         if (run.StopIndex >= run.Stops.Count)
         {
             Complete("Vendor buy completed.");
@@ -293,10 +293,11 @@ public sealed class GilVendorBuyCoordinator : IDisposable
                 Pause(snapshot.Message);
                 return;
             }
-            var remaining = RemainingForLine(line);
+            var observedQuantity = snapshot.ItemCounts.GetValueOrDefault(line.ItemId);
+            var remaining = RemainingForLine(line, observedQuantity);
             if (remaining <= 0)
             {
-                line.Status = "Ceiling reached";
+                line.Status = observedQuantity >= line.ApprovedQuantity ? "Ready" : "Ceiling reached";
                 run.LineIndex++;
                 continue;
             }
@@ -544,23 +545,41 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         return new(replacements, selections, message);
     }
 
-    private static Dictionary<uint, int> RemainingPurchaseQuantities(GilVendorBuyRunSnapshot run) =>
-        run.Lines.Select(line => new { line.ItemId, Remaining = RemainingForLine(line) })
+    private static Dictionary<uint, int> RemainingPurchaseQuantities(
+        GilVendorBuyRunSnapshot run,
+        IReadOnlyDictionary<uint, int> observedCounts) =>
+        run.Lines.Select(line => new
+            {
+                line.ItemId,
+                Remaining = RemainingForLine(line, observedCounts.GetValueOrDefault(line.ItemId)),
+            })
             .Where(line => line.Remaining > 0)
             .ToDictionary(line => line.ItemId, line => line.Remaining);
 
-    private static ulong RemainingApprovedGil(GilVendorBuyRunSnapshot run) =>
+    private static ulong RemainingApprovedGil(
+        GilVendorBuyRunSnapshot run,
+        IReadOnlyDictionary<uint, int> observedCounts) =>
         Math.Min(
             run.MaximumApprovedGil - Math.Min(run.MaximumApprovedGil, run.Receipts.Aggregate(0UL, (sum, receipt) => checked(sum + receipt.SpentGil))),
-            run.Lines.Aggregate(0UL, (sum, line) => checked(sum + ((ulong)RemainingForLine(line) * line.UnitPriceGil))));
+            run.Lines.Aggregate(0UL, (sum, line) => checked(sum +
+                ((ulong)RemainingForLine(line, observedCounts.GetValueOrDefault(line.ItemId)) * line.UnitPriceGil))));
 
     private static int RemainingForLine(GilVendorBuyLineSnapshot line) =>
         line.VendorUnavailable ? 0 : Math.Max(0, line.ApprovedQuantity - line.PurchasedQuantity);
 
-    private static void NormalizeCurrentStop(GilVendorBuyRunSnapshot run)
+    private static int RemainingForLine(GilVendorBuyLineSnapshot line, int observedQuantity) =>
+        Math.Min(
+            RemainingForLine(line),
+            Math.Max(0, line.ApprovedQuantity - observedQuantity));
+
+    private static void NormalizeCurrentStop(
+        GilVendorBuyRunSnapshot run,
+        IReadOnlyDictionary<uint, int> observedCounts)
     {
         while (run.StopIndex < run.Stops.Count && run.Stops[run.StopIndex].ItemIds.All(itemId =>
-                   RemainingForLine(run.Lines.First(line => line.ItemId == itemId)) <= 0))
+                   RemainingForLine(
+                       run.Lines.First(line => line.ItemId == itemId),
+                       observedCounts.GetValueOrDefault(itemId)) <= 0))
             run.StopIndex++;
     }
 
