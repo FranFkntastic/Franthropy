@@ -34,6 +34,169 @@ public sealed class GilVendorBuyCoordinatorTests
     }
 
     [Fact]
+    public void Submission_rejection_clears_armed_intent_and_fails_truthfully()
+    {
+        var runtime = new ScriptedRuntime { SubmitSucceeds = false };
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
+
+        TickUntilTerminal(coordinator, 10);
+
+        Assert.Equal(GilVendorBuyPhase.Failed, coordinator.ActiveRun!.Phase);
+        Assert.Null(coordinator.ActiveRun.ArmedPurchase);
+        Assert.Contains("rejected", coordinator.ActiveRun.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(coordinator.ActiveRun.Receipts);
+    }
+
+    [Fact]
+    public void Submission_exception_clears_armed_intent_and_fails_truthfully()
+    {
+        var runtime = new ScriptedRuntime { SubmitException = new InvalidOperationException("submit exploded") };
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
+
+        TickUntilTerminal(coordinator, 10);
+
+        Assert.Equal(GilVendorBuyPhase.Failed, coordinator.ActiveRun!.Phase);
+        Assert.Null(coordinator.ActiveRun.ArmedPurchase);
+        Assert.Contains("submit exploded", coordinator.ActiveRun.Message);
+        Assert.Empty(coordinator.ActiveRun.Receipts);
+    }
+
+    [Fact]
+    public void Second_no_mutation_timeout_fails_without_another_retry()
+    {
+        var now = new DateTimeOffset(2026, 8, 8, 0, 0, 0, TimeSpan.Zero);
+        var runtime = new ScriptedRuntime { MutateItemOnSubmit = false, MutateGilOnSubmit = false };
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime, () => now);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
+        TickUntilPhase(coordinator, GilVendorBuyPhase.VerifyReceipt);
+
+        now += TimeSpan.FromSeconds(4);
+        coordinator.Tick(Context);
+        Assert.Equal(GilVendorBuyPhase.PurchaseLine, coordinator.ActiveRun!.Phase);
+        coordinator.Tick(Context);
+        Assert.Equal(2, runtime.SubmitCalls);
+        now += TimeSpan.FromSeconds(4);
+        coordinator.Tick(Context);
+
+        Assert.Equal(GilVendorBuyPhase.Failed, coordinator.ActiveRun.Phase);
+        Assert.Equal(2, runtime.SubmitCalls);
+        Assert.Empty(coordinator.ActiveRun.Receipts);
+    }
+
+    [Fact]
+    public void Indeterminate_evidence_stops_without_retry()
+    {
+        var runtime = new ScriptedRuntime { MutateGilOnSubmit = false };
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
+
+        TickUntilTerminal(coordinator, 10);
+
+        Assert.Equal(GilVendorBuyPhase.Indeterminate, coordinator.ActiveRun!.Phase);
+        Assert.Equal(1, runtime.SubmitCalls);
+        Assert.Empty(coordinator.ActiveRun.Receipts);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Shop_validation_failure_fails_before_purchase(bool readFails)
+    {
+        var runtime = new ScriptedRuntime();
+        if (readFails)
+            runtime.ShopReadOverride = GilVendorShopReadResult.Fail("ReadFailed", "Shop read failed.");
+        else
+            runtime.ShopRows = [];
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
+
+        TickUntilTerminal(coordinator, 10);
+
+        Assert.Equal(GilVendorBuyPhase.Failed, coordinator.ActiveRun!.Phase);
+        Assert.Equal(1, runtime.ShopReadCalls);
+        Assert.Equal(0, runtime.SubmitCalls);
+    }
+
+    [Fact]
+    public void Capacity_loss_after_start_pauses_before_vendor_mutation()
+    {
+        var runtime = new ScriptedRuntime();
+        runtime.CapacityResults.Enqueue(true);
+        runtime.CapacityResults.Enqueue(false);
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+
+        Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
+        coordinator.Tick(Context);
+
+        Assert.Equal(GilVendorBuyPhase.Paused, coordinator.ActiveRun!.Phase);
+        Assert.Equal(0, runtime.ReachCalls);
+        Assert.Equal(0, runtime.SubmitCalls);
+    }
+
+    [Fact]
+    public void Quantity_above_shop_limit_splits_into_exact_receipts()
+    {
+        var runtime = new ScriptedRuntime();
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 120)], [Stop(100, 1)]), Context, out var error), error);
+
+        TickUntilTerminal(coordinator, 20);
+
+        Assert.Equal([99, 21], coordinator.ActiveRun!.Receipts.Select(receipt => receipt.Quantity));
+        Assert.Equal(
+            1_200UL,
+            coordinator.ActiveRun.Receipts.Aggregate(0UL, (sum, receipt) => sum + receipt.SpentGil));
+        Assert.Equal(2, runtime.SubmitCalls);
+        Assert.Equal(1, runtime.ShopReadCalls);
+        Assert.Equal(1, runtime.ReachCalls);
+    }
+
+    [Fact]
+    public void Pending_evidence_within_timeout_can_later_verify()
+    {
+        var now = new DateTimeOffset(2026, 8, 8, 0, 0, 0, TimeSpan.Zero);
+        var runtime = new ScriptedRuntime { MutateItemOnSubmit = false, MutateGilOnSubmit = false };
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime, () => now);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
+        TickUntilPhase(coordinator, GilVendorBuyPhase.VerifyReceipt);
+
+        coordinator.Tick(Context);
+        Assert.Equal(GilVendorBuyPhase.VerifyReceipt, coordinator.ActiveRun!.Phase);
+        Assert.Empty(coordinator.ActiveRun.Receipts);
+        runtime.Counts[1] = 2;
+        runtime.Gil -= 20;
+        now += TimeSpan.FromSeconds(3);
+        coordinator.Tick(Context);
+
+        Assert.Equal(GilVendorBuyPhase.PurchaseLine, coordinator.ActiveRun.Phase);
+        Assert.Single(coordinator.ActiveRun.Receipts);
+        Assert.Equal(1, runtime.SubmitCalls);
+    }
+
+    [Fact]
+    public void Mid_run_inventory_gain_clamps_next_batch_to_live_need()
+    {
+        var runtime = new ScriptedRuntime();
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 120)], [Stop(100, 1)]), Context, out var error), error);
+        TickUntilPhase(coordinator, GilVendorBuyPhase.VerifyReceipt);
+        coordinator.Tick(Context);
+        Assert.Equal([99], coordinator.ActiveRun!.Receipts.Select(receipt => receipt.Quantity));
+
+        runtime.Counts[1] = 110;
+        coordinator.Tick(Context);
+        coordinator.Tick(Context);
+        TickUntilTerminal(coordinator, 10);
+
+        Assert.Equal(GilVendorBuyPhase.Completed, coordinator.ActiveRun.Phase);
+        Assert.Equal([99, 10], coordinator.ActiveRun.Receipts.Select(receipt => receipt.Quantity));
+        Assert.Equal(109, coordinator.ActiveRun.Lines[0].PurchasedQuantity);
+        Assert.Equal(120, runtime.Counts[1]);
+    }
+
+    [Fact]
     public void Pause_resume_and_context_mismatch_preserve_phase_and_refuse_wrong_context()
     {
         var runtime = new ScriptedRuntime();
@@ -112,7 +275,7 @@ public sealed class GilVendorBuyCoordinatorTests
     public void Stop_with_armed_no_mutation_waits_four_seconds_then_stops_without_receipt()
     {
         var now = new DateTimeOffset(2026, 8, 8, 0, 0, 0, TimeSpan.Zero);
-        var runtime = new ScriptedRuntime { MutateOnSubmit = false };
+        var runtime = new ScriptedRuntime { MutateItemOnSubmit = false, MutateGilOnSubmit = false };
         var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime, () => now);
         Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
         TickUntilPhase(coordinator, GilVendorBuyPhase.VerifyReceipt);
@@ -280,11 +443,17 @@ public sealed class GilVendorBuyCoordinatorTests
     {
         public Dictionary<uint, int> Counts { get; } = [];
         public ulong Gil { get; set; } = 1_000_000;
-        public bool MutateOnSubmit { get; set; } = true;
+        public bool MutateItemOnSubmit { get; set; } = true;
+        public bool MutateGilOnSubmit { get; set; } = true;
+        public bool SubmitSucceeds { get; set; } = true;
+        public Exception? SubmitException { get; set; }
         public int ReachCalls { get; private set; }
         public int ShopReadCalls { get; private set; }
         public int SubmitCalls { get; private set; }
         public Queue<GilVendorReachResult> ReachResults { get; } = [];
+        public Queue<bool> CapacityResults { get; } = [];
+        public IReadOnlyList<GilVendorShopRow> ShopRows { get; set; } = [new(0, 1, 10), new(1, 2, 20)];
+        public GilVendorShopReadResult? ShopReadOverride { get; set; }
         public Action? OnSubmit { get; set; }
 
         public GilVendorInventorySnapshot CaptureInventory(IReadOnlyCollection<uint> itemIds) => new(
@@ -295,8 +464,9 @@ public sealed class GilVendorBuyCoordinatorTests
 
         public bool HasCapacity(IReadOnlyDictionary<uint, int> quantities, out string message)
         {
-            message = "Capacity ready.";
-            return true;
+            var result = CapacityResults.Count == 0 || CapacityResults.Dequeue();
+            message = result ? "Capacity ready." : "Player inventory has no safe capacity.";
+            return result;
         }
 
         public GilVendorReachResult AdvanceToOpenShop(GilVendorOffer offer)
@@ -312,18 +482,24 @@ public sealed class GilVendorBuyCoordinatorTests
         public GilVendorShopReadResult ReadShopRows()
         {
             ShopReadCalls++;
-            return GilVendorShopReadResult.Success([new(0, 1, 10), new(1, 2, 20)]);
+            return ShopReadOverride ?? GilVendorShopReadResult.Success(ShopRows);
         }
 
         public bool TrySubmitPurchase(GilVendorShopRow row, uint quantity, out string error)
         {
             SubmitCalls++;
-            OnSubmit?.Invoke();
-            if (MutateOnSubmit)
+            if (SubmitException is not null)
+                throw SubmitException;
+            if (!SubmitSucceeds)
             {
-                Counts[row.ItemId] = checked(Counts.GetValueOrDefault(row.ItemId) + (int)quantity);
-                Gil -= row.UnitPriceGil * quantity;
+                error = "Purchase submission was rejected.";
+                return false;
             }
+            OnSubmit?.Invoke();
+            if (MutateItemOnSubmit)
+                Counts[row.ItemId] = checked(Counts.GetValueOrDefault(row.ItemId) + (int)quantity);
+            if (MutateGilOnSubmit)
+                Gil -= row.UnitPriceGil * quantity;
             error = string.Empty;
             return true;
         }
