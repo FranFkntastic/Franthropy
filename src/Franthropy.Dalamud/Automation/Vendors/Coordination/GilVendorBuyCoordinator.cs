@@ -120,8 +120,8 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         run.ResumePhase = run.Phase;
         run.Phase = GilVendorBuyPhase.Paused;
         run.Message = message;
-        runtime.EndAutomation();
         Persist();
+        runtime.EndAutomation();
         return true;
     }
 
@@ -162,9 +162,9 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         }
         run.Phase = GilVendorBuyPhase.Stopped;
         run.Message = message;
+        Persist();
         runtime.CloseShop();
         runtime.EndAutomation();
-        Persist();
         return true;
     }
 
@@ -552,9 +552,9 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             return;
         run.Phase = GilVendorBuyPhase.Completed;
         run.Message = message;
+        Persist();
         runtime.CloseShop();
         runtime.EndAutomation();
-        Persist();
     }
 
     private void FinishStopped(GilVendorBuyRunSnapshot run, string message)
@@ -562,9 +562,9 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         run.StopRequested = false;
         run.Phase = GilVendorBuyPhase.Stopped;
         run.Message = message;
+        Persist();
         runtime.CloseShop();
         runtime.EndAutomation();
-        Persist();
     }
 
     private void Fail(GilVendorBuyPhase phase, string message)
@@ -573,9 +573,9 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             return;
         run.Phase = phase;
         run.Message = message;
+        Persist();
         runtime.CloseShop();
         runtime.EndAutomation();
-        Persist();
     }
 
     private void Persist()

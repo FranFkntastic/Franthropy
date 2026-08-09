@@ -40,6 +40,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     private uint? requestedAetheryteId;
     private uint? requestedAethernetId;
     private bool ownsNavigation;
+    private bool automationActive;
 
     public DalamudGilVendorBuyRuntime(
         DalamudGilVendorAccessReader access,
@@ -261,8 +262,28 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     public bool TryConfirmPurchasePrompt() => shop.TryConfirmOwnedPrompt();
     public int ResolveMaximumBatch(uint itemId) => (dataManager.GetExcelSheet<Item>().GetRowOrDefault(itemId)?.StackSize ?? 1) <= 1 ? 1 : 99;
     public void CloseShop() => shop.Close();
-    public void BeginAutomation() => beginAutomation();
-    public void EndAutomation() { StopOwnedNavigation(); endAutomation(); }
+    public void BeginAutomation()
+    {
+        if (automationActive)
+            return;
+        beginAutomation();
+        automationActive = true;
+    }
+
+    public void EndAutomation()
+    {
+        if (!automationActive)
+            return;
+        try
+        {
+            StopOwnedNavigation();
+            endAutomation();
+        }
+        finally
+        {
+            automationActive = false;
+        }
+    }
 
     private GilVendorReachResult InteractWithVendor(IGameObject npc, GilVendorOffer offer)
     {
