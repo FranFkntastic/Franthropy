@@ -51,6 +51,7 @@ public sealed class GilVendorBuyLineSnapshot
     public uint ItemId { get; set; }
     public string ItemName { get; set; } = string.Empty;
     public int ApprovedQuantity { get; set; }
+    public int? TargetTotalQuantity { get; set; }
     public int PurchasedQuantity { get; set; }
     public int PurchaseRetryCount { get; set; }
     public uint UnitPriceGil { get; set; }
