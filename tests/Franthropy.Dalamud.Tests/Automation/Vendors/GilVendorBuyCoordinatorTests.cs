@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Text.Json;
 using Franthropy.Dalamud.Automation.Vendors;
 using Franthropy.Dalamud.Automation.Vendors.Coordination;
 
@@ -176,24 +177,69 @@ public sealed class GilVendorBuyCoordinatorTests
     }
 
     [Fact]
-    public void Mid_run_inventory_gain_clamps_next_batch_to_live_need()
+    public void Target_mode_does_not_double_subtract_observed_inventory()
     {
         var runtime = new ScriptedRuntime();
-        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
-        Assert.True(coordinator.TryStart(Plan([Line(1, 120)], [Stop(100, 1)]), Context, out var error), error);
-        TickUntilPhase(coordinator, GilVendorBuyPhase.VerifyReceipt);
-        coordinator.Tick(Context);
-        Assert.Equal([99], coordinator.ActiveRun!.Receipts.Select(receipt => receipt.Quantity));
+        runtime.Counts[1] = 4;
+        var store = new MemoryStore();
+        var coordinator = new GilVendorBuyCoordinator(store, runtime);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 6, targetTotal: 10)], [Stop(100, 1)]), Context, out var error), error);
 
-        runtime.Counts[1] = 110;
-        coordinator.Tick(Context);
-        coordinator.Tick(Context);
         TickUntilTerminal(coordinator, 10);
 
-        Assert.Equal(GilVendorBuyPhase.Completed, coordinator.ActiveRun.Phase);
-        Assert.Equal([99, 10], coordinator.ActiveRun.Receipts.Select(receipt => receipt.Quantity));
-        Assert.Equal(109, coordinator.ActiveRun.Lines[0].PurchasedQuantity);
-        Assert.Equal(120, runtime.Counts[1]);
+        Assert.Equal(GilVendorBuyPhase.Completed, coordinator.ActiveRun!.Phase);
+        Assert.Equal([6], coordinator.ActiveRun.Receipts.Select(receipt => receipt.Quantity));
+        Assert.Equal(6, coordinator.ActiveRun.Lines[0].PurchasedQuantity);
+        Assert.Equal(10, store.Current!.Lines[0].TargetTotalQuantity);
+        Assert.Equal(10, runtime.Counts[1]);
+    }
+
+    [Fact]
+    public void Target_mode_mid_run_gain_clamps_purchase_and_completes_ready()
+    {
+        var runtime = new ScriptedRuntime();
+        runtime.Counts[1] = 4;
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 6, targetTotal: 10)], [Stop(100, 1)]), Context, out var error), error);
+        TickUntilPhase(coordinator, GilVendorBuyPhase.PurchaseLine);
+
+        runtime.Counts[1] = 6;
+        TickUntilTerminal(coordinator, 10);
+
+        Assert.Equal(GilVendorBuyPhase.Completed, coordinator.ActiveRun!.Phase);
+        Assert.Equal([4], coordinator.ActiveRun.Receipts.Select(receipt => receipt.Quantity));
+        Assert.Equal(4, coordinator.ActiveRun.Lines[0].PurchasedQuantity);
+        Assert.Equal("Ready", coordinator.ActiveRun.Lines[0].Status);
+        Assert.Equal(10, runtime.Counts[1]);
+    }
+
+    [Fact]
+    public void Absent_target_mode_buys_approved_delta_regardless_of_observed_inventory()
+    {
+        var runtime = new ScriptedRuntime();
+        runtime.Counts[1] = 4;
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 6)], [Stop(100, 1)]), Context, out var error), error);
+
+        TickUntilTerminal(coordinator, 10);
+
+        Assert.Equal([6], coordinator.ActiveRun!.Receipts.Select(receipt => receipt.Quantity));
+        Assert.Null(coordinator.ActiveRun.Lines[0].TargetTotalQuantity);
+        Assert.Equal(10, runtime.Counts[1]);
+    }
+
+    [Fact]
+    public void Snapshot_round_trip_without_target_preserves_exact_purchase_mode()
+    {
+        const string legacyJson = """
+            {"Lines":[{"ItemId":1,"ApprovedQuantity":6}]}
+            """;
+
+        var loaded = JsonSerializer.Deserialize<GilVendorBuyRunSnapshot>(legacyJson)!;
+        var roundTripped = JsonSerializer.Deserialize<GilVendorBuyRunSnapshot>(
+            JsonSerializer.Serialize(loaded))!;
+
+        Assert.Null(roundTripped.Lines.Single().TargetTotalQuantity);
     }
 
     [Fact]
@@ -370,7 +416,7 @@ public sealed class GilVendorBuyCoordinatorTests
         Stops = stops,
     };
 
-    private static GilVendorBuyLineSnapshot Line(uint itemId, int quantity)
+    private static GilVendorBuyLineSnapshot Line(uint itemId, int quantity, int? targetTotal = null)
     {
         var offer = Offer(itemId);
         return new()
@@ -378,6 +424,7 @@ public sealed class GilVendorBuyCoordinatorTests
             ItemId = itemId,
             ItemName = offer.ItemName,
             ApprovedQuantity = quantity,
+            TargetTotalQuantity = targetTotal,
             UnitPriceGil = offer.UnitPriceGil,
             ApprovedGilCeiling = checked((ulong)quantity * offer.UnitPriceGil),
             Offer = GilVendorBuyOfferSnapshot.From(offer),

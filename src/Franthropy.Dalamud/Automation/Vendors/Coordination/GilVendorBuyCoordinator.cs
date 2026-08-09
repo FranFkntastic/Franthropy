@@ -297,7 +297,8 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             var remaining = RemainingForLine(line, observedQuantity);
             if (remaining <= 0)
             {
-                line.Status = observedQuantity >= line.ApprovedQuantity ? "Ready" : "Ceiling reached";
+                var completionTarget = line.TargetTotalQuantity ?? line.ApprovedQuantity;
+                line.Status = observedQuantity >= completionTarget ? "Ready" : "Ceiling reached";
                 run.LineIndex++;
                 continue;
             }
@@ -567,10 +568,13 @@ public sealed class GilVendorBuyCoordinator : IDisposable
     private static int RemainingForLine(GilVendorBuyLineSnapshot line) =>
         line.VendorUnavailable ? 0 : Math.Max(0, line.ApprovedQuantity - line.PurchasedQuantity);
 
-    private static int RemainingForLine(GilVendorBuyLineSnapshot line, int observedQuantity) =>
-        Math.Min(
-            RemainingForLine(line),
-            Math.Max(0, line.ApprovedQuantity - observedQuantity));
+    private static int RemainingForLine(GilVendorBuyLineSnapshot line, int observedQuantity)
+    {
+        var approvedRemaining = RemainingForLine(line);
+        return line.TargetTotalQuantity is { } target
+            ? Math.Min(approvedRemaining, Math.Max(0, target - observedQuantity))
+            : approvedRemaining;
+    }
 
     private static void NormalizeCurrentStop(
         GilVendorBuyRunSnapshot run,
@@ -638,6 +642,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         ItemId = line.ItemId,
         ItemName = line.ItemName,
         ApprovedQuantity = line.ApprovedQuantity,
+        TargetTotalQuantity = line.TargetTotalQuantity,
         PurchasedQuantity = line.PurchasedQuantity,
         PurchaseRetryCount = line.PurchaseRetryCount,
         UnitPriceGil = line.UnitPriceGil,
