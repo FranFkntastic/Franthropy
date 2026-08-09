@@ -55,23 +55,39 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             return false;
         }
 
-        var quantities = plan.Lines
-            .Where(line => line.ApprovedQuantity > 0)
-            .ToDictionary(line => line.ItemId, line => line.ApprovedQuantity);
-        if (quantities.Count == 0)
+        var lines = plan.Lines.Where(line => line.ApprovedQuantity > 0).ToArray();
+        if (lines.Length == 0)
         {
             error = "The vendor buy plan is empty.";
             return false;
         }
-        var preflight = runtime.CaptureInventory(quantities.Keys.ToArray());
+        var preflight = runtime.CaptureInventory(lines.Select(line => line.ItemId).ToArray());
         if (!preflight.IsComplete || preflight.Gil is null)
         {
             error = preflight.Message;
             return false;
         }
-        if (preflight.Gil.Value < plan.MaximumApprovedGil)
+        var quantities = lines
+            .Select(line => new
+            {
+                line.ItemId,
+                Quantity = RemainingForLine(line, preflight.ItemCounts.GetValueOrDefault(line.ItemId)),
+            })
+            .Where(line => line.Quantity > 0)
+            .ToDictionary(line => line.ItemId, line => line.Quantity);
+        if (quantities.Count == 0)
         {
-            error = $"The vendor plan requires up to {plan.MaximumApprovedGil:N0} gil, but only {preflight.Gil.Value:N0} gil is available.";
+            error = "The vendor buy plan is empty.";
+            return false;
+        }
+        var requiredGil = Math.Min(
+            plan.MaximumApprovedGil,
+            lines.Aggregate(0UL, (sum, line) => checked(sum + Math.Min(
+                line.ApprovedGilCeiling,
+                checked((ulong)quantities.GetValueOrDefault(line.ItemId) * line.UnitPriceGil)))));
+        if (preflight.Gil.Value < requiredGil)
+        {
+            error = $"The vendor plan requires up to {requiredGil:N0} gil, but only {preflight.Gil.Value:N0} gil is available.";
             return false;
         }
         if (!runtime.HasCapacity(quantities, out error))

@@ -195,6 +195,23 @@ public sealed class GilVendorBuyCoordinatorTests
     }
 
     [Fact]
+    public void Target_mode_preflight_uses_live_need_without_shrinking_approved_ceilings()
+    {
+        var runtime = new ScriptedRuntime { Gil = 30 };
+        runtime.Counts[1] = 7;
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+
+        Assert.True(coordinator.TryStart(
+            Plan([Line(1, 6, targetTotal: 10)], [Stop(100, 1)]),
+            Context,
+            out var error), error);
+
+        Assert.Equal(3, runtime.LastCapacityQuantities![1]);
+        Assert.Equal(60UL, coordinator.ActiveRun!.MaximumApprovedGil);
+        Assert.Equal(60UL, coordinator.ActiveRun.Lines[0].ApprovedGilCeiling);
+    }
+
+    [Fact]
     public void Target_mode_mid_run_gain_clamps_purchase_and_completes_ready()
     {
         var runtime = new ScriptedRuntime();
@@ -502,6 +519,7 @@ public sealed class GilVendorBuyCoordinatorTests
         public IReadOnlyList<GilVendorShopRow> ShopRows { get; set; } = [new(0, 1, 10), new(1, 2, 20)];
         public GilVendorShopReadResult? ShopReadOverride { get; set; }
         public Action? OnSubmit { get; set; }
+        public IReadOnlyDictionary<uint, int>? LastCapacityQuantities { get; private set; }
 
         public GilVendorInventorySnapshot CaptureInventory(IReadOnlyCollection<uint> itemIds) => new(
             true,
@@ -511,6 +529,7 @@ public sealed class GilVendorBuyCoordinatorTests
 
         public bool HasCapacity(IReadOnlyDictionary<uint, int> quantities, out string message)
         {
+            LastCapacityQuantities = new Dictionary<uint, int>(quantities);
             var result = CapacityResults.Count == 0 || CapacityResults.Dequeue();
             message = result ? "Capacity ready." : "Player inventory has no safe capacity.";
             return result;
