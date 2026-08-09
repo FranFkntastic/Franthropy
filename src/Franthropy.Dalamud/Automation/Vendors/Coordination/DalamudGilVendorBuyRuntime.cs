@@ -276,8 +276,14 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
             return;
         try
         {
-            StopOwnedNavigation();
-            endAutomation();
+            try
+            {
+                StopOwnedNavigation();
+            }
+            finally
+            {
+                endAutomation();
+            }
         }
         finally
         {
