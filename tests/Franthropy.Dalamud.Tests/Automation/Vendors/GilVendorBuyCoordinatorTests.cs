@@ -53,6 +53,46 @@ public sealed class GilVendorBuyCoordinatorTests
     }
 
     [Fact]
+    public void Blank_context_is_rejected_and_cannot_bypass_pause_or_resume_guard()
+    {
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), new ScriptedRuntime());
+
+        Assert.False(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), " ", out _));
+        Assert.Null(coordinator.ActiveRun);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
+
+        coordinator.Tick(string.Empty);
+
+        Assert.Equal(GilVendorBuyPhase.Paused, coordinator.ActiveRun!.Phase);
+        Assert.False(coordinator.Resume("\t", out _));
+    }
+
+    [Fact]
+    public void Run_snapshots_are_cloned_at_public_and_store_boundaries()
+    {
+        var store = new MemoryStore();
+        var coordinator = new GilVendorBuyCoordinator(store, new ScriptedRuntime());
+        Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
+        var exposed = coordinator.ActiveRun!;
+        var saved = store.Current!;
+
+        exposed.MaximumApprovedGil = ulong.MaxValue;
+        exposed.Lines[0].ApprovedQuantity = int.MaxValue;
+        exposed.Receipts.Add(new() { ItemId = 1, Quantity = 999 });
+        saved.MaximumApprovedGil = ulong.MaxValue;
+        saved.Lines[0].ApprovedGilCeiling = ulong.MaxValue;
+
+        Assert.Equal(20UL, coordinator.ActiveRun!.MaximumApprovedGil);
+        Assert.Equal(2, coordinator.ActiveRun.Lines[0].ApprovedQuantity);
+        Assert.Equal(20UL, coordinator.ActiveRun.Lines[0].ApprovedGilCeiling);
+        Assert.Empty(coordinator.ActiveRun.Receipts);
+
+        var reloaded = new GilVendorBuyCoordinator(store, new ScriptedRuntime());
+        store.Current!.MaximumApprovedGil = 0;
+        Assert.Equal(ulong.MaxValue, reloaded.ActiveRun!.MaximumApprovedGil);
+    }
+
+    [Fact]
     public void Stop_with_armed_verified_purchase_records_receipt_then_stops()
     {
         var runtime = new ScriptedRuntime();
@@ -144,16 +184,6 @@ public sealed class GilVendorBuyCoordinatorTests
         line.AlternativeOffers.Add(GilVendorBuyOfferSnapshot.From(Offer(1, 200)));
         var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
         var plan = Plan([line], [Stop(100, 1)]);
-        plan = new GilVendorBuyPlan
-        {
-            MaximumApprovedGil = plan.MaximumApprovedGil,
-            Lines = plan.Lines,
-            Stops = plan.Stops,
-            FallbackReplanner = request => new(
-                [Stop(200, 1)],
-                [new(1, request.Lines.Single().AlternativeOffers.Single())],
-                "Replanned without expanding ceilings."),
-        };
 
         Assert.True(coordinator.TryStart(plan, Context, out var error), error);
         TickUntilTerminal(coordinator, 30);

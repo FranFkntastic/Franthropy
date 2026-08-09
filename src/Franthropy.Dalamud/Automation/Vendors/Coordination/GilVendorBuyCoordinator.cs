@@ -9,6 +9,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
     private readonly IGilVendorBuyRuntime runtime;
     private readonly Func<DateTimeOffset> utcNow;
     private GilVendorBuyFallbackReplanner? fallbackReplanner;
+    private GilVendorBuyRunSnapshot? activeRun;
     private bool disposed;
 
     public GilVendorBuyCoordinator(
@@ -21,14 +22,14 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         this.runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
         this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
         this.fallbackReplanner = fallbackReplanner;
-        ActiveRun = store.LoadCurrent();
+        activeRun = store.LoadCurrent() is { } loaded ? CloneRun(loaded) : null;
         if (IsRunning)
             runtime.BeginAutomation();
     }
 
-    public GilVendorBuyRunSnapshot? ActiveRun { get; private set; }
+    public GilVendorBuyRunSnapshot? ActiveRun => activeRun is { } run ? CloneRun(run) : null;
 
-    public bool IsRunning => ActiveRun?.Phase is
+    public bool IsRunning => activeRun?.Phase is
         GilVendorBuyPhase.RefreshPreconditions or
         GilVendorBuyPhase.ReachVendor or
         GilVendorBuyPhase.ValidateShop or
@@ -38,10 +39,14 @@ public sealed class GilVendorBuyCoordinator : IDisposable
     public bool TryStart(GilVendorBuyPlan plan, string contextSignature, out string error)
     {
         ArgumentNullException.ThrowIfNull(plan);
-        ArgumentNullException.ThrowIfNull(contextSignature);
-        if (IsRunning || ActiveRun?.Phase == GilVendorBuyPhase.Paused)
+        if (IsRunning || activeRun?.Phase == GilVendorBuyPhase.Paused)
         {
             error = "A vendor buy run is already active.";
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(contextSignature))
+        {
+            error = "A non-blank context signature is required.";
             return false;
         }
         if (plan.Lines.Count == 0 || plan.Stops.Count == 0)
@@ -73,7 +78,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             return false;
 
         var now = utcNow().UtcDateTime;
-        ActiveRun = new GilVendorBuyRunSnapshot
+        activeRun = new GilVendorBuyRunSnapshot
         {
             RunId = Guid.NewGuid().ToString("N"),
             ContextSignature = contextSignature,
@@ -95,9 +100,10 @@ public sealed class GilVendorBuyCoordinator : IDisposable
 
     public void Tick(string currentContextSignature)
     {
-        if (disposed || ActiveRun is not { } run || !IsRunning)
+        if (disposed || activeRun is not { } run || !IsRunning)
             return;
-        if (!string.Equals(run.ContextSignature, currentContextSignature, StringComparison.Ordinal))
+        if (string.IsNullOrWhiteSpace(currentContextSignature) ||
+            !string.Equals(run.ContextSignature, currentContextSignature, StringComparison.Ordinal))
         {
             Pause("The current context does not match the frozen vendor buy plan.");
             return;
@@ -115,7 +121,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
 
     public bool Pause(string message = "Vendor buy paused.")
     {
-        if (ActiveRun is not { } run || !IsRunning)
+        if (activeRun is not { } run || !IsRunning)
             return false;
         run.ResumePhase = run.Phase;
         run.Phase = GilVendorBuyPhase.Paused;
@@ -127,12 +133,13 @@ public sealed class GilVendorBuyCoordinator : IDisposable
 
     public bool Resume(string currentContextSignature, out string error)
     {
-        if (ActiveRun is not { Phase: GilVendorBuyPhase.Paused } run)
+        if (activeRun is not { Phase: GilVendorBuyPhase.Paused } run)
         {
             error = "No paused vendor buy run is available.";
             return false;
         }
-        if (!string.Equals(run.ContextSignature, currentContextSignature, StringComparison.Ordinal))
+        if (string.IsNullOrWhiteSpace(currentContextSignature) ||
+            !string.Equals(run.ContextSignature, currentContextSignature, StringComparison.Ordinal))
         {
             error = "The current context does not match the frozen vendor buy plan.";
             return false;
@@ -149,7 +156,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
 
     public bool Stop(string message = "Vendor buy stopped.")
     {
-        if (ActiveRun is not { } run || run.Phase is
+        if (activeRun is not { } run || run.Phase is
             GilVendorBuyPhase.Completed or GilVendorBuyPhase.Stopped or GilVendorBuyPhase.Failed or GilVendorBuyPhase.Indeterminate)
             return false;
         if (run.ArmedPurchase is not null)
@@ -452,19 +459,20 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             .Select(itemId => run.Lines.First(line => line.ItemId == itemId))
             .Where(line => RemainingForLine(line) > 0)
             .ToArray();
-        var result = fallbackReplanner?.Invoke(new(
+        var request = new GilVendorBuyFallbackRequest(
             CloneStop(failed),
             remaining.Select(line => new GilVendorBuyFallbackLine(
                 line.ItemId,
                 line.ItemName,
                 RemainingForLine(line),
                 CloneOffer(line.Offer!),
-                line.AlternativeOffers.Select(CloneOffer).ToArray())).ToArray()));
-        var selected = result?.Selections.ToDictionary(selection => selection.ItemId);
-        var replacements = result?.ReplacementStops.Select(CloneStop).ToList() ?? [];
+                line.AlternativeOffers.Select(CloneOffer).ToArray())).ToArray());
+        var result = fallbackReplanner?.Invoke(request) ?? BuildDefaultFallbackPlan(request);
+        var selected = result.Selections.ToDictionary(selection => selection.ItemId);
+        var replacements = result.ReplacementStops.Select(CloneStop).ToList();
         foreach (var line in remaining)
         {
-            if (selected is not null && selected.TryGetValue(line.ItemId, out var selection) &&
+            if (selected.TryGetValue(line.ItemId, out var selection) &&
                 line.AlternativeOffers.Any(offer => SameVendor(offer, selection.Offer)))
             {
                 line.Offer = CloneOffer(selection.Offer);
@@ -483,7 +491,58 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         run.Stops.RemoveAt(run.StopIndex);
         run.Stops.InsertRange(run.StopIndex, replacements);
         run.LineIndex = 0;
-        message = result?.Message ?? $"Skipped {string.Join(", ", remaining.Select(line => line.ItemName))} because no accessible vendor remains; continuing the vendor plan.";
+        message = result.Message;
+    }
+
+    private static GilVendorBuyFallbackPlan BuildDefaultFallbackPlan(GilVendorBuyFallbackRequest request)
+    {
+        var remaining = request.Lines.ToList();
+        var replacements = new List<GilVendorBuyStopSnapshot>();
+        var selections = new List<GilVendorBuyFallbackSelection>();
+        while (remaining.Any(line => line.AlternativeOffers.Count != 0))
+        {
+            var best = remaining
+                .SelectMany(line => line.AlternativeOffers.Select(offer => new
+                {
+                    Line = line,
+                    Offer = offer,
+                    Key = (offer.NpcId, offer.ShopId, offer.TerritoryId, offer.NpcName),
+                }))
+                .GroupBy(candidate => candidate.Key)
+                .OrderByDescending(group => group.Select(candidate => candidate.Line.ItemId).Distinct().Count())
+                .ThenBy(group => group.Key.NpcId)
+                .FirstOrDefault();
+            if (best is null)
+                break;
+
+            var selectedByItem = best
+                .GroupBy(candidate => candidate.Line.ItemId)
+                .ToDictionary(group => group.Key, group => group.First());
+            foreach (var selected in selectedByItem.Values)
+            {
+                selections.Add(new(selected.Line.ItemId, CloneOffer(selected.Offer)));
+                remaining.Remove(selected.Line);
+            }
+            replacements.Add(new()
+            {
+                NpcId = best.Key.NpcId,
+                ShopId = best.Key.ShopId,
+                TerritoryId = best.Key.TerritoryId,
+                NpcName = best.Key.NpcName,
+                ItemIds = selectedByItem.Keys.Order().ToList(),
+            });
+        }
+
+        var message = replacements.Count switch
+        {
+            > 0 when remaining.Count > 0 =>
+                $"Replanned {replacements.Count:N0} vendor stop(s); skipped {string.Join(", ", remaining.Select(line => line.ItemName))} because no accessible vendor remains.",
+            > 0 =>
+                $"Replanned {replacements.Count:N0} vendor stop(s) without expanding any quantity or gil ceiling.",
+            _ =>
+                $"Skipped {string.Join(", ", remaining.Select(line => line.ItemName))} because no accessible vendor remains; continuing the vendor plan.",
+        };
+        return new(replacements, selections, message);
     }
 
     private static Dictionary<uint, int> RemainingPurchaseQuantities(GilVendorBuyRunSnapshot run) =>
@@ -517,6 +576,45 @@ public sealed class GilVendorBuyCoordinator : IDisposable
     private static bool SameVendor(GilVendorBuyOfferSnapshot left, GilVendorBuyOfferSnapshot right) =>
         left.NpcId == right.NpcId && left.ShopId == right.ShopId && left.TerritoryId == right.TerritoryId;
 
+    private static GilVendorBuyRunSnapshot CloneRun(GilVendorBuyRunSnapshot run) => new()
+    {
+        RunId = run.RunId,
+        ContextSignature = run.ContextSignature,
+        MaximumApprovedGil = run.MaximumApprovedGil,
+        Phase = run.Phase,
+        ResumePhase = run.ResumePhase,
+        StopRequested = run.StopRequested,
+        StopIndex = run.StopIndex,
+        LineIndex = run.LineIndex,
+        Message = run.Message,
+        StartedAtUtc = run.StartedAtUtc,
+        UpdatedAtUtc = run.UpdatedAtUtc,
+        Lines = run.Lines.Select(CloneLine).ToList(),
+        Stops = run.Stops.Select(CloneStop).ToList(),
+        ArmedPurchase = run.ArmedPurchase is { } intent ? new()
+        {
+            ItemId = intent.ItemId,
+            Quantity = intent.Quantity,
+            ExpectedGil = intent.ExpectedGil,
+            ShopRowIndex = intent.ShopRowIndex,
+            BeforeItemCount = intent.BeforeItemCount,
+            BeforeGil = intent.BeforeGil,
+            RetryCount = intent.RetryCount,
+            ArmedAtUtc = intent.ArmedAtUtc,
+        } : null,
+        Receipts = run.Receipts.Select(receipt => new GilVendorBuyReceiptSnapshot
+        {
+            ItemId = receipt.ItemId,
+            Quantity = receipt.Quantity,
+            SpentGil = receipt.SpentGil,
+            BeforeItemCount = receipt.BeforeItemCount,
+            AfterItemCount = receipt.AfterItemCount,
+            BeforeGil = receipt.BeforeGil,
+            AfterGil = receipt.AfterGil,
+            VerifiedAtUtc = receipt.VerifiedAtUtc,
+        }).ToList(),
+    };
+
     private static GilVendorBuyLineSnapshot CloneLine(GilVendorBuyLineSnapshot line) => new()
     {
         ItemId = line.ItemId,
@@ -548,7 +646,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
 
     private void Complete(string message)
     {
-        if (ActiveRun is not { } run)
+        if (activeRun is not { } run)
             return;
         run.Phase = GilVendorBuyPhase.Completed;
         run.Message = message;
@@ -569,7 +667,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
 
     private void Fail(GilVendorBuyPhase phase, string message)
     {
-        if (ActiveRun is not { } run)
+        if (activeRun is not { } run)
             return;
         run.Phase = phase;
         run.Message = message;
@@ -580,10 +678,10 @@ public sealed class GilVendorBuyCoordinator : IDisposable
 
     private void Persist()
     {
-        if (ActiveRun is not { } run)
+        if (activeRun is not { } run)
             return;
         run.UpdatedAtUtc = utcNow().UtcDateTime;
-        store.Save(run);
+        store.Save(CloneRun(run));
     }
 
     public void Dispose()
