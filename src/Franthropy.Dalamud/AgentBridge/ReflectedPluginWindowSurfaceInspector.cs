@@ -142,7 +142,7 @@ public sealed class ReflectedPluginWindowSurfaceInspector
                     continue;
                 }
                 if (fieldValue is null || depth >= DefaultMaximumDepth ||
-                    fieldValue.GetType().Assembly != pluginAssembly ||
+                    (fieldValue.GetType().Assembly != pluginAssembly && !IsUiOwnershipField(field)) ||
                     fieldValue is string or Delegate ||
                     fieldValue.GetType().IsValueType)
                     continue;
