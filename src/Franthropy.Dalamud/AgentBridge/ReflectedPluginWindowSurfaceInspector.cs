@@ -121,7 +121,8 @@ public sealed class ReflectedPluginWindowSurfaceInspector
                 systems.Add(direct);
             if (value is IWindow directWindow && !directWindows.Contains(directWindow, ReferenceEqualityComparer.Instance))
                 directWindows.Add(directWindow);
-            foreach (var field in EnumerateInstanceFields(value.GetType()))
+            foreach (var field in EnumerateInstanceFields(value.GetType())
+                         .OrderByDescending(IsUiOwnershipField))
             {
                 if (++inspectedFields > maximumFields)
                     break;
@@ -177,6 +178,13 @@ public sealed class ReflectedPluginWindowSurfaceInspector
         for (var current = type; current is not null && current != typeof(object); current = current.BaseType)
             foreach (var field in current.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
                 yield return field;
+    }
+
+    private static bool IsUiOwnershipField(FieldInfo field)
+    {
+        var name = $"{field.Name} {field.FieldType.Name}";
+        return name.Contains("ui", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("window", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string StripImGuiId(string value)
