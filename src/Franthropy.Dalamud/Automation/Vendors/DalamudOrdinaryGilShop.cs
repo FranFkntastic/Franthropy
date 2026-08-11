@@ -278,6 +278,20 @@ public sealed class DalamudOrdinaryGilShop
             addon->Close(true);
     }
 
+    public unsafe bool TryCloseOfferMenu()
+    {
+        var closed = false;
+        foreach (var addonName in new[] { "SelectString", "SelectIconString" })
+        {
+            var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
+            if (!IsPresented(addon))
+                continue;
+            addon->Close(true);
+            closed = true;
+        }
+        return closed;
+    }
+
     private static unsafe bool TryReadUInt(AtkUnitBase* addon, int index, out uint value)
     {
         value = 0;

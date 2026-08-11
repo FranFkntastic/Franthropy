@@ -31,6 +31,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     private readonly IDataManager dataManager;
     private readonly IClientState clientState;
     private readonly IObjectTable objectTable;
+    private readonly GilVendorPrePurchaseRecovery recovery = new();
     private readonly System.Action beginAutomation;
     private readonly System.Action endAutomation;
     private readonly Func<DateTimeOffset> utcNow;
@@ -112,7 +113,10 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     public GilVendorReachResult AdvanceToOpenShop(GilVendorOffer offer)
     {
         if (shop.IsOpen)
+        {
+            recovery.ResetMenu();
             return new(GilVendorReachState.ShopOpen, $"Opened {offer.NpcName}'s shop.");
+        }
         if (activeNpcId != offer.NpcId)
         {
             ResetVendorApproach();
@@ -200,6 +204,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
             requestedAethernetId = null;
             approachStartedAt = utcNow();
             nextActionAt = DateTimeOffset.MinValue;
+            recovery.ResetNavigation();
         }
         var npc = access.FindLiveNpc(offer);
         var playerPosition = objectTable.LocalPlayer?.Position;
@@ -212,6 +217,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
             if (npc is null)
                 return new(GilVendorReachState.Waiting, $"Waiting for {offer.NpcName} to become targetable.");
             StopOwnedNavigation();
+            recovery.ResetNavigation();
             if (utcNow() < nextActionAt)
                 return new(GilVendorReachState.Waiting, $"Opening {offer.NpcName}'s shop.");
             return InteractWithVendor(npc, offer);
@@ -227,6 +233,20 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         switch (decision)
         {
             case GilVendorApproachDecision.WaitForOwnedRoute:
+                switch (recovery.ObserveOwnedNavigation(utcNow(), distance))
+                {
+                    case GilVendorOwnedNavigationDecision.Restart:
+                        if (!TryStopOwnedNavigation())
+                            return new(GilVendorReachState.Failed, $"Could not stop the stalled route to {offer.NpcName}.");
+                        nextActionAt = DateTimeOffset.MinValue;
+                        return new(
+                            GilVendorReachState.Waiting,
+                            $"Restarting the stalled route to {offer.NpcName} ({recovery.NavigationRecoveryCount}/{recovery.MaximumNavigationRecoveries}).");
+                    case GilVendorOwnedNavigationDecision.Exhausted:
+                        return new(
+                            GilVendorReachState.Unavailable,
+                            $"Could not make progress toward {offer.NpcName} after {recovery.MaximumNavigationRecoveries} automatic route restarts.");
+                }
                 return new(GilVendorReachState.Waiting, $"Walking to {offer.NpcName} ({distance:0.0} yalms away).");
             case GilVendorApproachDecision.BlockedByAnotherRoute:
                 return new(GilVendorReachState.Failed, "Another vnavmesh route is already active.");
@@ -235,11 +255,19 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         }
         if (utcNow() >= nextActionAt)
         {
+            var submissionDecision = recovery.ClassifyNavigationSubmission();
+            if (submissionDecision == GilVendorNavigationSubmissionDecision.Exhausted)
+            {
+                return new(
+                    GilVendorReachState.Unavailable,
+                    $"Could not keep a route active toward {offer.NpcName} after {recovery.MaximumNavigationRecoveries} automatic restarts.");
+            }
             var movement = vnavmesh.TryMoveCloseTo(destination, NavigationStopDistance);
             if (movement.State == VNavmeshPathSubmissionState.Loading)
                 return new(GilVendorReachState.Waiting, movement.Message);
             if (!movement.Submitted)
                 return new(GilVendorReachState.Failed, movement.Message);
+            recovery.RecordNavigationSubmission(utcNow(), distance);
             ownsNavigation = true;
             nextActionAt = utcNow().Add(ActionThrottle);
         }
@@ -255,6 +283,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         requestedAetheryteId = null;
         requestedAethernetId = null;
         travelReadiness.Reset();
+        recovery.Reset();
     }
 
     public GilVendorShopReadResult ReadShopRows() => shop.ReadRows();
@@ -294,12 +323,23 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     private GilVendorReachResult InteractWithVendor(IGameObject npc, GilVendorOffer offer)
     {
         var menu = shop.TryAdvanceOfferMenu(offer);
-        if (menu.MenuPresented)
+        switch (recovery.ObserveMenu(utcNow(), menu.MenuPresented, menu.Advanced))
         {
-            if (!menu.Advanced)
-                return new(GilVendorReachState.Unavailable, menu.Message);
-            nextActionAt = utcNow().Add(ActionThrottle);
-            return new(GilVendorReachState.Waiting, $"Choosing {offer.NpcName}'s shop.");
+            case GilVendorMenuRecoveryDecision.Advanced:
+                nextActionAt = utcNow().Add(ActionThrottle);
+                return new(GilVendorReachState.Waiting, $"Choosing {offer.NpcName}'s shop.");
+            case GilVendorMenuRecoveryDecision.Wait:
+                return new(GilVendorReachState.Waiting, $"Waiting for {offer.NpcName}'s reviewed shop option.");
+            case GilVendorMenuRecoveryDecision.Reinteract:
+                shop.TryCloseOfferMenu();
+                nextActionAt = utcNow().Add(ActionThrottle);
+                return new(
+                    GilVendorReachState.Waiting,
+                    $"Reopening {offer.NpcName}'s shop ({recovery.MenuReinteractionCount}/{recovery.MaximumMenuReinteractions}).");
+            case GilVendorMenuRecoveryDecision.Exhausted:
+                return new(
+                    GilVendorReachState.Unavailable,
+                    $"{offer.NpcName} did not present the reviewed shop after {recovery.MaximumMenuReinteractions} automatic reinteractions.");
         }
         var interaction = objectInteractor.TryEnqueue(offer.NpcId, NavigationStopDistance, "Gil vendor interaction");
         if (!interaction.Success)
@@ -310,9 +350,17 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
 
     private void StopOwnedNavigation()
     {
-        if (!ownsNavigation) return;
-        if (vnavmesh.Observe().IsRunning) vnavmesh.TryStop();
+        _ = TryStopOwnedNavigation();
+    }
+
+    private bool TryStopOwnedNavigation()
+    {
+        if (!ownsNavigation)
+            return true;
+        if (vnavmesh.Observe().IsRunning && !vnavmesh.TryStop())
+            return false;
         ownsNavigation = false;
+        return true;
     }
 
     private static float HorizontalDistance(Vector3 first, Vector3 second)
