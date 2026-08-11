@@ -108,7 +108,8 @@ public static class ObservationValidator
             ObservationContainerKind.RetainerRoster or
             ObservationContainerKind.Saddlebag => subject == ObservationSubjectKind.Character,
             ObservationContainerKind.RetainerInventory or
-            ObservationContainerKind.RetainerMarketListings => subject == ObservationSubjectKind.Retainer,
+            ObservationContainerKind.RetainerMarketListings or
+            ObservationContainerKind.RetainerGil => subject == ObservationSubjectKind.Retainer,
             _ => false,
         };
 
@@ -119,6 +120,7 @@ public static class ObservationValidator
             ObservationContainerKind.RetainerRoster => ObservationPayloadContracts.RetainerRoster,
             ObservationContainerKind.RetainerInventory => ObservationPayloadContracts.RetainerInventory,
             ObservationContainerKind.RetainerMarketListings => ObservationPayloadContracts.RetainerMarketListings,
+            ObservationContainerKind.RetainerGil => ObservationPayloadContracts.RetainerGil,
             ObservationContainerKind.Saddlebag => ObservationPayloadContracts.Saddlebag,
             _ => throw new ArgumentOutOfRangeException(nameof(container), container, null),
         };
@@ -192,6 +194,13 @@ public static class ObservationValidator
                     error = "A retainer listing row is incomplete or duplicates a market slot.";
                     return false;
                 }
+                break;
+            }
+            case ObservationContainerKind.RetainerGil:
+            {
+                _ = payload.Deserialize<RetainerGilPayload>(
+                    ObservationPayloadContracts.RetainerGil,
+                    ObservationPayloadContracts.Version);
                 break;
             }
             default:

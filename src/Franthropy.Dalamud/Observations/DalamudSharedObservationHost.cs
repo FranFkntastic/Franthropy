@@ -32,6 +32,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
     private readonly SharedObservationPaths paths;
     private readonly ObservationStoreOptions storeOptions;
     private readonly ObservationCollectorCoordinator coordinator;
+    public ObservationCaptureSessionRegistry CaptureSessions { get; }
     private DalamudCollector? collector;
     private bool started;
     private bool disposed;
@@ -46,6 +47,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
             throw new InvalidOperationException("The exact game build is unavailable; shared observation hosting is blocked.");
         GamePatchCompatibilityGate.Require("Franthropy.SharedObservations.V1", ApprovedGameBuild, options.GameBuild);
         paths = SharedObservationPaths.FromPluginConfigDirectory(options.PluginConfigDirectory);
+        CaptureSessions = new ObservationCaptureSessionRegistry(paths.CaptureSessionsPath);
         storeOptions = new ObservationStoreOptions
         {
             DatabasePath = paths.DatabasePath,
@@ -107,6 +109,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
             options.AddonLifecycle,
             open.Store!,
             provenance,
+            CaptureSessions,
             ReportFault,
             options.Diagnostic);
         try
@@ -205,6 +208,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
         private readonly IAddonLifecycle addonLifecycle;
         private readonly SqliteObservationStore store;
         private readonly ObservationProvenance provenance;
+        private readonly ObservationCaptureSessionRegistry? captureSessions;
         private readonly Action<string> fault;
         private readonly Action<string, Exception?>? diagnostic;
         private readonly Channel<PendingObservation> queue = Channel.CreateBounded<PendingObservation>(new BoundedChannelOptions(256)
@@ -224,6 +228,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
             IAddonLifecycle addonLifecycle,
             SqliteObservationStore store,
             ObservationProvenance provenance,
+            ObservationCaptureSessionRegistry? captureSessions,
             Action<string> fault,
             Action<string, Exception?>? diagnostic)
         {
@@ -232,6 +237,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
             this.addonLifecycle = addonLifecycle;
             this.store = store;
             this.provenance = provenance;
+            this.captureSessions = captureSessions;
             this.fault = fault;
             this.diagnostic = diagnostic;
         }
@@ -357,6 +363,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
                     ObservationContainerKind.Saddlebag,
                     ObservationPayloadContracts.Saddlebag,
                     OptionalSaddlebagContainers));
+                Enqueue(CaptureRetainerRoster());
             }
             catch (Exception ex)
             {
@@ -376,13 +383,15 @@ public sealed class DalamudSharedObservationHost : IDisposable
             {
                 var owner = CurrentOwnerOrDefault();
                 var retainerId = owner is null ? null : CurrentRetainerIdOrDefault();
-                var plan = SharedObservationCapturePlan.Create(false, false, true, true, owner, retainerId);
+                var plan = SharedObservationCapturePlan.Create(false, false, true, false, owner, retainerId);
                 plan.Execute(
                     capturePlayerInventory: static () => { },
                     captureSaddlebag: static () => { },
                     captureRetainerInventory: () => Enqueue(CaptureRetainerInventory(owner!, retainerId!.Value)),
-                    captureRetainerListings: () => Enqueue(CaptureRetainerListings(owner!, retainerId!.Value)),
+                    captureRetainerListings: static () => { },
                     reportFailure: ex => diagnostic?.Invoke("The closing retainer observation could not be captured.", ex));
+                if (owner is not null && retainerId is not null)
+                    Enqueue(CaptureRetainerGil(owner, retainerId.Value));
             }
             catch (Exception ex)
             {
@@ -444,7 +453,16 @@ public sealed class DalamudSharedObservationHost : IDisposable
                         complete = false;
                         continue;
                     }
-                    rows.Add(new RetainerRosterObservation(retainer->RetainerId, retainer->NameString, owner.HomeWorldId));
+                    rows.Add(new RetainerRosterObservation(
+                        retainer->RetainerId,
+                        retainer->NameString,
+                        owner.HomeWorldId,
+                        checked((int)index),
+                        null,
+                        retainer->ClassJob,
+                        retainer->Level,
+                        retainer->MarketItemCount,
+                        retainer->Available));
                 }
             }
             return Envelope(
@@ -478,6 +496,30 @@ public sealed class DalamudSharedObservationHost : IDisposable
                     ObservationPayloadContracts.RetainerInventory,
                     ObservationPayloadContracts.Version,
                     new InventoryObservationPayload(RetainerContainers.Select(type => (int)type).ToArray(), observed, rows)));
+        }
+
+        private unsafe ObservationEnvelope CaptureRetainerGil(ObservationOwner owner, ulong retainerId)
+        {
+            var manager = InventoryManager.Instance();
+            var container = manager is null ? null : manager->GetInventoryContainer(InventoryType.RetainerGil);
+            var complete = container is not null && container->IsLoaded;
+            ulong gil = 0;
+            if (complete)
+            {
+                for (var index = 0; index < container->Size; index++)
+                {
+                    var slot = container->GetInventorySlot(index);
+                    if (slot is not null)
+                        gil = checked(gil + (ulong)Math.Max(0, slot->Quantity));
+                }
+            }
+            return Envelope(
+                new ObservationScope(owner, ObservationSubject.Retainer(retainerId, owner), ObservationContainerKind.RetainerGil),
+                Evidence(complete),
+                ObservationPayload.Create(
+                    ObservationPayloadContracts.RetainerGil,
+                    ObservationPayloadContracts.Version,
+                    new RetainerGilPayload(gil)));
         }
 
         private unsafe ObservationEnvelope CaptureRetainerListings(ObservationOwner owner, ulong retainerId)
@@ -518,7 +560,8 @@ public sealed class DalamudSharedObservationHost : IDisposable
                     Interlocked.Increment(ref sourceRevision),
                     DateTimeOffset.UtcNow,
                     provenance,
-                    evidence),
+                    evidence,
+                    captureSessions?.Resolve(scope) ?? string.Empty),
                 payload);
 
         private InventoryObservationDelta Delta(ObservationScope scope, IReadOnlyList<InventorySlotUpdate> updates) =>
@@ -528,7 +571,8 @@ public sealed class DalamudSharedObservationHost : IDisposable
                     Interlocked.Increment(ref sourceRevision),
                     DateTimeOffset.UtcNow,
                     provenance,
-                    ObservationEvidence.CompleteAvailable),
+                    ObservationEvidence.CompleteAvailable,
+                    captureSessions?.Resolve(scope) ?? string.Empty),
                 updates);
 
         private static ObservationEvidence Evidence(bool complete) => ObservationEvidence.CompleteAvailable with

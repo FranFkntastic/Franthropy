@@ -3,6 +3,30 @@ using Franthropy.Dalamud.Automation.Inventory;
 namespace Franthropy.Dalamud.Automation.Retainers;
 
 public sealed record RetainerAutomationTarget(ulong RetainerId, string RetainerName);
+public sealed record RetainerRosterEntry(
+    ulong RetainerId,
+    string RetainerName,
+    int DisplayOrder,
+    bool? IsUiAccessible,
+    byte ClassJobId,
+    byte Level,
+    byte MarketItemCount,
+    bool IsGameAvailable = true);
+
+public sealed record RetainerRosterResult(
+    bool Success,
+    bool IsComplete,
+    IReadOnlyList<RetainerRosterEntry> Retainers,
+    string Code,
+    string Message)
+{
+    public static RetainerRosterResult Succeeded(IReadOnlyList<RetainerRosterEntry> retainers) =>
+        new(true, true, retainers, "RetainerRosterScanned", $"Observed {retainers.Count} assigned retainer(s).");
+
+    public static RetainerRosterResult Failed(string code, string message) =>
+        new(false, false, [], code, message);
+}
+
 public sealed record RetainerAutomationRosterResult(
     bool Success,
     IReadOnlyList<RetainerAutomationTarget> Retainers,
@@ -133,6 +157,15 @@ public interface IRetainerAutomationSession
 {
     bool IsRetainerListReady { get; }
     Task<RetainerAutomationResult> EnsureRetainerListAsync(CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Reads every assigned retainer from the manager-owned roster without requiring
+    /// a bell scene or filtering by current UI accessibility.
+    /// </summary>
+    Task<RetainerRosterResult> ScanRetainerRosterAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult(RetainerRosterResult.Failed(
+            "RetainerRosterUnsupported",
+            "This retainer session does not expose assigned-roster discovery."));
+
     Task<RetainerAutomationRosterResult> ScanAvailableRetainersAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationOpenResult> OpenFirstAvailableRetainerAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> OpenRetainerAsync(RetainerAutomationTarget target, CancellationToken cancellationToken = default);

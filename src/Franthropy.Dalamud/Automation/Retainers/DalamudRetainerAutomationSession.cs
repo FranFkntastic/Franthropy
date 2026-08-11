@@ -228,6 +228,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     public Task<RetainerAutomationRosterResult> ScanAvailableRetainersAsync(CancellationToken cancellationToken = default) =>
         framework.RunOnTick(ScanAvailableRetainers, cancellationToken: cancellationToken);
 
+    public Task<RetainerRosterResult> ScanRetainerRosterAsync(CancellationToken cancellationToken = default) =>
+        framework.RunOnTick(ScanRetainerRoster, cancellationToken: cancellationToken);
+
     public async Task<RetainerAutomationResult> OpenRetainerAsync(RetainerAutomationTarget target, CancellationToken cancellationToken = default)
     {
         var compatibility = EvaluatePatchCompatibility();
@@ -949,6 +952,38 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             : RetainerAutomationRosterResult.Failed(
                 "RetainerRosterEmpty",
                 "No available retainers were present in the reconciled live roster.");
+    }
+
+    private static unsafe RetainerRosterResult ScanRetainerRoster()
+    {
+        var manager = RetainerManager.Instance();
+        if (manager is null)
+            return RetainerRosterResult.Failed("RetainerManagerUnavailable", "The live retainer manager is unavailable.");
+        if (!manager->IsReady)
+            return RetainerRosterResult.Failed("RetainerRosterNotReady", "The assigned retainer roster is not ready.");
+
+        var count = manager->GetRetainerCount();
+        var retainers = new List<RetainerRosterEntry>(count);
+        for (uint displayOrder = 0; displayOrder < count; displayOrder++)
+        {
+            var retainer = manager->GetRetainerBySortedIndex(displayOrder);
+            if (retainer is null || retainer->RetainerId == 0)
+                return RetainerRosterResult.Failed(
+                    "RetainerRosterIncomplete",
+                    $"Assigned retainer {displayOrder + 1} of {count} did not expose a stable identity.");
+
+            retainers.Add(new(
+                retainer->RetainerId,
+                retainer->NameString,
+                checked((int)displayOrder),
+                null,
+                retainer->ClassJob,
+                retainer->Level,
+                retainer->MarketItemCount,
+                retainer->Available));
+        }
+
+        return RetainerRosterResult.Succeeded(retainers);
     }
 
     private unsafe bool IsCommandMenuReady()
