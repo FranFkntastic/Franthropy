@@ -108,6 +108,7 @@
     <Compile Remove="AgentBridge\AgentBridgeViewportCaptureService.cs" />
     <Compile Remove="AgentBridge\ReflectedPluginWindowSurfaceInspector.cs" />
     <Compile Remove="AgentBridge\ReflectedPluginWindowPresentationManager.cs" />
+    <Compile Remove="AgentBridge\ReflectedPluginWindowInputController.cs" />
     <Compile Remove="AgentBridge\DalamudRenderedUiTextActionDispatcher.cs" />
     <Compile Remove="AgentBridge\DalamudPluginLifecycleBridge.cs" />
     <Compile Remove="UI\Plots\DalamudPlotRenderer.cs" />
