@@ -373,6 +373,73 @@ public sealed class SqliteObservationStore : IObservationStore
         }
     }
 
+    public async ValueTask<ObservationChangeReadResult> ReadCurrentRetainerChangesAsync(
+        ObservationOwner owner,
+        long afterRevision,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        ArgumentNullException.ThrowIfNull(owner);
+        ArgumentOutOfRangeException.ThrowIfNegative(afterRevision);
+        try
+        {
+            await using var connection = CreateConnection(options, readOnly: true);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            var currentRevision = await ReadMetadataLongAsync(connection, transaction, "next_revision", cancellationToken).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.Transaction = (SqliteTransaction)transaction;
+            command.CommandText = """
+                SELECT revision, scope_json, capture_json, source_order_capture_json,
+                       payload_contract, payload_version, payload_json, payload_sha256, is_stale,
+                       stale_reason, stale_observed_at_utc, last_confirmed_at_utc,
+                       confirmation_count
+                FROM current_projection
+                WHERE owner_local_content_id = $owner_local_content_id
+                  AND owner_home_world_id = $owner_home_world_id
+                  AND revision > $after_revision
+                  AND revision <= $current_revision
+                  AND container_kind IN ($roster, $inventory, $listings, $gil)
+                ORDER BY revision, scope_key;
+                """;
+            command.Parameters.AddWithValue("$owner_local_content_id", owner.LocalContentId.ToString("X16", CultureInfo.InvariantCulture));
+            command.Parameters.AddWithValue("$owner_home_world_id", owner.HomeWorldId);
+            command.Parameters.AddWithValue("$after_revision", afterRevision);
+            command.Parameters.AddWithValue("$current_revision", currentRevision);
+            command.Parameters.AddWithValue("$roster", (int)ObservationContainerKind.RetainerRoster);
+            command.Parameters.AddWithValue("$inventory", (int)ObservationContainerKind.RetainerInventory);
+            command.Parameters.AddWithValue("$listings", (int)ObservationContainerKind.RetainerMarketListings);
+            command.Parameters.AddWithValue("$gil", (int)ObservationContainerKind.RetainerGil);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            var rows = new List<CurrentRow>();
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                rows.Add(new CurrentRow(
+                    reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetInt32(5),
+                    reader.GetString(6), reader.GetString(7), reader.GetBoolean(8), reader.IsDBNull(9) ? null : reader.GetString(9),
+                    reader.IsDBNull(10) ? null : reader.GetString(10), reader.GetString(11), reader.GetInt32(12)));
+            }
+            await reader.DisposeAsync().ConfigureAwait(false);
+            var observations = new List<TrustedObservation>(rows.Count);
+            foreach (var row in rows)
+                observations.Add(await ToTrustedObservationAsync(connection, row, cancellationToken, transaction).ConfigureAwait(false));
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new ObservationChangeReadResult(
+                ObservationReadStatus.Found,
+                currentRevision,
+                observations,
+                $"Found {observations.Count} changed retainer observation(s) after revision {afterRevision}.");
+        }
+        catch (SqliteException ex) when (IsBusy(ex))
+        {
+            return new ObservationChangeReadResult(ObservationReadStatus.Busy, afterRevision, [], "The observation database remained busy beyond the bounded wait.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SqliteException or JsonException)
+        {
+            return new ObservationChangeReadResult(ObservationReadStatus.Unavailable, afterRevision, [], ex.Message);
+        }
+    }
+
     public async ValueTask<ObservationWriteResult> InvalidateAsync(
         ObservationScope scope,
         string reason,
@@ -1389,12 +1456,13 @@ public sealed class SqliteObservationStore : IObservationStore
     private static async ValueTask<TrustedObservation> ToTrustedObservationAsync(
         SqliteConnection connection,
         CurrentRow row,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        System.Data.Common.DbTransaction? transaction = null)
     {
         var scope = JsonSerializer.Deserialize<ObservationScope>(row.ScopeJson, JsonOptions)
             ?? throw new InvalidDataException("Stored observation scope is null.");
         var payload = IsInventoryContainer(scope.Container)
-            ? await ReadInventoryPayloadAsync(connection, null, CreateScopeKey(scope), row.PayloadContract, row.PayloadVersion, cancellationToken).ConfigureAwait(false)
+            ? await ReadInventoryPayloadAsync(connection, transaction, CreateScopeKey(scope), row.PayloadContract, row.PayloadVersion, cancellationToken).ConfigureAwait(false)
             : new ObservationPayload(row.PayloadContract, row.PayloadVersion, row.PayloadJson);
         return new TrustedObservation(
             row.Revision,

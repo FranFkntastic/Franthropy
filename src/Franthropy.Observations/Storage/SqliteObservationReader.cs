@@ -5,7 +5,7 @@ using Microsoft.Data.Sqlite;
 
 namespace Franthropy.Observations.Storage;
 
-public sealed class SqliteObservationReader : IObservationReader, IInventoryObservationReader, IAsyncDisposable
+public sealed class SqliteObservationReader : IObservationReader, IRetainerObservationChangeReader, IInventoryObservationReader, IAsyncDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly ObservationStoreOptions options;
@@ -197,6 +197,67 @@ public sealed class SqliteObservationReader : IObservationReader, IInventoryObse
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SqliteException or JsonException)
         {
             return new InventoryChangeReadResult(InventoryChangeReadStatus.Unavailable, afterRevision, null, [], ex.Message);
+        }
+    }
+
+    public async ValueTask<ObservationChangeReadResult> ReadCurrentRetainerChangesAsync(
+        ObservationOwner owner,
+        long afterRevision,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        ArgumentNullException.ThrowIfNull(owner);
+        ArgumentOutOfRangeException.ThrowIfNegative(afterRevision);
+        try
+        {
+            await using var connection = CreateReadConnection();
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            var currentRevision = await ReadMetadataLongAsync(connection, transaction, "next_revision", cancellationToken).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.Transaction = (SqliteTransaction)transaction;
+            command.CommandText = """
+                SELECT revision, scope_json, capture_json, payload_contract, payload_version,
+                       payload_json, is_stale, stale_reason, stale_observed_at_utc,
+                       last_confirmed_at_utc, confirmation_count
+                FROM current_projection
+                WHERE owner_local_content_id = $owner_local_content_id
+                  AND owner_home_world_id = $owner_home_world_id
+                  AND revision > $after_revision
+                  AND revision <= $current_revision
+                  AND container_kind IN ($roster, $inventory, $listings, $gil)
+                ORDER BY revision, scope_key;
+                """;
+            command.Parameters.AddWithValue("$owner_local_content_id", owner.LocalContentId.ToString("X16", CultureInfo.InvariantCulture));
+            command.Parameters.AddWithValue("$owner_home_world_id", owner.HomeWorldId);
+            command.Parameters.AddWithValue("$after_revision", afterRevision);
+            command.Parameters.AddWithValue("$current_revision", currentRevision);
+            command.Parameters.AddWithValue("$roster", (int)ObservationContainerKind.RetainerRoster);
+            command.Parameters.AddWithValue("$inventory", (int)ObservationContainerKind.RetainerInventory);
+            command.Parameters.AddWithValue("$listings", (int)ObservationContainerKind.RetainerMarketListings);
+            command.Parameters.AddWithValue("$gil", (int)ObservationContainerKind.RetainerGil);
+            await using var row = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            var raw = new List<RawObservation>();
+            while (await row.ReadAsync(cancellationToken).ConfigureAwait(false))
+                raw.Add(ReadRawObservation(row));
+            await row.DisposeAsync().ConfigureAwait(false);
+            var observations = new List<TrustedObservation>(raw.Count);
+            foreach (var observation in raw)
+                observations.Add(await MaterializeAsync(connection, transaction, observation, cancellationToken).ConfigureAwait(false));
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new ObservationChangeReadResult(
+                ObservationReadStatus.Found,
+                currentRevision,
+                observations,
+                $"Found {observations.Count} changed retainer observation(s) after revision {afterRevision}.");
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode is 5 or 6)
+        {
+            return new ObservationChangeReadResult(ObservationReadStatus.Busy, afterRevision, [], "The observation database remained busy beyond the bounded wait.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SqliteException or JsonException)
+        {
+            return new ObservationChangeReadResult(ObservationReadStatus.Unavailable, afterRevision, [], ex.Message);
         }
     }
 

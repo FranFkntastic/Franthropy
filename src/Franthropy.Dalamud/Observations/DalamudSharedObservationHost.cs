@@ -212,12 +212,12 @@ public sealed class DalamudSharedObservationHost : IDisposable
         private readonly ObservationCaptureSessionRegistry? captureSessions;
         private readonly Action<string> fault;
         private readonly Action<string, Exception?>? diagnostic;
-        private readonly Channel<PendingObservation> queue = Channel.CreateBounded<PendingObservation>(new BoundedChannelOptions(256)
+        private readonly Channel<PendingObservation> queue = Channel.CreateUnbounded<PendingObservation>(new UnboundedChannelOptions
         {
             SingleReader = true,
             SingleWriter = false,
-            FullMode = BoundedChannelFullMode.Wait,
         });
+        private readonly LatestByKeyBuffer<ObservationEnvelope> pendingListings = new();
         private Task worker = Task.CompletedTask;
         private long sourceRevision;
         private bool started;
@@ -253,6 +253,8 @@ public sealed class DalamudSharedObservationHost : IDisposable
                 worker = Task.Run(ProcessAsync);
                 gameInventory.InventoryChanged += OnInventoryChanged;
                 addonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerList", OnRetainerListOpened);
+                addonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerSellList", OnRetainerSellingListChanged);
+                addonLifecycle.RegisterListener(AddonEvent.PostRefresh, "RetainerSellList", OnRetainerSellingListChanged);
                 addonLifecycle.RegisterListener(AddonEvent.PreFinalize, "InventoryRetainerLarge", OnRetainerInventoryClosing);
                 addonLifecycle.RegisterListener(AddonEvent.PreFinalize, "InventoryRetainer", OnRetainerInventoryClosing);
                 CaptureInitialCharacterState();
@@ -273,6 +275,8 @@ public sealed class DalamudSharedObservationHost : IDisposable
             {
                 gameInventory.InventoryChanged -= OnInventoryChanged;
                 addonLifecycle.UnregisterListener(AddonEvent.PostSetup, "RetainerList", OnRetainerListOpened);
+                addonLifecycle.UnregisterListener(AddonEvent.PostSetup, "RetainerSellList", OnRetainerSellingListChanged);
+                addonLifecycle.UnregisterListener(AddonEvent.PostRefresh, "RetainerSellList", OnRetainerSellingListChanged);
                 addonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "InventoryRetainerLarge", OnRetainerInventoryClosing);
                 addonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "InventoryRetainer", OnRetainerInventoryClosing);
             }
@@ -312,7 +316,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
                     captureRetainerInventory: () => Enqueue(Delta(
                         new ObservationScope(owner!, ObservationSubject.Retainer(retainerId!.Value, owner!), ObservationContainerKind.RetainerInventory),
                         retainer)),
-                    captureRetainerListings: () => Enqueue(CaptureRetainerListings(owner!, retainerId!.Value)),
+                    captureRetainerListings: () => EnqueueLatestListing(CaptureRetainerListings(owner!, retainerId!.Value)),
                     reportFailure: ex => diagnostic?.Invoke("A shared inventory observation event could not be captured.", ex));
             }
             catch (Exception ex)
@@ -376,6 +380,21 @@ public sealed class DalamudSharedObservationHost : IDisposable
         {
             try { Enqueue(CaptureRetainerRoster()); }
             catch (Exception ex) { diagnostic?.Invoke("The shared retainer roster could not be captured.", ex); }
+        }
+
+        private void OnRetainerSellingListChanged(AddonEvent eventType, AddonArgs args)
+        {
+            try
+            {
+                var owner = CurrentOwnerOrDefault();
+                var retainerId = owner is null ? null : CurrentRetainerIdOrDefault();
+                if (owner is not null && retainerId is not null)
+                    EnqueueLatestListing(CaptureRetainerListings(owner, retainerId.Value));
+            }
+            catch (Exception ex)
+            {
+                diagnostic?.Invoke("The shared retainer selling list could not be captured.", ex);
+            }
         }
 
         private void OnRetainerInventoryClosing(AddonEvent eventType, AddonArgs args)
@@ -611,13 +630,22 @@ public sealed class DalamudSharedObservationHost : IDisposable
         private void Enqueue(ObservationEnvelope observation)
         {
             if (!queue.Writer.TryWrite(new PendingObservation(observation, null)))
-                fault("The bounded shared-observation queue is full; collection stopped before evidence could be dropped silently.");
+                diagnostic?.Invoke("The shared-observation queue was already closed; a snapshot was not collected.", null);
         }
 
         private void Enqueue(InventoryObservationDelta observation)
         {
             if (!queue.Writer.TryWrite(new PendingObservation(null, observation)))
-                fault("The bounded shared-observation queue is full; collection stopped before evidence could be dropped silently.");
+                diagnostic?.Invoke("The shared-observation queue was already closed; an inventory change was not collected.", null);
+        }
+
+        private void EnqueueLatestListing(ObservationEnvelope observation)
+        {
+            var key = $"{observation.Scope.Owner.LocalContentId:X16}:{observation.Scope.Owner.HomeWorldId}:{observation.Scope.Subject.Id:X16}";
+            if (!pendingListings.Offer(key, observation))
+                return;
+            if (!queue.Writer.TryWrite(new PendingObservation(null, null, key)))
+                diagnostic?.Invoke("The shared-observation queue was already closed; a listing snapshot was not collected.", null);
         }
 
         private async Task ProcessAsync()
@@ -626,8 +654,14 @@ public sealed class DalamudSharedObservationHost : IDisposable
             {
                 await foreach (var observation in queue.Reader.ReadAllAsync().ConfigureAwait(false))
                 {
-                    var result = observation.Snapshot is not null
-                        ? await store.WriteAsync(observation.Snapshot).ConfigureAwait(false)
+                    ObservationEnvelope? snapshot = observation.Snapshot;
+                    if (observation.ListingKey is { } listingKey)
+                    {
+                        if (!pendingListings.TryTake(listingKey, out snapshot))
+                            continue;
+                    }
+                    var result = snapshot is not null
+                        ? await store.WriteAsync(snapshot).ConfigureAwait(false)
                         : await store.WriteInventoryDeltaAsync(observation.Delta!).ConfigureAwait(false);
                     if (result.Status is ObservationWriteStatus.Busy or ObservationWriteStatus.Unavailable or ObservationWriteStatus.UnsupportedDatabaseVersion)
                     {
@@ -646,6 +680,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
 
         private sealed record PendingObservation(
             ObservationEnvelope? Snapshot,
-            InventoryObservationDelta? Delta);
+            InventoryObservationDelta? Delta,
+            string? ListingKey = null);
     }
 }
