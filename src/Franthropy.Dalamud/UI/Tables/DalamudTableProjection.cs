@@ -20,7 +20,9 @@ public sealed record DalamudTableColumn<TRow>(
     Action<TRow>? Draw = null,
     Func<TRow, Vector4?>? TextColor = null,
     DalamudTableCellAlignment Alignment = DalamudTableCellAlignment.Left,
-    Action<TRow>? DrawContextMenu = null);
+    Action<TRow>? DrawContextMenu = null,
+    string? Id = null,
+    string? HeaderTooltip = null);
 
 public readonly record struct DalamudTableLayout(
     Vector2 Size,
@@ -61,6 +63,7 @@ public sealed class DalamudTableProjection<TRow>
     private string[] appliedFilters = [];
     private int appliedSortColumn = -1;
     private ImGuiSortDirection appliedSortDirection = ImGuiSortDirection.None;
+    private bool openColumnMenu;
 
     public DalamudTableProjection(
         IReadOnlyList<DalamudTableColumn<TRow>> columns,
@@ -68,6 +71,13 @@ public sealed class DalamudTableProjection<TRow>
     {
         if (columns.Count == 0)
             throw new ArgumentException("A table projection requires at least one column.", nameof(columns));
+        var duplicateIdentity = columns
+            .Where(column => !string.IsNullOrWhiteSpace(column.Id))
+            .Select(column => column.Id!)
+            .GroupBy(identity => identity, StringComparer.Ordinal)
+            .FirstOrDefault(group => group.Count() > 1);
+        if (duplicateIdentity is not null)
+            throw new ArgumentException($"Table column identity '{duplicateIdentity.Key}' is duplicated.", nameof(columns));
         this.columns = columns;
         this.selection = selection ?? DalamudTableSelection<TRow>.None;
         filters = new string[columns.Count];
@@ -80,6 +90,20 @@ public sealed class DalamudTableProjection<TRow>
 
     public IReadOnlyList<string> Filters => filters;
 
+    public bool DrawColumnMenuButton(string id, string label = "Columns")
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        ArgumentException.ThrowIfNullOrWhiteSpace(label);
+        var clicked = ImGui.SmallButton($"{label}##{id}");
+        if (clicked)
+            RequestColumnMenu();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Show, hide, reorder, or reset table columns.");
+        return clicked;
+    }
+
+    public void RequestColumnMenu() => openColumnMenu = true;
+
     public bool Begin(string id, float height, ImGuiTableFlags extraFlags = ImGuiTableFlags.None)
     {
         return Begin(id, DalamudTableLayout.Scrolling(height, extraFlags));
@@ -89,11 +113,19 @@ public sealed class DalamudTableProjection<TRow>
     {
         if (!ImGui.BeginTable(id, columns.Count, layout.Flags, layout.Size))
             return false;
-        foreach (var column in columns)
-            ImGui.TableSetupColumn(column.Label, column.Flags, column.Width);
+        for (var index = 0; index < columns.Count; index++)
+        {
+            var column = columns[index];
+            ImGui.TableSetupColumn(column.Label, column.Flags, column.Width, StableColumnId(ResolveColumnIdentity(column, index)));
+        }
         if (layout.FreezeColumns > 0 || layout.FreezeRows > 0)
             ImGui.TableSetupScrollFreeze(layout.FreezeColumns, layout.FreezeRows);
-        ImGui.TableHeadersRow();
+        if (openColumnMenu)
+        {
+            ImGuiP.TableOpenContextMenu();
+            openColumnMenu = false;
+        }
+        DrawHeaders();
         return true;
     }
 
@@ -306,6 +338,44 @@ public sealed class DalamudTableProjection<TRow>
                 DrawCell(columns[index], row, id is null ? null : $"{id}:cell:{index}");
         }
     }
+
+    private void DrawHeaders()
+    {
+        ImGui.TableNextRow(ImGuiTableRowFlags.Headers);
+        for (var index = 0; index < columns.Count; index++)
+        {
+            if (!ImGui.TableSetColumnIndex(index))
+                continue;
+            var column = columns[index];
+            ImGui.TableHeader(HeaderLabel(column));
+            if (!string.IsNullOrWhiteSpace(column.HeaderTooltip) && ImGui.IsItemHovered())
+                ImGui.SetTooltip(column.HeaderTooltip);
+        }
+    }
+
+    internal static string HeaderLabel(DalamudTableColumn<TRow> column) =>
+        (column.Flags & ImGuiTableColumnFlags.NoHeaderLabel) != 0
+            ? string.Empty
+            : column.Label;
+
+    internal static uint StableColumnId(string id)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        const uint offset = 2166136261;
+        const uint prime = 16777619;
+        var hash = offset;
+        foreach (var character in id)
+        {
+            hash ^= character;
+            hash *= prime;
+        }
+        return hash == 0 ? 1u : hash;
+    }
+
+    private static string ResolveColumnIdentity(DalamudTableColumn<TRow> column, int index) =>
+        !string.IsNullOrWhiteSpace(column.Id)
+            ? column.Id
+            : $"{column.Label}##column-{index}";
 
     private static void DrawCell(
         DalamudTableColumn<TRow> column,
