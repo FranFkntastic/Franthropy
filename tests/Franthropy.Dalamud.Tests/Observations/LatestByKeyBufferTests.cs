@@ -5,6 +5,14 @@ namespace Franthropy.Dalamud.Tests.Observations;
 public sealed class LatestByKeyBufferTests
 {
     [Fact]
+    public void Selling_surface_collector_outranks_capture_session_only_copies()
+    {
+        Assert.True(
+            DalamudSharedObservationHost.SellingSurfaceWriterCapability >
+            DalamudSharedObservationHost.CaptureSessionWriterCapability);
+    }
+
+    [Fact]
     public void Burst_schedules_one_write_and_preserves_the_newest_value_per_retainer()
     {
         var buffer = new LatestByKeyBuffer<ListingState>();

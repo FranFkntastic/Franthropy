@@ -22,13 +22,14 @@ public sealed record DalamudSharedObservationHostOptions
     public required IPlayerState PlayerState { get; init; }
     public required IAddonLifecycle AddonLifecycle { get; init; }
     public Action<string, Exception?>? Diagnostic { get; init; }
-    public int WriterCapability { get; init; } = DalamudSharedObservationHost.CaptureSessionWriterCapability;
+    public int WriterCapability { get; init; } = DalamudSharedObservationHost.SellingSurfaceWriterCapability;
 }
 
 public sealed class DalamudSharedObservationHost : IDisposable
 {
     public const string ApprovedGameBuild = "2026.08.05.0000.0000";
     public const int CaptureSessionWriterCapability = 3;
+    public const int SellingSurfaceWriterCapability = 4;
     private readonly DalamudSharedObservationHostOptions options;
     private readonly SharedObservationPaths paths;
     private readonly ObservationStoreOptions storeOptions;
