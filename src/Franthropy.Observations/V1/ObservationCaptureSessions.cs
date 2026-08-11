@@ -224,7 +224,7 @@ public sealed class ObservationCaptureSession : IDisposable
     {
         if (Interlocked.Exchange(ref disposed, 1) == 0)
         {
-            renewalTimer?.Dispose();
+            renewalTimer?.DisposeAsync().AsTask().GetAwaiter().GetResult();
             release();
         }
     }
