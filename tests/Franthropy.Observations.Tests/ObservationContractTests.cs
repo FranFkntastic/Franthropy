@@ -34,6 +34,51 @@ public sealed class ObservationContractTests
     }
 
     [Fact]
+    public void Capture_session_recovers_a_malformed_shared_registry()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"franthropy-capture-session-{Guid.NewGuid():N}.json");
+        File.WriteAllText(path, "{torn");
+        var requester = new ObservationCaptureSessionRegistry(path);
+        var collector = new ObservationCaptureSessionRegistry(path);
+        var owner = new ObservationOwner(10, 20);
+        var scope = new ObservationScope(owner, ObservationSubject.Retainer(30, owner), ObservationContainerKind.RetainerInventory);
+
+        try
+        {
+            using var session = requester.Begin(owner, 30);
+            Assert.Equal(session.SessionId, collector.Resolve(scope));
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete($"{path}.lock");
+        }
+    }
+
+    [Fact]
+    public async Task Capture_session_renews_while_the_requester_still_owns_it()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"franthropy-capture-session-{Guid.NewGuid():N}.json");
+        var requester = new ObservationCaptureSessionRegistry(path, TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(50));
+        var collector = new ObservationCaptureSessionRegistry(path, TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(50));
+        var owner = new ObservationOwner(10, 20);
+        var scope = new ObservationScope(owner, ObservationSubject.Retainer(30, owner), ObservationContainerKind.RetainerInventory);
+
+        try
+        {
+            using var session = requester.Begin(owner, 30);
+            await Task.Delay(700);
+            Assert.Equal(session.SessionId, collector.Resolve(scope));
+            Assert.Throws<InvalidOperationException>(() => collector.Begin(owner, 30));
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete($"{path}.lock");
+        }
+    }
+
+    [Fact]
     public void Assigned_roster_keeps_classless_retainers_with_unknown_ui_accessibility()
     {
         var owner = new ObservationOwner(100, 74);
