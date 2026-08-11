@@ -43,6 +43,7 @@ public enum ObservationContainerKind
     RetainerInventory,
     RetainerMarketListings,
     Saddlebag,
+    RetainerGil,
 }
 
 public sealed record ObservationScope(
@@ -90,7 +91,8 @@ public sealed record ObservationCapture(
     long SourceRevision,
     DateTimeOffset ObservedAtUtc,
     ObservationProvenance Provenance,
-    ObservationEvidence Evidence);
+    ObservationEvidence Evidence,
+    string SessionId = "");
 
 public sealed record ObservationPayload(string Contract, int Version, string Json)
 {
@@ -168,7 +170,13 @@ public sealed record InventoryChangeBatch(
 public sealed record RetainerRosterObservation(
     ulong RetainerId,
     string Name,
-    uint WorldId);
+    uint WorldId,
+    int DisplayOrder = 0,
+    bool? IsUiAccessible = null,
+    byte ClassJobId = 0,
+    byte Level = 0,
+    byte MarketItemCount = 0,
+    bool IsGameAvailable = true);
 
 public sealed record RetainerRosterPayload(IReadOnlyList<RetainerRosterObservation> Retainers);
 
@@ -180,6 +188,7 @@ public sealed record RetainerMarketListingObservation(
     bool IsHighQuality);
 
 public sealed record RetainerMarketListingsPayload(IReadOnlyList<RetainerMarketListingObservation> Listings);
+public sealed record RetainerGilPayload(ulong Gil);
 
 public static class ObservationPayloadContracts
 {
@@ -187,6 +196,7 @@ public static class ObservationPayloadContracts
     public const string RetainerRoster = "franthropy.retainer-roster.v1";
     public const string RetainerInventory = "franthropy.retainer-inventory.v1";
     public const string RetainerMarketListings = "franthropy.retainer-market-listings.v1";
+    public const string RetainerGil = "franthropy.retainer-gil.v1";
     public const string Saddlebag = "franthropy.saddlebag.v1";
     public const string InventorySlotDelta = "franthropy.inventory-slot-delta.v1";
     public const int Version = 1;

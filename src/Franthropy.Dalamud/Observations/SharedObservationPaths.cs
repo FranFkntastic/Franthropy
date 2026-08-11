@@ -11,7 +11,8 @@ public sealed record SharedObservationPaths(
     string MigrationLockPath,
     string CandidatesDirectory,
     string BackupsDirectory,
-    string QuarantineDirectory)
+    string QuarantineDirectory,
+    string CaptureSessionsPath)
 {
     public static SharedObservationPaths FromPluginConfigDirectory(string pluginConfigDirectory)
     {
@@ -33,7 +34,8 @@ public sealed record SharedObservationPaths(
             Path.Combine(shared, "migration.lock"),
             Path.Combine(shared, "candidates"),
             Path.Combine(shared, "backups"),
-            Path.Combine(shared, "quarantine"));
+            Path.Combine(shared, "quarantine"),
+            Path.Combine(shared, "capture-sessions.json"));
     }
 
     public void EnsureDirectories()
