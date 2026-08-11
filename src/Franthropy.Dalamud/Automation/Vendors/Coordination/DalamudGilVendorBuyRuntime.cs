@@ -24,6 +24,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     private readonly DalamudGilVendorAccessReader access;
     private readonly DalamudOrdinaryGilShop shop;
     private readonly DalamudVNavmeshTravel vnavmesh;
+    private readonly DalamudLocalTravelRunner localTravel;
     private readonly DalamudLifestreamAetheryteTravel aetheryteTravel;
     private readonly DalamudLifestreamAethernetTravel aethernetTravel;
     private readonly DalamudLifestreamObjectInteractor objectInteractor;
@@ -41,6 +42,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     private uint? requestedAetheryteId;
     private uint? requestedAethernetId;
     private bool ownsNavigation;
+    private LocalTravelMode? activeTravelMode;
     private bool automationActive;
 
     public DalamudGilVendorBuyRuntime(
@@ -54,6 +56,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         IDataManager dataManager,
         IClientState clientState,
         IObjectTable objectTable,
+        ICondition condition,
         System.Action? beginAutomation = null,
         System.Action? endAutomation = null,
         Func<DateTimeOffset>? utcNow = null)
@@ -68,6 +71,9 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         this.dataManager = dataManager ?? throw new ArgumentNullException(nameof(dataManager));
         this.clientState = clientState ?? throw new ArgumentNullException(nameof(clientState));
         this.objectTable = objectTable ?? throw new ArgumentNullException(nameof(objectTable));
+        localTravel = new DalamudLocalTravelRunner(
+            condition ?? throw new ArgumentNullException(nameof(condition)),
+            objectTable);
         this.beginAutomation = beginAutomation ?? (() => { });
         this.endAutomation = endAutomation ?? (() => { });
         this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
@@ -205,6 +211,8 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
             approachStartedAt = utcNow();
             nextActionAt = DateTimeOffset.MinValue;
             recovery.ResetNavigation();
+            localTravel.Reset();
+            activeTravelMode = null;
         }
         var npc = access.FindLiveNpc(offer);
         var playerPosition = objectTable.LocalPlayer?.Position;
@@ -218,6 +226,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
                 return new(GilVendorReachState.Waiting, $"Waiting for {offer.NpcName} to become targetable.");
             StopOwnedNavigation();
             recovery.ResetNavigation();
+            localTravel.Reset();
             if (utcNow() < nextActionAt)
                 return new(GilVendorReachState.Waiting, $"Opening {offer.NpcName}'s shop.");
             return InteractWithVendor(npc, offer);
@@ -227,6 +236,15 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
             return new(GilVendorReachState.Waiting, navigation.Message);
         if (navigation.State is VNavmeshLifecycleState.Unavailable or VNavmeshLifecycleState.IpcFailure)
             return new(GilVendorReachState.Failed, navigation.Message);
+        if (ownsNavigation && !navigation.IsRunning && activeTravelMode == LocalTravelMode.Flight)
+        {
+            ownsNavigation = false;
+            activeTravelMode = null;
+            localTravel.DowngradeFlight();
+            recovery.ResetNavigation();
+            nextActionAt = DateTimeOffset.MinValue;
+            return new(GilVendorReachState.Waiting, $"The flight route to {offer.NpcName} ended early; retrying the same destination by ground.");
+        }
         var decision = DecideApproach(distance, npc is not null,
             navigation.State == VNavmeshLifecycleState.Ready,
             navigation.State == VNavmeshLifecycleState.Running, ownsNavigation);
@@ -236,9 +254,18 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
                 switch (recovery.ObserveOwnedNavigation(utcNow(), distance))
                 {
                     case GilVendorOwnedNavigationDecision.Restart:
+                        var stalledMode = activeTravelMode;
                         if (!TryStopOwnedNavigation())
                             return new(GilVendorReachState.Failed, $"Could not stop the stalled route to {offer.NpcName}.");
                         nextActionAt = DateTimeOffset.MinValue;
+                        if (stalledMode == LocalTravelMode.Flight)
+                        {
+                            localTravel.DowngradeFlight();
+                            recovery.ResetNavigation();
+                            return new(
+                                GilVendorReachState.Waiting,
+                                $"The flight route to {offer.NpcName} stalled; retrying the same destination by ground.");
+                        }
                         return new(
                             GilVendorReachState.Waiting,
                             $"Restarting the stalled route to {offer.NpcName} ({recovery.NavigationRecoveryCount}/{recovery.MaximumNavigationRecoveries}).");
@@ -247,7 +274,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
                             GilVendorReachState.Unavailable,
                             $"Could not make progress toward {offer.NpcName} after {recovery.MaximumNavigationRecoveries} automatic route restarts.");
                 }
-                return new(GilVendorReachState.Waiting, $"Walking to {offer.NpcName} ({distance:0.0} yalms away).");
+                return new(GilVendorReachState.Waiting, DescribeApproach(activeTravelMode, offer.NpcName, distance));
             case GilVendorApproachDecision.BlockedByAnotherRoute:
                 return new(GilVendorReachState.Failed, "Another vnavmesh route is already active.");
             case GilVendorApproachDecision.NavigationUnavailable:
@@ -255,6 +282,13 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         }
         if (utcNow() >= nextActionAt)
         {
+            var preparation = localTravel.Advance(distance, utcNow());
+            if (!preparation.IsReady)
+                return new(
+                    preparation.State == LocalTravelPreparationState.Unavailable
+                        ? GilVendorReachState.Unavailable
+                        : GilVendorReachState.Waiting,
+                    preparation.Message);
             var submissionDecision = recovery.ClassifyNavigationSubmission();
             if (submissionDecision == GilVendorNavigationSubmissionDecision.Exhausted)
             {
@@ -262,16 +296,20 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
                     GilVendorReachState.Unavailable,
                     $"Could not keep a route active toward {offer.NpcName} after {recovery.MaximumNavigationRecoveries} automatic restarts.");
             }
-            var movement = vnavmesh.TryMoveCloseTo(destination, NavigationStopDistance);
+            var movement = vnavmesh.TryMoveCloseTo(
+                destination,
+                NavigationStopDistance,
+                preparation.VNavmeshMode);
             if (movement.State == VNavmeshPathSubmissionState.Loading)
                 return new(GilVendorReachState.Waiting, movement.Message);
             if (!movement.Submitted)
                 return new(GilVendorReachState.Failed, movement.Message);
             recovery.RecordNavigationSubmission(utcNow(), distance);
             ownsNavigation = true;
+            activeTravelMode = preparation.Mode;
             nextActionAt = utcNow().Add(ActionThrottle);
         }
-        return new(GilVendorReachState.Waiting, $"Walking to {offer.NpcName} ({distance:0.0} yalms away).");
+        return new(GilVendorReachState.Waiting, DescribeApproach(activeTravelMode, offer.NpcName, distance));
     }
 
     public void ResetVendorApproach()
@@ -284,6 +322,8 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         requestedAethernetId = null;
         travelReadiness.Reset();
         recovery.Reset();
+        localTravel.Reset();
+        activeTravelMode = null;
     }
 
     public GilVendorShopReadResult ReadShopRows() => shop.ReadRows();
@@ -311,6 +351,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
             }
             finally
             {
+                localTravel.Reset();
                 endAutomation();
             }
         }
@@ -360,8 +401,17 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         if (vnavmesh.Observe().IsRunning && !vnavmesh.TryStop())
             return false;
         ownsNavigation = false;
+        activeTravelMode = null;
         return true;
     }
+
+    private static string DescribeApproach(LocalTravelMode? mode, string npcName, float distance) => mode switch
+    {
+        LocalTravelMode.Flight => $"Flying to {npcName} ({distance:0.0} yalms away).",
+        LocalTravelMode.GroundMount => $"Riding to {npcName} ({distance:0.0} yalms away).",
+        LocalTravelMode.Sprint => $"Sprinting to {npcName} ({distance:0.0} yalms away).",
+        _ => $"Walking to {npcName} ({distance:0.0} yalms away).",
+    };
 
     private static float HorizontalDistance(Vector3 first, Vector3 second)
     {
