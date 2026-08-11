@@ -29,6 +29,29 @@ public sealed class ObservationCollectorCoordinatorTests
     }
 
     [Fact]
+    public async Task Capture_session_capability_outranks_an_alphabetically_preferred_legacy_collector()
+    {
+        using var fixture = new CoordinatorFixture();
+        using var legacy = fixture.Create(
+            "ComplicatedMarketBoard",
+            "legacy-cmb",
+            new Version(1, 0),
+            2);
+        using var captureAware = fixture.Create(
+            "Quartermaster",
+            "capture-aware-quartermaster",
+            new Version(1, 0),
+            3);
+
+        legacy.Start();
+        await WaitForStateAsync(legacy, ObservationLeadershipState.Collector);
+        captureAware.Start();
+
+        await WaitForStateAsync(captureAware, ObservationLeadershipState.Collector);
+        await WaitForStateAsync(legacy, ObservationLeadershipState.Reader);
+    }
+
+    [Fact]
     public async Task Collector_fault_relinquishes_to_next_candidate_without_a_heartbeat()
     {
         using var fixture = new CoordinatorFixture();
