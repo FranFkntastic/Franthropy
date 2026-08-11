@@ -1,6 +1,5 @@
 using System.Numerics;
 using Dalamud.Plugin;
-using Dalamud.Plugin.Ipc;
 
 namespace Franthropy.Dalamud.Travel;
 
@@ -32,6 +31,12 @@ public enum VNavmeshPathSubmissionState
     IpcFailure,
 }
 
+public enum VNavmeshTravelMode
+{
+    Ground,
+    Flight,
+}
+
 public sealed record VNavmeshPathSubmissionResult(
     VNavmeshPathSubmissionState State,
     string Code,
@@ -55,32 +60,32 @@ public sealed class DalamudVNavmeshTravel
     public const string MoveCloseToChannel = "vnavmesh.SimpleMove.PathfindAndMoveCloseTo";
 
     private readonly Func<bool> isAvailable;
-    private readonly ICallGateSubscriber<bool> isReady;
-    private readonly ICallGateSubscriber<bool> isRunning;
-    private readonly ICallGateSubscriber<Vector3, bool, float, bool> moveCloseTo;
-    private readonly ICallGateSubscriber<object> stop;
-    private readonly ICallGateSubscriber<bool, object> setMovementAllowed;
+    private readonly Func<bool> isReady;
+    private readonly Func<bool> isRunning;
+    private readonly Func<Vector3, bool, float, bool> moveCloseTo;
+    private readonly Action stop;
+    private readonly Action<bool> setMovementAllowed;
 
     public DalamudVNavmeshTravel(IDalamudPluginInterface pluginInterface)
         : this(
             () => pluginInterface.InstalledPlugins.Any(plugin =>
                 plugin.IsLoaded &&
                 string.Equals(plugin.InternalName, InternalName, StringComparison.OrdinalIgnoreCase)),
-            pluginInterface.GetIpcSubscriber<bool>(NavIsReadyChannel),
-            pluginInterface.GetIpcSubscriber<bool>(PathIsRunningChannel),
-            pluginInterface.GetIpcSubscriber<Vector3, bool, float, bool>(MoveCloseToChannel),
-            pluginInterface.GetIpcSubscriber<object>(PathStopChannel),
-            pluginInterface.GetIpcSubscriber<bool, object>(PathSetMovementAllowedChannel))
+            pluginInterface.GetIpcSubscriber<bool>(NavIsReadyChannel).InvokeFunc,
+            pluginInterface.GetIpcSubscriber<bool>(PathIsRunningChannel).InvokeFunc,
+            pluginInterface.GetIpcSubscriber<Vector3, bool, float, bool>(MoveCloseToChannel).InvokeFunc,
+            pluginInterface.GetIpcSubscriber<object>(PathStopChannel).InvokeAction,
+            pluginInterface.GetIpcSubscriber<bool, object>(PathSetMovementAllowedChannel).InvokeAction)
     {
     }
 
     internal DalamudVNavmeshTravel(
         Func<bool> isAvailable,
-        ICallGateSubscriber<bool> isReady,
-        ICallGateSubscriber<bool> isRunning,
-        ICallGateSubscriber<Vector3, bool, float, bool> moveCloseTo,
-        ICallGateSubscriber<object> stop,
-        ICallGateSubscriber<bool, object> setMovementAllowed)
+        Func<bool> isReady,
+        Func<bool> isRunning,
+        Func<Vector3, bool, float, bool> moveCloseTo,
+        Action stop,
+        Action<bool> setMovementAllowed)
     {
         this.isAvailable = isAvailable;
         this.isReady = isReady;
@@ -97,9 +102,9 @@ public sealed class DalamudVNavmeshTravel
 
         try
         {
-            if (isRunning.InvokeFunc())
+            if (isRunning())
                 return Observe(VNavmeshLifecycleState.Running, "PathRunning", "vnavmesh is following a path.");
-            if (isReady.InvokeFunc())
+            if (isReady())
                 return Observe(VNavmeshLifecycleState.Ready, "Ready", "vnavmesh is ready.");
             return Observe(VNavmeshLifecycleState.Loading, "NavmeshLoading", "vnavmesh is loaded and waiting for the current territory navmesh.");
         }
@@ -110,6 +115,12 @@ public sealed class DalamudVNavmeshTravel
     }
 
     public VNavmeshPathSubmissionResult TryMoveCloseTo(Vector3 destination, float range)
+        => TryMoveCloseTo(destination, range, VNavmeshTravelMode.Ground);
+
+    public VNavmeshPathSubmissionResult TryMoveCloseTo(
+        Vector3 destination,
+        float range,
+        VNavmeshTravelMode mode)
     {
         var lifecycle = Observe();
         if (lifecycle.State == VNavmeshLifecycleState.Loading)
@@ -123,7 +134,7 @@ public sealed class DalamudVNavmeshTravel
 
         try
         {
-            return moveCloseTo.InvokeFunc(destination, false, range)
+            return moveCloseTo(destination, mode == VNavmeshTravelMode.Flight, range)
                 ? Submit(VNavmeshPathSubmissionState.Submitted, "Submitted", "vnavmesh accepted the path.")
                 : Submit(VNavmeshPathSubmissionState.Rejected, "PathRejected", "vnavmesh rejected the path.");
         }
@@ -139,7 +150,7 @@ public sealed class DalamudVNavmeshTravel
             return false;
         try
         {
-            stop.InvokeAction();
+            stop();
             return true;
         }
         catch
@@ -154,7 +165,7 @@ public sealed class DalamudVNavmeshTravel
             return false;
         try
         {
-            setMovementAllowed.InvokeAction(allowed);
+            setMovementAllowed(allowed);
             return true;
         }
         catch
