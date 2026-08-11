@@ -51,6 +51,12 @@ public sealed record ObservationCollectionReadResult(
     IReadOnlyList<TrustedObservation> Observations,
     string Message);
 
+public sealed record ObservationChangeReadResult(
+    ObservationReadStatus Status,
+    long CurrentRevision,
+    IReadOnlyList<TrustedObservation> Observations,
+    string Message);
+
 public enum InventoryChangeReadStatus
 {
     Found,
@@ -92,6 +98,15 @@ public interface IObservationReader
         ObservationOwner owner,
         ObservationContainerKind container,
         CancellationToken cancellationToken = default);
+
+}
+
+public interface IRetainerObservationChangeReader
+{
+    ValueTask<ObservationChangeReadResult> ReadCurrentRetainerChangesAsync(
+        ObservationOwner owner,
+        long afterRevision,
+        CancellationToken cancellationToken = default);
 }
 
 public interface IInventoryObservationReader
@@ -122,7 +137,7 @@ public interface IInventoryObservationWriter
         CancellationToken cancellationToken = default);
 }
 
-public interface IObservationStore : IObservationReader, IObservationWriter, IInventoryObservationReader, IInventoryObservationWriter, IAsyncDisposable
+public interface IObservationStore : IObservationReader, IRetainerObservationChangeReader, IObservationWriter, IInventoryObservationReader, IInventoryObservationWriter, IAsyncDisposable
 {
     event EventHandler<ObservationChange>? Changed;
 }

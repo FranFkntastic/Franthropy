@@ -773,6 +773,39 @@ public sealed class SqliteObservationStoreTests
         Assert.Equal([200UL, 201UL], read.Observations.Select(observation => observation.Scope.Subject.Id));
     }
 
+    [Fact]
+    public async Task Retainer_change_query_returns_only_current_rows_changed_after_checkpoint()
+    {
+        await using var fixture = await StoreFixture.CreateAsync();
+        var first = fixture.CreateListingObservation(1, [new(0, 100, 1, 10, false)]);
+        var initial = await fixture.Store.WriteAsync(first);
+        var changed = fixture.CreateListingObservation(2, []) with { Scope = first.Scope };
+        var second = fixture.CreateListingObservation(3, [new(0, 200, 1, 20, false)]) with
+        {
+            Scope = first.Scope with { Subject = ObservationSubject.Retainer(201, first.Scope.Owner) },
+        };
+        var otherOwner = new ObservationOwner(999, 74);
+        var other = fixture.CreateListingObservation(4, []) with
+        {
+            Scope = new ObservationScope(otherOwner, ObservationSubject.Retainer(300, otherOwner), ObservationContainerKind.RetainerMarketListings),
+        };
+        await fixture.Store.WriteAsync(changed);
+        await fixture.Store.WriteAsync(second);
+        await fixture.Store.WriteAsync(other);
+
+        var open = await SqliteObservationReader.OpenAsync(new ObservationStoreOptions { DatabasePath = fixture.DatabasePath });
+        Assert.True(open.IsReady, open.Message);
+        await using var reader = open.Reader!;
+        var read = await reader.ReadCurrentRetainerChangesAsync(first.Scope.Owner, initial.CurrentRevision!.Value);
+
+        Assert.Equal(ObservationReadStatus.Found, read.Status);
+        Assert.Equal([200UL, 201UL], read.Observations.Select(observation => observation.Scope.Subject.Id));
+        Assert.Empty(read.Observations[0].Payload.Deserialize<RetainerMarketListingsPayload>(
+            ObservationPayloadContracts.RetainerMarketListings,
+            ObservationPayloadContracts.Version).Listings);
+        Assert.True(read.CurrentRevision > initial.CurrentRevision);
+    }
+
     private static async Task CreateLegacyVersion10DatabaseAsync(string path)
     {
         var open = await SqliteObservationStore.OpenAsync(new ObservationStoreOptions { DatabasePath = path });
