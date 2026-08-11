@@ -347,11 +347,16 @@ public sealed class DalamudTableProjection<TRow>
             if (!ImGui.TableSetColumnIndex(index))
                 continue;
             var column = columns[index];
-            ImGui.TableHeader(column.Label);
+            ImGui.TableHeader(HeaderLabel(column));
             if (!string.IsNullOrWhiteSpace(column.HeaderTooltip) && ImGui.IsItemHovered())
                 ImGui.SetTooltip(column.HeaderTooltip);
         }
     }
+
+    internal static string HeaderLabel(DalamudTableColumn<TRow> column) =>
+        (column.Flags & ImGuiTableColumnFlags.NoHeaderLabel) != 0
+            ? string.Empty
+            : column.Label;
 
     internal static uint StableColumnId(string id)
     {

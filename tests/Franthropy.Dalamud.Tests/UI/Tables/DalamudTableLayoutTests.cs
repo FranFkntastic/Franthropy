@@ -122,6 +122,19 @@ public sealed class DalamudTableLayoutTests
         Assert.Equal(2, table.ColumnCount);
     }
 
+    [Fact]
+    public void Header_label_honors_no_header_label_without_discarding_the_column_name()
+    {
+        var column = new DalamudTableColumn<int>(
+            "Remove",
+            28f,
+            _ => string.Empty,
+            Flags: ImGuiTableColumnFlags.NoHeaderLabel);
+
+        Assert.Equal(string.Empty, DalamudTableProjection<int>.HeaderLabel(column));
+        Assert.Equal("Remove", column.Label);
+    }
+
     [Theory]
     [InlineData(nameof(DalamudTableProjection<int>.DrawRow))]
     [InlineData(nameof(DalamudTableProjection<int>.DrawSelectableRow))]
