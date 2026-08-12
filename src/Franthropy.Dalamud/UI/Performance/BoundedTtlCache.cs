@@ -2,6 +2,11 @@ using System.Collections.Concurrent;
 
 namespace Franthropy.Dalamud.UI.Performance;
 
+public readonly record struct BoundedTtlCacheLookup<T>(
+    bool Found,
+    bool IsFresh,
+    T Value);
+
 /// <summary>
 /// A thread-safe expiring cache with a hard entry ceiling. Expiration is enforced on reads and
 /// writes; over-capacity pruning removes expired and then oldest observations.
@@ -35,16 +40,23 @@ public sealed class BoundedTtlCache<TKey, TValue>
 
     public int Count => entries.Count;
 
+    public BoundedTtlCacheLookup<TValue> Get(TKey key)
+    {
+        if (!entries.TryGetValue(key, out var entry))
+            return new(false, false, default!);
+        return new(
+            true,
+            timeProvider.GetUtcNow() - entry.StoredAt < lifetime,
+            entry.Value);
+    }
+
     public bool TryGetValue(TKey key, out TValue value)
     {
-        if (entries.TryGetValue(key, out var entry))
+        var lookup = Get(key);
+        if (lookup is { Found: true, IsFresh: true })
         {
-            if (timeProvider.GetUtcNow() - entry.StoredAt < lifetime)
-            {
-                value = entry.Value;
-                return true;
-            }
-            entries.TryRemove(new KeyValuePair<TKey, Entry>(key, entry));
+            value = lookup.Value;
+            return true;
         }
 
         value = default!;

@@ -106,7 +106,11 @@ public sealed class FrameSafePrimitiveTests
 
         time.Advance(TimeSpan.FromMinutes(1));
         Assert.False(cache.TryGetValue(4, out _));
-        Assert.Equal(2, cache.Count);
+        var stale = cache.Get(4);
+        Assert.True(stale.Found);
+        Assert.False(stale.IsFresh);
+        Assert.Equal("four", stale.Value);
+        Assert.Equal(3, cache.Count);
     }
 
     private sealed class ManualTimeProvider : TimeProvider
