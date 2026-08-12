@@ -139,6 +139,47 @@ public sealed class GilVendorBuyCoordinatorTests
         Assert.Equal(1, runtime.SubmitCalls);
     }
 
+    [Fact]
+    public void Delayed_receipt_fails_when_an_unavailable_target_remains_unmet()
+    {
+        var unavailableLine = Line(1, 1, targetTotal: 1);
+        unavailableLine.VendorUnavailable = true;
+        unavailableLine.Status = "Ixali shop was unavailable.";
+        var purchasedLine = Line(2, 2, targetTotal: 2);
+        var store = new MemoryStore
+        {
+            Current = new GilVendorBuyRunSnapshot
+            {
+                RunId = "run",
+                ContextSignature = Context,
+                MaximumApprovedGil = 30,
+                Phase = GilVendorBuyPhase.Indeterminate,
+                Lines = [unavailableLine, purchasedLine],
+                Stops = [Stop(100, [1u, 2u], validated: true)],
+                ArmedPurchase = new()
+                {
+                    ItemId = 2,
+                    Quantity = 2,
+                    ExpectedGil = 40,
+                    ShopRowIndex = 0,
+                    BeforeItemCount = 0,
+                    BeforeGil = 1_000,
+                    ArmedAtUtc = DateTime.UtcNow,
+                },
+            },
+        };
+        var runtime = new ScriptedRuntime { Gil = 960 };
+        runtime.Counts[2] = 2;
+        var coordinator = new GilVendorBuyCoordinator(store, runtime);
+
+        Assert.True(coordinator.TryReconcileIndeterminate(out var message), message);
+
+        Assert.Equal(GilVendorBuyPhase.Failed, coordinator.ActiveRun!.Phase);
+        Assert.Equal(2, Assert.Single(coordinator.ActiveRun.Receipts).Quantity);
+        Assert.Contains("Ixali shop was unavailable", coordinator.ActiveRun.Message);
+        Assert.Equal(0, runtime.SubmitCalls);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -460,6 +501,28 @@ public sealed class GilVendorBuyCoordinatorTests
         Assert.Equal(4, coordinator.ActiveRun.Receipts.Sum(receipt => receipt.Quantity));
         Assert.Equal(200u, coordinator.ActiveRun.Lines[0].Offer!.NpcId);
         Assert.Equal(2, runtime.ReachCalls);
+    }
+
+    [Fact]
+    public void Unreachable_vendor_without_alternative_fails_instead_of_completing_zero()
+    {
+        var runtime = new ScriptedRuntime();
+        runtime.ReachResults.Enqueue(new(
+            GilVendorReachState.Unavailable,
+            "Could not summon a mount after repeated automatic attempts."));
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+
+        Assert.True(coordinator.TryStart(
+            Plan([Line(1, 4, targetTotal: 4)], [Stop(100, 1)]),
+            Context,
+            out var error), error);
+        TickUntilTerminal(coordinator, 10);
+
+        Assert.Equal(GilVendorBuyPhase.Failed, coordinator.ActiveRun!.Phase);
+        Assert.True(coordinator.ActiveRun.Lines[0].VendorUnavailable);
+        Assert.Empty(coordinator.ActiveRun.Receipts);
+        Assert.Contains("unmet vendor line", coordinator.ActiveRun.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Could not summon a mount", coordinator.ActiveRun.Message);
     }
 
     private static GilVendorBuyPlan Plan(
