@@ -157,6 +157,17 @@ public sealed record AgentBridgeCaptureRegion(
 {
     private const float PaddingPixels = 8f;
 
+    [Obsolete("Supply the rendered viewport ID. Legacy regions cannot safely identify detached viewport content.")]
+    public AgentBridgeCaptureRegion(
+        System.Numerics.Vector2 windowPosition,
+        System.Numerics.Vector2 windowSize,
+        System.Numerics.Vector2 viewportPosition,
+        System.Numerics.Vector2 viewportSize,
+        DateTimeOffset renderedAtUtc)
+        : this(windowPosition, windowSize, 0, viewportPosition, viewportSize, renderedAtUtc)
+    {
+    }
+
     public bool IsRecent() => DateTimeOffset.UtcNow - RenderedAtUtc <= TimeSpan.FromSeconds(5);
 
     public System.Numerics.Vector2 GetUv0() => new(
