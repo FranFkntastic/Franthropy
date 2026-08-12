@@ -1,5 +1,6 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Franthropy.Dalamud.UI.Performance;
 
 namespace Franthropy.Dalamud.UI.Plots;
 
@@ -15,6 +16,8 @@ public sealed record DalamudPlotRenderResult(
 public sealed class DalamudPlotRenderer
 {
     private readonly PlotCompiler compiler = new();
+    private readonly Dictionary<string, RevisionCache<PlotCompileRevision, PlotCompiledFrame>> compiledFrames =
+        new(StringComparer.Ordinal);
 
     public DalamudPlotRenderResult Draw(
         string id,
@@ -33,7 +36,12 @@ public sealed class DalamudPlotRenderer
 
         ImGui.InvisibleButton($"##FranthropyPlot{id}", size);
         var bounds = new PlotRect(ImGui.GetItemRectMin(), ImGui.GetItemRectMax());
-        var frame = compiler.Compile(spec, bounds, interaction);
+        if (!compiledFrames.TryGetValue(id, out var cache))
+            compiledFrames[id] = cache = new();
+        var revision = new PlotCompileRevision(spec, bounds, interaction);
+        var frame = cache.GetOrCreate(
+            revision,
+            key => compiler.Compile(key.Spec, key.Bounds, key.Interaction));
         var drawList = ImGui.GetWindowDrawList();
         foreach (var command in frame.Commands)
             DrawCommand(drawList, command);
@@ -46,6 +54,19 @@ public sealed class DalamudPlotRenderer
             : null;
         return new(frame, hovered?.DatumId, clicked);
     }
+
+    public void Invalidate(string id)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        compiledFrames.Remove(id);
+    }
+
+    public void Clear() => compiledFrames.Clear();
+
+    private sealed record PlotCompileRevision(
+        PlotSpec Spec,
+        PlotRect Bounds,
+        PlotInteractionState? Interaction);
 
     private static void DrawCommand(ImDrawListPtr drawList, PlotDrawCommand command)
     {
