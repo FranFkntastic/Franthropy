@@ -64,8 +64,8 @@ public sealed class DalamudExternalUiAutomationSuppression : IDisposable
             ObjectDisposedException.ThrowIf(disposed, this);
             if (holders == 0)
             {
-                textAdvanceOwned = AddOwner(TextAdvanceStopRequests, "TextAdvance");
-                yesAlreadyOwned = AddOwner(YesAlreadyStopRequests, "YesAlready");
+                textAdvanceOwned = AddOwner(TextAdvanceStopRequests, "TextAdvance") || textAdvanceOwned;
+                yesAlreadyOwned = AddOwner(YesAlreadyStopRequests, "YesAlready") || yesAlreadyOwned;
             }
             holders++;
             return new Scope(this);

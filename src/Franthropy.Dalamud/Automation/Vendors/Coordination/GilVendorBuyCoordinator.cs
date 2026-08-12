@@ -209,7 +209,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             message = "The persisted armed purchase no longer has its exact vendor offer; no reconciliation was attempted.";
             return false;
         }
-        var snapshot = runtime.CaptureInventory([line.ItemId]);
+        var snapshot = runtime.CaptureInventory(run.Lines.Select(candidate => candidate.ItemId).Distinct().ToArray());
         if (!snapshot.IsComplete || snapshot.Gil is null)
         {
             message = snapshot.Message;

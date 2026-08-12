@@ -39,11 +39,34 @@ public sealed class DalamudExternalUiAutomationSuppressionTests
         Assert.Contains("Quartermaster", textAdvance);
     }
 
+    [Fact]
+    public void Failed_restore_preserves_ownership_for_the_next_release_attempt()
+    {
+        var textAdvance = new HashSet<string>(StringComparer.Ordinal);
+        var store = new FakeStore(textAdvance, null);
+        using var suppression = new DalamudExternalUiAutomationSuppression(store, _ => { }, "Quartermaster");
+        var first = suppression.Acquire();
+        store.ThrowOnRead = true;
+
+        first.Dispose();
+
+        Assert.NotEmpty(first.RestoreFailures);
+        Assert.Contains("Quartermaster", textAdvance);
+        store.ThrowOnRead = false;
+        using (suppression.Acquire())
+            Assert.Contains("Quartermaster", textAdvance);
+        Assert.DoesNotContain("Quartermaster", textAdvance);
+    }
+
     private sealed class FakeStore(HashSet<string>? textAdvance, HashSet<string>? yesAlready) : ISharedPluginDataStore
     {
+        public bool ThrowOnRead { get; set; }
+
         public bool TryGetData<T>(string key, out T? data)
             where T : class
         {
+            if (ThrowOnRead)
+                throw new InvalidOperationException("Shared plugin data is temporarily unavailable.");
             object? value = key switch
             {
                 "TextAdvance.StopRequests" => textAdvance,
