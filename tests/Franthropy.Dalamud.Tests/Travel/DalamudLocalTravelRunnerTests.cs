@@ -26,7 +26,7 @@ public sealed class DalamudLocalTravelRunnerTests
         Assert.Equal(1, actions.TakeoffRequests);
 
         Assert.Equal(LocalTravelPreparationState.Waiting, runner.Advance(100f, StartedAt.AddSeconds(3)).State);
-        Assert.Equal(1, actions.TakeoffRequests);
+        Assert.Equal(2, actions.TakeoffRequests);
 
         actions.Current = Observation(flightUnlocked: true, mounted: true, inFlight: true);
         var ready = runner.Advance(100f, StartedAt.AddSeconds(4));
@@ -48,6 +48,130 @@ public sealed class DalamudLocalTravelRunnerTests
         Assert.True(ready.IsReady);
         Assert.Equal(LocalTravelMode.GroundMount, ready.Mode);
         Assert.Equal(VNavmeshTravelMode.Ground, ready.VNavmeshMode);
+    }
+
+    [Fact]
+    public void Accepted_mount_request_retries_until_mounting_is_observed()
+    {
+        var actions = new FakeLocalTravelActions(Observation(canMount: true));
+        var runner = new DalamudLocalTravelRunner(actions);
+
+        Assert.Equal("MountRequested", runner.Advance(100f, StartedAt).Code);
+        Assert.Equal("AwaitingMount", runner.Advance(100f, StartedAt.AddSeconds(1)).Code);
+        Assert.Equal("MountRetryRequested", runner.Advance(100f, StartedAt.AddSeconds(2)).Code);
+        Assert.Equal(2, actions.MountRequests);
+        Assert.Equal(0, actions.AccelerationRequests);
+
+        actions.Current = Observation(mounted: true);
+        var ready = runner.Advance(100f, StartedAt.AddSeconds(3));
+
+        Assert.True(ready.IsReady);
+        Assert.Equal(LocalTravelMode.GroundMount, ready.Mode);
+    }
+
+    [Fact]
+    public void Accepted_mount_request_never_silently_falls_back_to_sprint()
+    {
+        var actions = new FakeLocalTravelActions(Observation(canMount: true, canAccelerate: true));
+        var runner = new DalamudLocalTravelRunner(actions);
+
+        runner.Advance(100f, StartedAt);
+        foreach (var seconds in new[] { 2, 4, 6, 8, 10 })
+            Assert.Equal(LocalTravelPreparationState.Waiting, runner.Advance(100f, StartedAt.AddSeconds(seconds)).State);
+
+        var unavailable = runner.Advance(100f, StartedAt.AddSeconds(12));
+
+        Assert.Equal(LocalTravelPreparationState.Unavailable, unavailable.State);
+        Assert.Equal("MountTimeout", unavailable.Code);
+        Assert.Equal(6, actions.MountRequests);
+        Assert.Equal(0, actions.AccelerationRequests);
+    }
+
+    [Fact]
+    public void Mount_prohibited_in_the_current_territory_can_use_sprint()
+    {
+        var actions = new FakeLocalTravelActions(Observation(mountAllowed: false, canAccelerate: true));
+        var runner = new DalamudLocalTravelRunner(actions);
+
+        var ready = runner.Advance(100f, StartedAt);
+
+        Assert.True(ready.IsReady);
+        Assert.Equal(LocalTravelMode.Sprint, ready.Mode);
+        Assert.Equal(0, actions.MountRequests);
+        Assert.Equal(1, actions.AccelerationRequests);
+    }
+
+    [Fact]
+    public void Mount_allowed_but_temporarily_unavailable_enters_the_retry_window()
+    {
+        var actions = new FakeLocalTravelActions(Observation(mountAllowed: true, canAccelerate: true));
+        var runner = new DalamudLocalTravelRunner(actions);
+
+        var pending = runner.Advance(100f, StartedAt);
+
+        Assert.Equal(LocalTravelPreparationState.Waiting, pending.State);
+        Assert.Equal("MountRequestPending", pending.Code);
+        Assert.Equal(0, actions.MountRequests);
+        Assert.Equal(0, actions.AccelerationRequests);
+
+        actions.Current = Observation(mountAllowed: true, canMount: true, canAccelerate: true);
+        Assert.Equal("MountRetryRequested", runner.Advance(100f, StartedAt.AddSeconds(2)).Code);
+        Assert.Equal(1, actions.MountRequests);
+    }
+
+    [Fact]
+    public void Accepted_takeoff_request_retries_until_flight_is_observed()
+    {
+        var actions = new FakeLocalTravelActions(Observation(
+            flightUnlocked: true,
+            mounted: true,
+            canTakeOff: true));
+        var runner = new DalamudLocalTravelRunner(actions);
+
+        Assert.Equal("TakeoffRequested", runner.Advance(100f, StartedAt).Code);
+        Assert.Equal("TakeoffRetryRequested", runner.Advance(100f, StartedAt.AddMilliseconds(500)).Code);
+        Assert.Equal(2, actions.TakeoffRequests);
+
+        actions.Current = Observation(flightUnlocked: true, mounted: true, inFlight: true);
+        var ready = runner.Advance(100f, StartedAt.AddSeconds(1));
+
+        Assert.True(ready.IsReady);
+        Assert.Equal(LocalTravelMode.Flight, ready.Mode);
+    }
+
+    [Fact]
+    public void Temporarily_unavailable_takeoff_enters_the_retry_window()
+    {
+        var actions = new FakeLocalTravelActions(Observation(
+            flightUnlocked: true,
+            mounted: true));
+        var runner = new DalamudLocalTravelRunner(actions);
+
+        var pending = runner.Advance(100f, StartedAt);
+
+        Assert.Equal(LocalTravelPreparationState.Waiting, pending.State);
+        Assert.Equal("AwaitingTakeoff", pending.Code);
+        Assert.Equal(0, actions.TakeoffRequests);
+
+        actions.Current = Observation(flightUnlocked: true, mounted: true, canTakeOff: true);
+        Assert.Equal("TakeoffRetryRequested", runner.Advance(100f, StartedAt.AddMilliseconds(500)).Code);
+        Assert.Equal(1, actions.TakeoffRequests);
+    }
+
+    [Fact]
+    public void Accepted_takeoff_request_never_silently_downgrades_to_ground()
+    {
+        var actions = new FakeLocalTravelActions(Observation(
+            flightUnlocked: true,
+            mounted: true,
+            canTakeOff: true));
+        var runner = new DalamudLocalTravelRunner(actions);
+
+        runner.Advance(100f, StartedAt);
+        var unavailable = runner.Advance(100f, StartedAt.AddSeconds(8));
+
+        Assert.Equal(LocalTravelPreparationState.Unavailable, unavailable.State);
+        Assert.Equal("TakeoffTimeout", unavailable.Code);
     }
 
     [Fact]
@@ -129,6 +253,7 @@ public sealed class DalamudLocalTravelRunnerTests
         bool mountTransition = false,
         bool casting = false,
         bool accelerationActive = false,
+        bool? mountAllowed = null,
         bool canMount = false,
         bool canTakeOff = false,
         bool canDismount = false,
@@ -139,6 +264,7 @@ public sealed class DalamudLocalTravelRunnerTests
             mountTransition,
             casting,
             accelerationActive,
+            mountAllowed ?? canMount,
             canMount,
             canTakeOff,
             canDismount,
