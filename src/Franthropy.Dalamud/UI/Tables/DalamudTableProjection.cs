@@ -191,7 +191,7 @@ public sealed class DalamudTableProjection<TRow>
         }
 
         var activated = false;
-        var usesSelection = selectable && selection.Mode != DalamudTableSelectionMode.None;
+        var usesSelection = selectable && selection.IsSelectable(row) && selection.Mode != DalamudTableSelectionMode.None;
         if (ImGui.TableNextColumn())
         {
             if (usesSelection)
@@ -206,7 +206,7 @@ public sealed class DalamudTableProjection<TRow>
                 if (interaction.Activated)
                 {
                     var io = ImGui.GetIO();
-                    selection.ApplyClick(orderedRows, rowIndex, io.KeyCtrl, io.KeyShift);
+                    selection.ApplyClick(orderedRows, rowIndex, io.KeyCtrl, io.KeyShift, io.KeyAlt);
                 }
                 if (enabled &&
                     selection.IsDragging &&

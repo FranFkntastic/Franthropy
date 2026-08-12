@@ -8,6 +8,7 @@ public sealed class TableSelectionModel<TKey>
     private TKey anchor = default!;
     private bool hasAnchor;
     private int dragStart = -1;
+    private bool dragValue;
 
     public TableSelectionModel(IEqualityComparer<TKey>? comparer = null)
     {
@@ -36,7 +37,8 @@ public sealed class TableSelectionModel<TKey>
         IReadOnlyList<TKey> orderedKeys,
         int rowIndex,
         bool control,
-        bool shift)
+        bool shift,
+        bool alt = false)
     {
         ValidateRowIndex(orderedKeys, rowIndex);
         var key = orderedKeys[rowIndex];
@@ -46,12 +48,12 @@ public sealed class TableSelectionModel<TKey>
             var anchorIndex = IndexOf(orderedKeys, anchor);
             if (anchorIndex >= 0)
             {
-                if (!control && selected.Count > 0)
+                if (!control && !alt && selected.Count > 0)
                 {
                     selected.Clear();
                     changed = true;
                 }
-                changed |= SelectRange(orderedKeys, anchorIndex, rowIndex);
+                changed |= SetRange(orderedKeys, anchorIndex, rowIndex, !alt);
             }
             else
             {
@@ -60,9 +62,15 @@ public sealed class TableSelectionModel<TKey>
                 hasAnchor = true;
             }
         }
+        else if (alt)
+        {
+            changed = SetSelected(key, false);
+            anchor = key;
+            hasAnchor = true;
+        }
         else if (control)
         {
-            changed = SetSelected(key, !selected.Contains(key));
+            changed = SetSelected(key, true);
             anchor = key;
             hasAnchor = true;
         }
@@ -74,6 +82,7 @@ public sealed class TableSelectionModel<TKey>
         }
 
         dragStart = rowIndex;
+        dragValue = !alt;
         return changed;
     }
 
@@ -82,14 +91,15 @@ public sealed class TableSelectionModel<TKey>
         int rowIndex,
         DalamudTableSelectionMode mode,
         bool control,
-        bool shift)
+        bool shift,
+        bool alt = false)
     {
         switch (mode)
         {
             case DalamudTableSelectionMode.None:
                 return false;
             case DalamudTableSelectionMode.Multi:
-                return ApplyClick(orderedKeys, rowIndex, control, shift);
+                return ApplyClick(orderedKeys, rowIndex, control, shift, alt);
             case DalamudTableSelectionMode.Single:
                 break;
             default:
@@ -110,7 +120,7 @@ public sealed class TableSelectionModel<TKey>
         ValidateRowIndex(orderedKeys, rowIndex);
         if (dragStart < 0)
             return false;
-        return SelectRange(orderedKeys, dragStart, rowIndex);
+        return SetRange(orderedKeys, dragStart, rowIndex, dragValue);
     }
 
     public void EndDrag() => dragStart = -1;
@@ -136,13 +146,13 @@ public sealed class TableSelectionModel<TKey>
         dragStart = -1;
     }
 
-    private bool SelectRange(IReadOnlyList<TKey> orderedKeys, int first, int last)
+    private bool SetRange(IReadOnlyList<TKey> orderedKeys, int first, int last, bool value)
     {
         var changed = false;
         var rangeFirst = Math.Min(first, last);
         var rangeLast = Math.Max(first, last);
         for (var index = rangeFirst; index <= rangeLast; index++)
-            changed |= selected.Add(orderedKeys[index]);
+            changed |= SetSelected(orderedKeys[index], value);
         return changed;
     }
 

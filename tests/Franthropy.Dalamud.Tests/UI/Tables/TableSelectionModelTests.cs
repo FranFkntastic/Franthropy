@@ -19,7 +19,7 @@ public sealed class TableSelectionModelTests
     }
 
     [Fact]
-    public void ControlClick_TogglesWithoutClearingOtherRows()
+    public void ControlClick_AddsWithoutClearingOtherRows()
     {
         var selection = new TableSelectionModel<int>();
         selection.ApplyClick(Rows, 1, control: false, shift: false);
@@ -27,7 +27,32 @@ public sealed class TableSelectionModelTests
         selection.ApplyClick(Rows, 3, control: true, shift: false);
         selection.ApplyClick(Rows, 1, control: true, shift: false);
 
+        Assert.Equal([20, 40], selection.SelectedKeys.Order());
+    }
+
+    [Fact]
+    public void AltClick_RemovesWithoutClearingOtherRows()
+    {
+        var selection = new TableSelectionModel<int>();
+        selection.SetSelected(20, true);
+        selection.SetSelected(40, true);
+
+        selection.ApplyClick(Rows, 1, control: false, shift: false, alt: true);
+
         Assert.Equal([40], selection.SelectedKeys);
+    }
+
+    [Fact]
+    public void AltDrag_RemovesContiguousRows()
+    {
+        var selection = new TableSelectionModel<int>();
+        foreach (var row in Rows)
+            selection.SetSelected(row, true);
+
+        selection.ApplyClick(Rows, 1, control: false, shift: false, alt: true);
+        selection.ApplyDrag(Rows, 3);
+
+        Assert.Equal([10, 50], selection.SelectedKeys.Order());
     }
 
     [Fact]
@@ -39,6 +64,20 @@ public sealed class TableSelectionModelTests
         selection.ApplyClick(Rows, 4, control: false, shift: true);
 
         Assert.Equal([20, 30, 40, 50], selection.SelectedKeys.Order());
+    }
+
+    [Fact]
+    public void ModifierShiftClick_AddsOrRemovesAnchoredRange()
+    {
+        var selection = new TableSelectionModel<int>();
+        selection.ApplyClick(Rows, 1, control: false, shift: false);
+        selection.SetSelected(10, true);
+
+        selection.ApplyClick(Rows, 3, control: true, shift: true);
+        Assert.Equal([10, 20, 30, 40], selection.SelectedKeys.Order());
+
+        selection.ApplyClick(Rows, 2, control: false, shift: true, alt: true);
+        Assert.Equal([10], selection.SelectedKeys);
     }
 
     [Fact]
@@ -96,12 +135,29 @@ public sealed class TableSelectionModelTests
         var tableSelection = DalamudTableSelection<TestRow>.Multi(selection, row => row.Id);
         TestRow[] rows = [new(10), new(20), new(30)];
 
-        tableSelection.ApplyClick(rows, 0, control: false, shift: false);
-        tableSelection.ApplyClick(rows, 2, control: true, shift: false);
+        tableSelection.ApplyClick(rows, 0, control: false, shift: false, alt: false);
+        tableSelection.ApplyClick(rows, 2, control: true, shift: false, alt: false);
 
         Assert.Equal(DalamudTableSelectionMode.Multi, tableSelection.Mode);
         Assert.True(tableSelection.IsSelected(rows[0]));
         Assert.True(tableSelection.IsSelected(rows[2]));
+    }
+
+    [Fact]
+    public void Table_selection_excludes_ineligible_rows_from_anchored_ranges()
+    {
+        var selection = new TableSelectionModel<int>();
+        var tableSelection = DalamudTableSelection<TestRow>.Multi(
+            selection,
+            row => row.Id,
+            row => row.Id != 20);
+        TestRow[] rows = [new(10), new(20), new(30), new(40)];
+
+        tableSelection.ApplyClick(rows, 0, control: false, shift: false, alt: false);
+        tableSelection.ApplyClick(rows, 3, control: false, shift: true, alt: false);
+
+        Assert.Equal([10, 30, 40], selection.SelectedKeys.Order());
+        Assert.False(tableSelection.IsSelectable(rows[1]));
     }
 
     [Fact]
