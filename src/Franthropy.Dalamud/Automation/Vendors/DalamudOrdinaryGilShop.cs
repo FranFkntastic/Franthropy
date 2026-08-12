@@ -2,6 +2,7 @@ using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using ECommons.Automation.UIInput;
+using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Franthropy.Dalamud.Automation.Retainers;
@@ -21,6 +22,7 @@ public sealed class DalamudGilVendorAccessReader
     private readonly IObjectTable objectTable;
     private readonly IAetheryteList aetheryteList;
     private readonly Func<DateTimeOffset> utcNow;
+    private readonly Func<uint, bool?> isQuestComplete;
     private readonly Dictionary<(uint NpcId, uint ShopId, uint TerritoryId), CachedAssessment> assessments = [];
     private readonly GilVendorAetheryteSnapshot aetheryteSnapshot = new();
     private DateTimeOffset nextAetheryteRefreshAt;
@@ -33,13 +35,15 @@ public sealed class DalamudGilVendorAccessReader
         IPlayerState playerState,
         IObjectTable objectTable,
         IAetheryteList aetheryteList,
-        Func<DateTimeOffset>? utcNow = null)
+        Func<DateTimeOffset>? utcNow = null,
+        Func<uint, bool?>? isQuestComplete = null)
     {
         this.clientState = clientState;
         this.playerState = playerState;
         this.objectTable = objectTable;
         this.aetheryteList = aetheryteList;
         this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+        this.isQuestComplete = isQuestComplete ?? ReadQuestCompletion;
     }
 
     public GilVendorAccessAssessment Assess(GilVendorOffer offer)
@@ -105,6 +109,10 @@ public sealed class DalamudGilVendorAccessReader
         if (!playerState.IsLoaded)
             return new(GilVendorAccessState.Unknown, "PlayerStateUnavailable", "Character access state is not loaded.");
 
+        var unlockAssessment = AssessShopUnlocks(offer, isQuestComplete);
+        if (unlockAssessment is not null)
+            return unlockAssessment;
+
         if (clientState.TerritoryType == offer.TerritoryId)
         {
             return FindLiveNpc(offer) is not null
@@ -130,6 +138,48 @@ public sealed class DalamudGilVendorAccessReader
                 route.AethernetId,
                 route.AetheryteTerritoryId);
     }
+
+    internal static GilVendorAccessAssessment? AssessShopUnlocks(
+        GilVendorOffer offer,
+        Func<uint, bool?> isQuestComplete)
+    {
+        ArgumentNullException.ThrowIfNull(offer);
+        ArgumentNullException.ThrowIfNull(isQuestComplete);
+        foreach (var questId in offer.RequiredQuestIds.Distinct())
+        {
+            bool? completed;
+            try
+            {
+                completed = isQuestComplete(questId);
+            }
+            catch (Exception ex)
+            {
+                return new(
+                    GilVendorAccessState.Unknown,
+                    "ShopUnlockStateUnavailable",
+                    $"Could not verify whether {offer.NpcName}'s shop is unlocked ({ex.GetType().Name}).");
+            }
+
+            if (completed is null)
+            {
+                return new(
+                    GilVendorAccessState.Unknown,
+                    "ShopUnlockStateUnavailable",
+                    $"Could not verify whether {offer.NpcName}'s shop is unlocked.");
+            }
+            if (!completed.Value)
+            {
+                return new(
+                    GilVendorAccessState.Unavailable,
+                    "ShopLocked",
+                    $"{offer.NpcName}'s shop is not unlocked for this character.");
+            }
+        }
+
+        return null;
+    }
+
+    private static bool? ReadQuestCompletion(uint questId) => QuestManager.IsQuestComplete(questId);
 
     private void SynchronizeOwnerAndTerritory()
     {

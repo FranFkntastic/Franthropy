@@ -91,6 +91,7 @@ public sealed class GilVendorBuyOfferSnapshot
     public float PositionZ { get; set; }
     public List<uint> RouteAetheryteIds { get; set; } = [];
     public List<GilVendorBuyRouteSnapshot> TravelRoutes { get; set; } = [];
+    public List<uint> RequiredQuestIds { get; set; } = [];
 
     public static GilVendorBuyOfferSnapshot From(GilVendorOffer offer) => new()
     {
@@ -108,6 +109,7 @@ public sealed class GilVendorBuyOfferSnapshot
         PositionZ = offer.Position.Z,
         RouteAetheryteIds = [.. offer.RouteAetheryteIds],
         TravelRoutes = offer.EffectiveTravelRoutes.Select(GilVendorBuyRouteSnapshot.From).ToList(),
+        RequiredQuestIds = [.. offer.RequiredQuestIds],
     };
 
     public GilVendorOffer ToOffer() => new(
@@ -124,6 +126,7 @@ public sealed class GilVendorBuyOfferSnapshot
             RouteAetheryteIds)
         {
             TravelRoutes = TravelRoutes.Select(route => route.ToRoute()).ToArray(),
+            RequiredQuestIds = [.. RequiredQuestIds],
         };
 }
 
