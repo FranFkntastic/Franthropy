@@ -17,6 +17,8 @@ public sealed record GilVendorOffer(
 {
     public IReadOnlyList<GilVendorTravelRoute> TravelRoutes { get; init; } = [];
 
+    public IReadOnlyList<uint> RequiredQuestIds { get; init; } = [];
+
     public IReadOnlyList<GilVendorTravelRoute> EffectiveTravelRoutes =>
         TravelRoutes.Count != 0
             ? TravelRoutes

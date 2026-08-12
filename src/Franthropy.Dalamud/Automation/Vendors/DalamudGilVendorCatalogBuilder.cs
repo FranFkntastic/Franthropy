@@ -13,40 +13,44 @@ public static class DalamudGilVendorCatalogBuilder
     {
         ArgumentNullException.ThrowIfNull(dataManager);
 
-        var gilShopIds = dataManager.GetExcelSheet<GilShop>()
-            .Select(row => row.RowId)
-            .ToHashSet();
+        var gilShops = dataManager.GetExcelSheet<GilShop>()
+            .ToDictionary(row => row.RowId);
         var npcNames = dataManager.GetExcelSheet<ENpcResident>()
             .Where(row => row.RowId != 0)
             .ToDictionary(row => row.RowId, row => row.Singular.ToString());
-        var shopNpcs = new Dictionary<uint, List<uint>>();
+        var shopNpcs = new Dictionary<uint, Dictionary<uint, HashSet<uint>>>();
         foreach (var npc in dataManager.GetExcelSheet<ENpcBase>())
         {
             foreach (var data in npc.ENpcData)
             {
-                if (data.Is<GilShop>() && gilShopIds.Contains(data.RowId))
+                if (data.Is<GilShop>() && gilShops.TryGetValue(data.RowId, out var directShop))
                 {
-                    AddShopNpc(shopNpcs, data.RowId, npc.RowId);
+                    AddShopNpc(shopNpcs, data.RowId, npc.RowId, directShop.Quest.RowId);
                     continue;
                 }
                 if (data.Is<PreHandler>() &&
                     data.TryGetValue(out PreHandler preHandler) &&
                     preHandler.Target.Is<GilShop>() &&
-                    gilShopIds.Contains(preHandler.Target.RowId))
+                    gilShops.TryGetValue(preHandler.Target.RowId, out var handledShop))
                 {
-                    AddShopNpc(shopNpcs, preHandler.Target.RowId, npc.RowId);
+                    AddShopNpc(
+                        shopNpcs,
+                        preHandler.Target.RowId,
+                        npc.RowId,
+                        handledShop.Quest.RowId,
+                        preHandler.UnlockQuest.RowId);
                     continue;
                 }
                 if (!data.Is<TopicSelect>() || !data.TryGetValue(out TopicSelect topic))
                     continue;
-                foreach (var shop in topic.Shop.Where(value => value.Is<GilShop>() && gilShopIds.Contains(value.RowId)))
-                    AddShopNpc(shopNpcs, shop.RowId, npc.RowId);
+                foreach (var shop in topic.Shop.Where(value => value.Is<GilShop>() && gilShops.ContainsKey(value.RowId)))
+                    AddShopNpc(shopNpcs, shop.RowId, npc.RowId, gilShops[shop.RowId].Quest.RowId);
             }
         }
 
         var locations = DalamudVendorLocationCatalogBuilder.Build(
             dataManager,
-            shopNpcs.Values.SelectMany(npcs => npcs).ToHashSet());
+            shopNpcs.Values.SelectMany(npcs => npcs.Keys).ToHashSet());
         var aetheryteNodes = dataManager.GetExcelSheet<Aetheryte>()
             .Where(row => row.RowId != 0 && row.Territory.RowId != 0)
             .Select(row => new GilVendorAetheryteNode(
@@ -88,7 +92,7 @@ public static class DalamudGilVendorCatalogBuilder
                     continue;
                 }
 
-                foreach (var npcId in npcs)
+                foreach (var (npcId, requiredQuestIds) in npcs)
                 {
                     if (!npcNames.TryGetValue(npcId, out var npcName) ||
                         string.IsNullOrWhiteSpace(npcName) ||
@@ -114,6 +118,7 @@ public static class DalamudGilVendorCatalogBuilder
                             routeAetheryteIds[location.TerritoryId])
                         {
                             TravelRoutes = routes,
+                            RequiredQuestIds = requiredQuestIds.Order().ToArray(),
                         });
                     }
                 }
@@ -165,12 +170,18 @@ public static class DalamudGilVendorCatalogBuilder
             .ToArray();
     }
 
-    private static void AddShopNpc(Dictionary<uint, List<uint>> shopNpcs, uint shopId, uint npcId)
+    internal static void AddShopNpc(
+        Dictionary<uint, Dictionary<uint, HashSet<uint>>> shopNpcs,
+        uint shopId,
+        uint npcId,
+        params uint[] requiredQuestIds)
     {
         if (!shopNpcs.TryGetValue(shopId, out var npcs))
             shopNpcs[shopId] = npcs = [];
-        if (!npcs.Contains(npcId))
-            npcs.Add(npcId);
+        if (!npcs.TryGetValue(npcId, out var requirements))
+            npcs[npcId] = requirements = [];
+        foreach (var questId in requiredQuestIds.Where(id => id != 0))
+            requirements.Add(questId);
     }
 
 }

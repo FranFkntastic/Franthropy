@@ -137,6 +137,64 @@ public sealed class GilVendorEngineTests
         Assert.Empty(routes);
     }
 
+    [Fact]
+    public void Catalog_binding_merges_shop_and_prehandler_unlock_quests_per_vendor()
+    {
+        var bindings = new Dictionary<uint, Dictionary<uint, HashSet<uint>>>();
+
+        DalamudGilVendorCatalogBuilder.AddShopNpc(bindings, 500, 700, 67023, 0);
+        DalamudGilVendorCatalogBuilder.AddShopNpc(bindings, 500, 700, 67023, 67111);
+
+        Assert.Equal([67023u, 67111u], bindings[500][700].Order());
+    }
+
+    [Fact]
+    public void Shop_unlock_assessment_excludes_an_incomplete_required_quest()
+    {
+        var offer = Offer(itemId: 5371) with
+        {
+            RequiredQuestIds = [67023],
+        };
+
+        var assessment = DalamudGilVendorAccessReader.AssessShopUnlocks(
+            offer,
+            questId => questId == 67023 ? false : null);
+
+        Assert.NotNull(assessment);
+        Assert.Equal(GilVendorAccessState.Unavailable, assessment.State);
+        Assert.Equal("ShopLocked", assessment.Code);
+    }
+
+    [Fact]
+    public void Shop_unlock_assessment_fails_closed_when_completion_cannot_be_read()
+    {
+        var offer = Offer(itemId: 5371) with
+        {
+            RequiredQuestIds = [67023],
+        };
+
+        var assessment = DalamudGilVendorAccessReader.AssessShopUnlocks(offer, _ => null);
+
+        Assert.NotNull(assessment);
+        Assert.Equal(GilVendorAccessState.Unknown, assessment.State);
+        Assert.Equal("ShopUnlockStateUnavailable", assessment.Code);
+    }
+
+    [Fact]
+    public void Reviewed_offer_snapshot_preserves_unlock_requirements_for_execution_recheck()
+    {
+        var offer = Offer(itemId: 5371) with
+        {
+            RequiredQuestIds = [67023],
+        };
+
+        var restored = Franthropy.Dalamud.Automation.Vendors.Coordination.GilVendorBuyOfferSnapshot
+            .From(offer)
+            .ToOffer();
+
+        Assert.Equal([67023u], restored.RequiredQuestIds);
+    }
+
     private static GilVendorOffer Offer(
         uint itemId,
         uint npcId = 10,
