@@ -131,9 +131,22 @@ public sealed class FramePacingGovernorTests
     {
         using var governor = new FramePacingGovernor();
         var lease = governor.Acquire("slow", 1);
-        var pacing = Task.Run(governor.PaceFrame);
-        await Task.Delay(TimeSpan.FromMilliseconds(50));
-        Assert.False(pacing.IsCompleted);
+        Thread? pacingThread = null;
+        using var threadStarted = new ManualResetEventSlim();
+        var pacing = Task.Factory.StartNew(
+            () =>
+            {
+                pacingThread = Thread.CurrentThread;
+                threadStarted.Set();
+                governor.PaceFrame();
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        threadStarted.Wait();
+        Assert.True(SpinWait.SpinUntil(
+            () => (pacingThread!.ThreadState & ThreadState.WaitSleepJoin) != 0,
+            TimeSpan.FromMilliseconds(250)));
 
         lease.Dispose();
 
