@@ -123,15 +123,19 @@ public sealed class FramePacingGovernor : IDisposable
 
                 revision = leaseRevision;
                 requestedDelay = TimeSpan.FromSeconds(remainingTicks / (double)timestampFrequency);
-                totalRequestedDelay += requestedDelay;
             }
 
-            frameRequestedDelay += requestedDelay;
-            var delayCompleted = WaitForDelay(requestedDelay, revision);
+            var waitResult = WaitForDelay(requestedDelay, revision);
             var completedTimestamp = timestampProvider();
 
             lock (sync)
             {
+                if (waitResult != FramePacingWaitResult.NotStarted)
+                {
+                    totalRequestedDelay += requestedDelay;
+                    frameRequestedDelay += requestedDelay;
+                }
+
                 if (disposed || leases.Count == 0)
                 {
                     lastFrameTimestamp = null;
@@ -139,7 +143,7 @@ public sealed class FramePacingGovernor : IDisposable
                     return;
                 }
 
-                if (!delayCompleted || revision != leaseRevision)
+                if (waitResult != FramePacingWaitResult.Completed || revision != leaseRevision)
                 {
                     continue;
                 }
@@ -152,20 +156,22 @@ public sealed class FramePacingGovernor : IDisposable
         }
     }
 
-    private bool WaitForDelay(TimeSpan requestedDelay, long revision)
+    private FramePacingWaitResult WaitForDelay(TimeSpan requestedDelay, long revision)
     {
         if (delay != null)
         {
             delay(requestedDelay);
-            return true;
+            return FramePacingWaitResult.Completed;
         }
 
         lock (sync)
         {
             if (disposed || leases.Count == 0 || revision != leaseRevision)
-                return false;
+                return FramePacingWaitResult.NotStarted;
 
-            return !Monitor.Wait(sync, NormalizeDefaultDelay(requestedDelay));
+            return Monitor.Wait(sync, NormalizeDefaultDelay(requestedDelay))
+                ? FramePacingWaitResult.Interrupted
+                : FramePacingWaitResult.Completed;
         }
     }
 
@@ -230,6 +236,13 @@ public sealed class FramePacingGovernor : IDisposable
         LastRequestedDelay: lastRequestedDelay);
 
     private sealed record LeaseState(string Owner, int MaximumFramesPerSecond);
+
+    private enum FramePacingWaitResult
+    {
+        NotStarted,
+        Completed,
+        Interrupted,
+    }
 
     private sealed class Lease(
         FramePacingGovernor owner,
