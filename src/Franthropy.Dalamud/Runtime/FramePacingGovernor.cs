@@ -97,7 +97,15 @@ public sealed class FramePacingGovernor : IDisposable
                 if (disposed || leases.Count == 0)
                 {
                     lastFrameTimestamp = null;
-                    lastRequestedDelay = TimeSpan.Zero;
+                    if (frameRequestedDelay > TimeSpan.Zero)
+                    {
+                        totalDelayedFrames++;
+                        lastRequestedDelay = frameRequestedDelay;
+                    }
+                    else
+                    {
+                        lastRequestedDelay = TimeSpan.Zero;
+                    }
                     return;
                 }
 
@@ -139,7 +147,15 @@ public sealed class FramePacingGovernor : IDisposable
                 if (disposed || leases.Count == 0)
                 {
                     lastFrameTimestamp = null;
-                    lastRequestedDelay = TimeSpan.Zero;
+                    if (frameRequestedDelay > TimeSpan.Zero)
+                    {
+                        totalDelayedFrames++;
+                        lastRequestedDelay = frameRequestedDelay;
+                    }
+                    else
+                    {
+                        lastRequestedDelay = TimeSpan.Zero;
+                    }
                     return;
                 }
 

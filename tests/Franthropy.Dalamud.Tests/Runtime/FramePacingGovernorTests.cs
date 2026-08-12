@@ -138,7 +138,11 @@ public sealed class FramePacingGovernorTests
         lease.Dispose();
 
         await pacing.WaitAsync(TimeSpan.FromMilliseconds(250));
-        Assert.False(governor.Snapshot().IsActive);
+        var snapshot = governor.Snapshot();
+        Assert.False(snapshot.IsActive);
+        Assert.Equal(1, snapshot.TotalDelayedFrames);
+        Assert.True(snapshot.TotalRequestedDelay >= TimeSpan.FromMilliseconds(900));
+        Assert.Equal(snapshot.TotalRequestedDelay, snapshot.LastRequestedDelay);
     }
 
     private sealed class TestClock
