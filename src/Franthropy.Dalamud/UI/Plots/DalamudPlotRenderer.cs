@@ -18,6 +18,12 @@ public sealed class DalamudPlotRenderer
     private readonly PlotCompiler compiler = new();
     private readonly Dictionary<string, RevisionCache<PlotCompileRevision, PlotCompiledFrame>> compiledFrames =
         new(StringComparer.Ordinal);
+    private readonly Func<PlotCompileRevision, PlotCompiledFrame> compileFrame;
+
+    public DalamudPlotRenderer()
+    {
+        compileFrame = CompileFrame;
+    }
 
     public DalamudPlotRenderResult Draw(
         string id,
@@ -39,9 +45,7 @@ public sealed class DalamudPlotRenderer
         if (!compiledFrames.TryGetValue(id, out var cache))
             compiledFrames[id] = cache = new();
         var revision = new PlotCompileRevision(spec, bounds, interaction);
-        var frame = cache.GetOrCreate(
-            revision,
-            key => compiler.Compile(key.Spec, key.Bounds, key.Interaction));
+        var frame = cache.GetOrCreate(revision, compileFrame);
         var drawList = ImGui.GetWindowDrawList();
         foreach (var command in frame.Commands)
             DrawCommand(drawList, command);
@@ -63,7 +67,10 @@ public sealed class DalamudPlotRenderer
 
     public void Clear() => compiledFrames.Clear();
 
-    private sealed record PlotCompileRevision(
+    private PlotCompiledFrame CompileFrame(PlotCompileRevision revision) =>
+        compiler.Compile(revision.Spec, revision.Bounds, revision.Interaction);
+
+    private readonly record struct PlotCompileRevision(
         PlotSpec Spec,
         PlotRect Bounds,
         PlotInteractionState? Interaction);
