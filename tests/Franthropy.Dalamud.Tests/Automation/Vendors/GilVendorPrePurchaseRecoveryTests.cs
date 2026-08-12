@@ -38,6 +38,21 @@ public sealed class GilVendorPrePurchaseRecoveryTests
     }
 
     [Fact]
+    public void Slow_path_generation_does_not_consume_the_running_stall_window()
+    {
+        var recovery = CreateRecovery();
+        recovery.RecordNavigationSubmission(StartedAt, 100f);
+        recovery.RecordNavigationStarted(StartedAt.AddSeconds(9.9), 100f);
+
+        Assert.Equal(
+            GilVendorOwnedNavigationDecision.Continue,
+            recovery.ObserveOwnedNavigation(StartedAt.AddSeconds(10), 100f));
+        Assert.Equal(
+            GilVendorOwnedNavigationDecision.Restart,
+            recovery.ObserveOwnedNavigation(StartedAt.AddSeconds(20), 100f));
+    }
+
+    [Fact]
     public void Owned_navigation_exhausts_after_two_bounded_restarts()
     {
         var recovery = CreateRecovery();

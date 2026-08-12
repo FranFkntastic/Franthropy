@@ -12,6 +12,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
 {
     private static readonly TimeSpan ApproachTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan ActionThrottle = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan FlightNavigationStartTimeout = TimeSpan.FromSeconds(10);
     private static readonly InventoryType[] PlayerBags =
     [
         InventoryType.Inventory1,
@@ -43,6 +44,8 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     private uint? requestedAethernetId;
     private bool ownsNavigation;
     private LocalTravelMode? activeTravelMode;
+    private DateTimeOffset? navigationSubmittedAt;
+    private bool navigationObservedRunning;
     private bool automationActive;
 
     public DalamudGilVendorBuyRuntime(
@@ -213,6 +216,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
             recovery.ResetNavigation();
             localTravel.Reset();
             activeTravelMode = null;
+            ResetNavigationTracking();
         }
         var npc = access.FindLiveNpc(offer);
         var playerPosition = objectTable.LocalPlayer?.Position;
@@ -236,14 +240,31 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
             return new(GilVendorReachState.Waiting, navigation.Message);
         if (navigation.State is VNavmeshLifecycleState.Unavailable or VNavmeshLifecycleState.IpcFailure)
             return new(GilVendorReachState.Failed, navigation.Message);
-        if (ownsNavigation && !navigation.IsRunning && activeTravelMode == LocalTravelMode.Flight)
+        if (ownsNavigation && navigation.IsRunning && !navigationObservedRunning)
         {
-            ownsNavigation = false;
-            activeTravelMode = null;
-            localTravel.DowngradeFlight();
-            recovery.ResetNavigation();
-            nextActionAt = DateTimeOffset.MinValue;
-            return new(GilVendorReachState.Waiting, $"The flight route to {offer.NpcName} ended early; retrying the same destination by ground.");
+            navigationObservedRunning = true;
+            recovery.RecordNavigationStarted(utcNow(), distance);
+        }
+        switch (DetermineFlightNavigationState(
+                    ownsNavigation,
+                    activeTravelMode,
+                    navigation.IsRunning,
+                    navigationObservedRunning,
+                    navigationSubmittedAt,
+                    utcNow()))
+        {
+            case GilVendorFlightNavigationState.AwaitingStart:
+                return new(GilVendorReachState.Waiting, $"Waiting for the flight route to {offer.NpcName} to start.");
+            case GilVendorFlightNavigationState.Downgrade:
+                if (!vnavmesh.TryStop())
+                    return new(GilVendorReachState.Failed, $"Could not cancel the failed flight route to {offer.NpcName} before retrying by ground.");
+                ownsNavigation = false;
+                activeTravelMode = null;
+                ResetNavigationTracking();
+                localTravel.DowngradeFlight();
+                recovery.ResetNavigation();
+                nextActionAt = DateTimeOffset.MinValue;
+                return new(GilVendorReachState.Waiting, $"The flight route to {offer.NpcName} did not remain active; retrying the same destination by ground.");
         }
         var decision = DecideApproach(distance, npc is not null,
             navigation.State == VNavmeshLifecycleState.Ready,
@@ -307,6 +328,8 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
             recovery.RecordNavigationSubmission(utcNow(), distance);
             ownsNavigation = true;
             activeTravelMode = preparation.Mode;
+            navigationSubmittedAt = utcNow();
+            navigationObservedRunning = false;
             nextActionAt = utcNow().Add(ActionThrottle);
         }
         return new(GilVendorReachState.Waiting, DescribeApproach(activeTravelMode, offer.NpcName, distance));
@@ -324,6 +347,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         recovery.Reset();
         localTravel.Reset();
         activeTravelMode = null;
+        ResetNavigationTracking();
     }
 
     public GilVendorShopReadResult ReadShopRows() => shop.ReadRows();
@@ -398,11 +422,20 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     {
         if (!ownsNavigation)
             return true;
-        if (vnavmesh.Observe().IsRunning && !vnavmesh.TryStop())
+        // An accepted asynchronous submission is ours before vnavmesh reports it running.
+        // Cancel it unconditionally so a reset cannot release a path that starts later.
+        if (!vnavmesh.TryStop())
             return false;
         ownsNavigation = false;
         activeTravelMode = null;
+        ResetNavigationTracking();
         return true;
+    }
+
+    private void ResetNavigationTracking()
+    {
+        navigationSubmittedAt = null;
+        navigationObservedRunning = false;
     }
 
     private static string DescribeApproach(LocalTravelMode? mode, string npcName, float distance) => mode switch
@@ -481,7 +514,24 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
 
     internal static bool ShouldWaitForPendingTravelUi(TravelReadinessResult readiness, bool travelRequestPending) =>
         readiness.State == TravelReadinessState.Blocked && readiness.Code == "UnknownUiOwner" && travelRequestPending;
+
+    internal static GilVendorFlightNavigationState DetermineFlightNavigationState(
+        bool ownsNavigation,
+        LocalTravelMode? activeTravelMode,
+        bool navigationRunning,
+        bool navigationObservedRunning,
+        DateTimeOffset? navigationSubmittedAt,
+        DateTimeOffset observedAt)
+    {
+        if (!ownsNavigation || activeTravelMode != LocalTravelMode.Flight || navigationRunning)
+            return GilVendorFlightNavigationState.Continue;
+        if (navigationObservedRunning || navigationSubmittedAt is null ||
+            observedAt - navigationSubmittedAt.Value >= FlightNavigationStartTimeout)
+            return GilVendorFlightNavigationState.Downgrade;
+        return GilVendorFlightNavigationState.AwaitingStart;
+    }
 }
 
 internal enum GilVendorApproachDecision { Interact, WaitForNpc, StartNavigation, WaitForOwnedRoute, BlockedByAnotherRoute, NavigationUnavailable }
 internal enum GilVendorTravelLeg { InvalidRoute, SubmitAetheryte, AwaitAetheryteArrival, SubmitAethernet, AwaitDestination }
+internal enum GilVendorFlightNavigationState { Continue, AwaitingStart, Downgrade }
