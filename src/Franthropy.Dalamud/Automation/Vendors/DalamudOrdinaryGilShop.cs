@@ -1,7 +1,6 @@
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
-using ECommons.Automation;
 using ECommons.Automation.UIInput;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
@@ -250,7 +249,16 @@ public sealed class DalamudOrdinaryGilShop
             return false;
         }
 
-        Callback.Fire(addon, true, 0, (uint)row.RowIndex, quantity, 0);
+        AtkValue* values = stackalloc AtkValue[4];
+        values[0].Type = ValueType.Int;
+        values[0].Int = 0;
+        values[1].Type = ValueType.UInt;
+        values[1].UInt = checked((uint)row.RowIndex);
+        values[2].Type = ValueType.UInt;
+        values[2].UInt = quantity;
+        values[3].Type = ValueType.Int;
+        values[3].Int = 0;
+        addon->FireCallback(4, values, true);
         error = string.Empty;
         return true;
     }
