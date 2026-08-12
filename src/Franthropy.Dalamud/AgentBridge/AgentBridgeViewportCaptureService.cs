@@ -57,10 +57,15 @@ public sealed class AgentBridgeViewportCaptureService
                 if (!fullViewport && (currentRegion is null || !currentRegion.IsRecent()))
                     throw new InvalidOperationException("The requested plugin surface is not currently rendered.");
 
+                var viewportId = ResolveCaptureViewportId(
+                    fullViewport,
+                    ImGui.GetMainViewport().ID,
+                    currentRegion);
+
                 textureTask = textureProvider.CreateFromImGuiViewportAsync(
                     new ImGuiViewportTextureArgs
                     {
-                        ViewportId = ImGui.GetMainViewport().ID,
+                        ViewportId = viewportId,
                         AutoUpdate = false,
                         TakeBeforeImGuiRender = false,
                         KeepTransparency = false,
@@ -121,6 +126,17 @@ public sealed class AgentBridgeViewportCaptureService
         }
     }
 
+    internal static uint ResolveCaptureViewportId(
+        bool fullViewport,
+        uint mainViewportId,
+        AgentBridgeCaptureRegion? region)
+    {
+        var viewportId = fullViewport ? mainViewportId : region?.ViewportId ?? 0;
+        return viewportId != 0
+            ? viewportId
+            : throw new InvalidOperationException("The requested plugin surface has no captureable viewport.");
+    }
+
     private void PruneOldCaptures()
     {
         foreach (var file in new DirectoryInfo(captureDirectory)
@@ -134,11 +150,38 @@ public sealed class AgentBridgeViewportCaptureService
 public sealed record AgentBridgeCaptureRegion(
     System.Numerics.Vector2 WindowPosition,
     System.Numerics.Vector2 WindowSize,
+    uint ViewportId,
     System.Numerics.Vector2 ViewportPosition,
     System.Numerics.Vector2 ViewportSize,
     DateTimeOffset RenderedAtUtc)
 {
     private const float PaddingPixels = 8f;
+
+    [Obsolete("Supply the rendered viewport ID. Legacy regions cannot safely identify detached viewport content.")]
+    public AgentBridgeCaptureRegion(
+        System.Numerics.Vector2 windowPosition,
+        System.Numerics.Vector2 windowSize,
+        System.Numerics.Vector2 viewportPosition,
+        System.Numerics.Vector2 viewportSize,
+        DateTimeOffset renderedAtUtc)
+        : this(windowPosition, windowSize, 0, viewportPosition, viewportSize, renderedAtUtc)
+    {
+    }
+
+    [Obsolete("Use the overload that includes the rendered viewport ID.")]
+    public void Deconstruct(
+        out System.Numerics.Vector2 windowPosition,
+        out System.Numerics.Vector2 windowSize,
+        out System.Numerics.Vector2 viewportPosition,
+        out System.Numerics.Vector2 viewportSize,
+        out DateTimeOffset renderedAtUtc)
+    {
+        windowPosition = WindowPosition;
+        windowSize = WindowSize;
+        viewportPosition = ViewportPosition;
+        viewportSize = ViewportSize;
+        renderedAtUtc = RenderedAtUtc;
+    }
 
     public bool IsRecent() => DateTimeOffset.UtcNow - RenderedAtUtc <= TimeSpan.FromSeconds(5);
 

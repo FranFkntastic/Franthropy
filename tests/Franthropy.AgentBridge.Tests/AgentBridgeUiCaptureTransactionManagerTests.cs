@@ -30,7 +30,7 @@ public sealed class AgentBridgeUiCaptureTransactionManagerTests
         Assert.True(open);
         Assert.False(collapsed);
         Assert.False(forcedCollapsed);
-        Assert.True(manager.ShouldPresentInMainViewport("main-window"));
+        Assert.True(manager.ShouldPresent("main-window"));
 
         for (var frameId = 42; frameId <= 47; frameId++)
             manager.MarkRendered("main-window", frameId);
@@ -42,7 +42,7 @@ public sealed class AgentBridgeUiCaptureTransactionManagerTests
         Assert.True(result.Success);
         Assert.False(open);
         Assert.Null(forcedCollapsed);
-        Assert.False(manager.ShouldPresentInMainViewport("main-window"));
+        Assert.False(manager.ShouldPresent("main-window"));
     }
 
     [Fact]
@@ -91,7 +91,7 @@ public sealed class AgentBridgeUiCaptureTransactionManagerTests
         var result = manager.Complete("wrong-transaction");
 
         Assert.False(result.Success);
-        Assert.True(manager.ShouldPresentInMainViewport("main-window"));
+        Assert.True(manager.ShouldPresent("main-window"));
         Assert.True(manager.Cancel(handle.TransactionId).Success);
     }
 
@@ -109,7 +109,7 @@ public sealed class AgentBridgeUiCaptureTransactionManagerTests
         var handle = manager.Begin("main-window");
 
         await Task.Delay(20);
-        Assert.False(manager.ShouldPresentInMainViewport("main-window"));
+        Assert.False(manager.ShouldPresent("main-window"));
         await Assert.ThrowsAsync<TimeoutException>(() => handle.Ready);
         Assert.False(open);
     }
