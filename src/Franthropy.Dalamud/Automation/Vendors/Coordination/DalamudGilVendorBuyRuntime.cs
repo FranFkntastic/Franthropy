@@ -240,8 +240,11 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
             return new(GilVendorReachState.Waiting, navigation.Message);
         if (navigation.State is VNavmeshLifecycleState.Unavailable or VNavmeshLifecycleState.IpcFailure)
             return new(GilVendorReachState.Failed, navigation.Message);
-        if (ownsNavigation && navigation.IsRunning)
+        if (ownsNavigation && navigation.IsRunning && !navigationObservedRunning)
+        {
             navigationObservedRunning = true;
+            recovery.RecordNavigationStarted(utcNow(), distance);
+        }
         switch (DetermineFlightNavigationState(
                     ownsNavigation,
                     activeTravelMode,

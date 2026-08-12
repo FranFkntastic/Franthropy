@@ -65,6 +65,9 @@ internal sealed class GilVendorPrePurchaseRecovery
         ObserveNavigationProgress(observedAt, distance);
     }
 
+    public void RecordNavigationStarted(DateTimeOffset observedAt, float distance) =>
+        ObserveNavigationProgress(observedAt, distance);
+
     public GilVendorOwnedNavigationDecision ObserveOwnedNavigation(
         DateTimeOffset observedAt,
         float distance)
