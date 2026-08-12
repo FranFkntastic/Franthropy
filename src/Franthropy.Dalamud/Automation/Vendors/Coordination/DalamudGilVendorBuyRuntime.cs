@@ -253,6 +253,8 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
             case GilVendorFlightNavigationState.AwaitingStart:
                 return new(GilVendorReachState.Waiting, $"Waiting for the flight route to {offer.NpcName} to start.");
             case GilVendorFlightNavigationState.Downgrade:
+                if (!vnavmesh.TryStop())
+                    return new(GilVendorReachState.Failed, $"Could not cancel the failed flight route to {offer.NpcName} before retrying by ground.");
                 ownsNavigation = false;
                 activeTravelMode = null;
                 ResetNavigationTracking();
