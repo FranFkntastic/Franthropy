@@ -248,6 +248,11 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         line.PurchaseRetryCount = 0;
         line.Status = $"Verified {line.PurchasedQuantity:N0} bought";
         run.ArmedPurchase = null;
+        if (!run.StopRequested && FailIfUnavailableTargetsRemain(run, snapshot.ItemCounts))
+        {
+            message = run.Message;
+            return true;
+        }
         var hasRemaining = run.Lines.Any(candidate =>
             RemainingForLine(candidate, snapshot.ItemCounts.GetValueOrDefault(candidate.ItemId)) > 0);
         run.Phase = run.StopRequested
