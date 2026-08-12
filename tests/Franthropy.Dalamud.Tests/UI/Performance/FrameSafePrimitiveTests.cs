@@ -89,6 +89,26 @@ public sealed class FrameSafePrimitiveTests
         Assert.Equal(2, commits);
     }
 
+    [Fact]
+    public void BoundedTtlCacheExpiresReadsAndNeverExceedsItsCeiling()
+    {
+        var time = new ManualTimeProvider();
+        var cache = new BoundedTtlCache<int, string>(3, TimeSpan.FromMinutes(1), time);
+        cache.Set(1, "one");
+        cache.Set(2, "two");
+        cache.Set(3, "three");
+        cache.Set(4, "four");
+
+        Assert.Equal(3, cache.Count);
+        Assert.False(cache.TryGetValue(1, out _));
+        Assert.True(cache.TryGetValue(4, out var newest));
+        Assert.Equal("four", newest);
+
+        time.Advance(TimeSpan.FromMinutes(1));
+        Assert.False(cache.TryGetValue(4, out _));
+        Assert.Equal(2, cache.Count);
+    }
+
     private sealed class ManualTimeProvider : TimeProvider
     {
         private DateTimeOffset utcNow = DateTimeOffset.UnixEpoch;
