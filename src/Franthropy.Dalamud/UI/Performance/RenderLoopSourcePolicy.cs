@@ -151,6 +151,6 @@ public static partial class RenderLoopSourcePolicy
     [GeneratedRegex(@"\b(?:for|foreach|while|do)\s*(?:\(|\{)")]
     private static partial Regex LoopPattern();
 
-    [GeneratedRegex("""\[\s*(?:RenderFrameWorkJustification|RenderFrameWorkJustificationAttribute)\s*\(\s*"([^"]+)"\s*,\s*(\d+)\s*\)\s*\]\s*$""", RegexOptions.Multiline)]
+    [GeneratedRegex("""\[\s*(?:RenderFrameWorkJustification|RenderFrameWorkJustificationAttribute)\s*\(\s*"([^"]+)"\s*,\s*(\d+)\s*\)\s*\]\s*(?:\[[^\]]+\]\s*)*$""")]
     private static partial Regex JustificationPattern();
 }

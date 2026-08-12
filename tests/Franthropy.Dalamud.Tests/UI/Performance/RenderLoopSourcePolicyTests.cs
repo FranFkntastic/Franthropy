@@ -49,4 +49,26 @@ public sealed class RenderLoopSourcePolicyTests
 
         Assert.Empty(RenderLoopSourcePolicy.Analyze(source));
     }
+
+    [Fact]
+    public void DoesNotBorrowAJustificationFromThePreviousMethod()
+    {
+        const string source = """
+            [RenderFrameWorkJustification("This first loop is bounded to two columns.", 2)]
+            private void DrawFirst()
+            {
+                foreach (var column in columns)
+                    DrawColumn(column);
+            }
+
+            private void DrawSecond()
+            {
+                foreach (var row in rows)
+                    DrawRow(row);
+            }
+            """;
+
+        var violation = Assert.Single(RenderLoopSourcePolicy.Analyze(source));
+        Assert.Equal("DrawSecond", violation.MethodName);
+    }
 }

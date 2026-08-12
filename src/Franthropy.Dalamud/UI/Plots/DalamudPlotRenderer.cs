@@ -1,6 +1,5 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
-using Franthropy.Dalamud.UI.Performance;
 
 namespace Franthropy.Dalamud.UI.Plots;
 
@@ -9,24 +8,26 @@ public sealed record DalamudPlotRenderResult(
     string? HoveredDatumId,
     string? ClickedDatumId);
 
+public readonly record struct PlotRenderRevision(
+    long DataRevision,
+    long ViewRevision = 0);
+
 /// <summary>
 /// Thin immediate-mode renderer for compiled plot commands. All semantic decisions remain in
 /// the pure compiler, allowing geometry and interaction behavior to be tested without Dalamud.
+/// Callers must advance <see cref="PlotRenderRevision.DataRevision"/> whenever plot or interaction
+/// data changes; bounds and view revision are tracked independently in the cache key.
 /// </summary>
 public sealed class DalamudPlotRenderer
 {
+    private const int MaximumCachedPlots = 64;
     private readonly PlotCompiler compiler = new();
-    private readonly Dictionary<string, RevisionCache<PlotCompileRevision, PlotCompiledFrame>> compiledFrames =
+    private readonly Dictionary<string, CachedPlotFrame> compiledFrames =
         new(StringComparer.Ordinal);
-    private readonly Func<PlotCompileRevision, PlotCompiledFrame> compileFrame;
-
-    public DalamudPlotRenderer()
-    {
-        compileFrame = CompileFrame;
-    }
 
     public DalamudPlotRenderResult Draw(
         string id,
+        PlotRenderRevision revision,
         PlotSpec spec,
         Vector2 requestedSize,
         PlotInteractionState? interaction = null)
@@ -42,10 +43,15 @@ public sealed class DalamudPlotRenderer
 
         ImGui.InvisibleButton($"##FranthropyPlot{id}", size);
         var bounds = new PlotRect(ImGui.GetItemRectMin(), ImGui.GetItemRectMax());
-        if (!compiledFrames.TryGetValue(id, out var cache))
-            compiledFrames[id] = cache = new();
-        var revision = new PlotCompileRevision(spec, bounds, interaction);
-        var frame = cache.GetOrCreate(revision, compileFrame);
+        var compileRevision = new PlotCompileRevision(revision, bounds);
+        if (!compiledFrames.ContainsKey(id) && compiledFrames.Count >= MaximumCachedPlots)
+            compiledFrames.Clear();
+        if (!compiledFrames.TryGetValue(id, out var cached) || cached.Revision != compileRevision)
+        {
+            var compiled = compiler.Compile(spec, bounds, interaction);
+            compiledFrames[id] = cached = new(compileRevision, compiled);
+        }
+        var frame = cached.Frame;
         var drawList = ImGui.GetWindowDrawList();
         foreach (var command in frame.Commands)
             DrawCommand(drawList, command);
@@ -67,13 +73,13 @@ public sealed class DalamudPlotRenderer
 
     public void Clear() => compiledFrames.Clear();
 
-    private PlotCompiledFrame CompileFrame(PlotCompileRevision revision) =>
-        compiler.Compile(revision.Spec, revision.Bounds, revision.Interaction);
-
     private readonly record struct PlotCompileRevision(
-        PlotSpec Spec,
-        PlotRect Bounds,
-        PlotInteractionState? Interaction);
+        PlotRenderRevision Revision,
+        PlotRect Bounds);
+
+    private sealed record CachedPlotFrame(
+        PlotCompileRevision Revision,
+        PlotCompiledFrame Frame);
 
     private static void DrawCommand(ImDrawListPtr drawList, PlotDrawCommand command)
     {
@@ -191,6 +197,7 @@ public sealed class DalamudPlotContainer
         public PlotViewportState Viewport { get; } = new();
         public float Height { get; set; } = height;
         public PlotCompiledFrame? LastFrame { get; set; }
+        public long ViewportRevision { get; set; }
     }
 
     private readonly DalamudPlotRenderer renderer = new();
@@ -198,6 +205,7 @@ public sealed class DalamudPlotContainer
 
     public DalamudPlotContainerResult Draw(
         string id,
+        long revision,
         PlotSpec spec,
         Vector2 requestedSize,
         PlotInteractionState? interaction = null)
@@ -214,7 +222,10 @@ public sealed class DalamudPlotContainer
         if (!fitEnabled)
             ImGui.BeginDisabled();
         if (ImGui.SmallButton("Fit"))
+        {
             state.Viewport.Fit();
+            state.ViewportRevision++;
+        }
         if (!fitEnabled)
             ImGui.EndDisabled();
         controls.Add(Control("fit", "Fit plot to all evidence", fitEnabled, state.Viewport.IsFit, state, spec, state.Viewport.Fit));
@@ -222,13 +233,19 @@ public sealed class DalamudPlotContainer
         if (!fitEnabled)
             ImGui.BeginDisabled();
         if (ImGui.SmallButton("Zoom -"))
+        {
             ZoomFromCenter(state, spec, 1.25d);
+            state.ViewportRevision++;
+        }
         if (!fitEnabled)
             ImGui.EndDisabled();
         controls.Add(Control("zoom-out", "Zoom plot out", fitEnabled, false, state, spec, () => ZoomFromCenter(state, spec, 1.25d)));
         ImGui.SameLine();
         if (ImGui.SmallButton("Zoom +"))
+        {
             ZoomFromCenter(state, spec, .80d);
+            state.ViewportRevision++;
+        }
         controls.Add(Control("zoom-in", "Zoom plot in", true, false, state, spec, () => ZoomFromCenter(state, spec, .80d)));
         ImGui.SameLine();
         ImGui.TextDisabled(state.Viewport.IsFit
@@ -236,9 +253,17 @@ public sealed class DalamudPlotContainer
             : "Zoomed view · Ctrl+wheel zoom · right-drag pan");
 
         var visibleSpec = state.Viewport.ApplyForRendering(spec);
-        var result = renderer.Draw("Viewport", visibleSpec, new(requestedSize.X, state.Height), interaction);
+        var result = renderer.Draw(
+            "Viewport",
+            new PlotRenderRevision(revision, state.ViewportRevision),
+            visibleSpec,
+            new(requestedSize.X, state.Height),
+            interaction);
         if (HandleViewportInput(state.Viewport, spec, result.Frame))
+        {
+            state.ViewportRevision++;
             result = result with { HoveredDatumId = null };
+        }
         state.LastFrame = result.Frame;
         DrawResizeHandle(state);
         ImGui.PopID();
@@ -281,7 +306,10 @@ public sealed class DalamudPlotContainer
         ImGui.InvisibleButton("##Resize", new(width, 9f));
         var hovered = ImGui.IsItemHovered();
         if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left, 0f))
+        {
             state.Height = Math.Clamp(state.Height + ImGui.GetIO().MouseDelta.Y, 180f, 900f);
+            state.ViewportRevision++;
+        }
         var minimum = ImGui.GetItemRectMin();
         var maximum = ImGui.GetItemRectMax();
         var y = (minimum.Y + maximum.Y) * .5f;

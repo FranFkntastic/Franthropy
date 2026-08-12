@@ -32,6 +32,18 @@ public sealed class FrameSafePrimitiveTests
     }
 
     [Fact]
+    public void ExplicitRevisionControlsMutationVisibility()
+    {
+        var values = new List<int> { 1 };
+        var cache = new RevisionCache<long, int>();
+
+        Assert.Equal(1, cache.GetOrCreate(1, _ => values.Sum()));
+        values.Add(2);
+        Assert.Equal(1, cache.GetOrCreate(1, _ => values.Sum()));
+        Assert.Equal(3, cache.GetOrCreate(2, _ => values.Sum()));
+    }
+
+    [Fact]
     public void CadencedProbeRetainsTruthBetweenEligibleRefreshes()
     {
         var time = new ManualTimeProvider();
