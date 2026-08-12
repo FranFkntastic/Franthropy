@@ -22,7 +22,8 @@ public sealed record DalamudTableColumn<TRow>(
     DalamudTableCellAlignment Alignment = DalamudTableCellAlignment.Left,
     Action<TRow>? DrawContextMenu = null,
     string? Id = null,
-    string? HeaderTooltip = null);
+    string? HeaderTooltip = null,
+    float SelectionTargetFraction = 0f);
 
 public readonly record struct DalamudTableLayout(
     Vector2 Size,
@@ -80,6 +81,14 @@ public sealed class DalamudTableProjection<TRow>
             .FirstOrDefault(group => group.Count() > 1);
         if (duplicateIdentity is not null)
             throw new ArgumentException($"Table column identity '{duplicateIdentity.Key}' is duplicated.", nameof(columns));
+        var invalidSelectionTarget = columns.FirstOrDefault(column =>
+            column.SelectionTargetFraction is < 0f or > 1f);
+        if (invalidSelectionTarget is not null)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(columns),
+                $"Table column '{invalidSelectionTarget.Label}' selection target fraction must be between 0 and 1.");
+        }
         this.columns = columns;
         this.selection = selection ?? DalamudTableSelection<TRow>.None;
         this.sortGroupKey = sortGroupKey;
@@ -227,9 +236,63 @@ public sealed class DalamudTableProjection<TRow>
         for (var index = 1; index < columns.Count; index++)
         {
             if (ImGui.TableNextColumn())
+            {
+                DrawSelectionTarget(
+                    columns[index],
+                    orderedRows,
+                    rowIndex,
+                    $"{id}:cell:{index}:selection",
+                    usesSelection,
+                    enabled);
                 DrawCell(columns[index], row, $"{id}:cell:{index}");
+            }
         }
         return activated;
+    }
+
+    private void DrawSelectionTarget(
+        DalamudTableColumn<TRow> column,
+        IReadOnlyList<TRow> orderedRows,
+        int rowIndex,
+        string id,
+        bool usesSelection,
+        bool enabled)
+    {
+        if (!usesSelection || column.SelectionTargetFraction <= 0f)
+            return;
+
+        var row = orderedRows[rowIndex];
+        var cellCursor = ImGui.GetCursorPos();
+        var availableWidth = Math.Max(1f, ImGui.GetContentRegionAvail().X);
+        var targetWidth = ResolveSelectionTargetWidth(availableWidth, column.SelectionTargetFraction);
+        ImGui.SetCursorPosX(cellCursor.X + availableWidth - targetWidth);
+        var interaction = DalamudTableSelectionRenderer.DrawRow(
+            id,
+            selection.IsSelected(row),
+            new Vector2(targetWidth, ImGui.GetTextLineHeightWithSpacing()),
+            enabled);
+        if (interaction.Activated)
+        {
+            var io = ImGui.GetIO();
+            selection.ApplyClick(orderedRows, rowIndex, io.KeyCtrl, io.KeyShift, io.KeyAlt);
+        }
+        if (enabled &&
+            selection.IsDragging &&
+            interaction.Hovered &&
+            ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+        {
+            selection.ApplyDrag(orderedRows, rowIndex);
+        }
+        ImGui.SetCursorPos(cellCursor);
+    }
+
+    internal static float ResolveSelectionTargetWidth(float availableWidth, float fraction)
+    {
+        if (availableWidth <= 0f)
+            throw new ArgumentOutOfRangeException(nameof(availableWidth));
+        if (fraction is <= 0f or > 1f)
+            throw new ArgumentOutOfRangeException(nameof(fraction));
+        return Math.Max(1f, availableWidth * fraction);
     }
 
     public void DrawMessageRow(
