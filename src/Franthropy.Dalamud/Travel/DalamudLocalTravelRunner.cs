@@ -3,6 +3,7 @@ using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
+using Lumina.Excel.Sheets;
 
 namespace Franthropy.Dalamud.Travel;
 
@@ -41,12 +42,17 @@ public sealed class DalamudLocalTravelRunner
 {
     internal const float FlightDistance = 60f;
     internal const float GroundMountDistance = 25f;
-    private static readonly TimeSpan MountConfirmationTimeout = TimeSpan.FromSeconds(8);
-    private static readonly TimeSpan TakeoffConfirmationTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan MountPreparationTimeout = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan MountRetryInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan TakeoffPreparationTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan TakeoffRetryInterval = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan DismountConfirmationTimeout = TimeSpan.FromSeconds(5);
 
     private readonly ILocalTravelActions actions;
-    private DateTimeOffset? mountRequestedAt;
-    private DateTimeOffset? takeoffRequestedAt;
+    private DateTimeOffset? mountPreparationStartedAt;
+    private DateTimeOffset? nextMountRequestAt;
+    private DateTimeOffset? takeoffPreparationStartedAt;
+    private DateTimeOffset? nextTakeoffRequestAt;
     private DateTimeOffset? dismountRequestedAt;
     private bool accelerationRequested;
     private bool flightDisabled;
@@ -55,6 +61,16 @@ public sealed class DalamudLocalTravelRunner
 
     public DalamudLocalTravelRunner(ICondition condition, IObjectTable objectTable)
         : this(new DalamudLocalTravelActions(condition, objectTable))
+    {
+    }
+
+    public DalamudLocalTravelRunner(
+        ICondition condition,
+        IObjectTable objectTable,
+        ICommandManager commandManager,
+        IDataManager dataManager,
+        IClientState clientState)
+        : this(new DalamudLocalTravelActions(condition, objectTable, commandManager, dataManager, clientState))
     {
     }
 
@@ -78,8 +94,8 @@ public sealed class DalamudLocalTravelRunner
         }
         if (observation.InFlight)
         {
-            mountRequestedAt = null;
-            takeoffRequestedAt = null;
+            ResetMountPreparation();
+            ResetTakeoffPreparation();
             return Ready(LocalTravelMode.Flight, "AlreadyFlying", "Flying to the destination.");
         }
 
@@ -94,7 +110,7 @@ public sealed class DalamudLocalTravelRunner
 
         if (observation.Mounted)
         {
-            mountRequestedAt = null;
+            ResetMountPreparation();
             return Ready(LocalTravelMode.GroundMount, "GroundMountReady", "Riding to the destination.");
         }
 
@@ -113,15 +129,15 @@ public sealed class DalamudLocalTravelRunner
     public void DowngradeFlight()
     {
         flightDisabled = true;
-        takeoffRequestedAt = null;
+        ResetTakeoffPreparation();
         dismountRequestedAt = null;
         requiresDismount = true;
     }
 
     public void Reset()
     {
-        mountRequestedAt = null;
-        takeoffRequestedAt = null;
+        ResetMountPreparation();
+        ResetTakeoffPreparation();
         dismountRequestedAt = null;
         accelerationRequested = false;
         flightDisabled = false;
@@ -137,6 +153,7 @@ public sealed class DalamudLocalTravelRunner
             if (mount is not null)
                 return mount with
                 {
+                    Mode = LocalTravelMode.Flight,
                     Code = mount.Code == "MountRequested" ? "FlightMountRequested" : mount.Code,
                     Message = mount.Code == "MountRequested"
                         ? "Mounting before flying to the destination."
@@ -147,59 +164,74 @@ public sealed class DalamudLocalTravelRunner
             return null;
         }
 
-        mountRequestedAt = null;
-        if (takeoffRequestedAt is { } requestedAt)
-        {
-            if (observedAt - requestedAt < TakeoffConfirmationTimeout)
-                return Waiting(LocalTravelMode.Flight, "AwaitingTakeoff", "Waiting for takeoff before starting the flight path.");
+        ResetMountPreparation();
+        var firstAttempt = takeoffPreparationStartedAt is null;
+        takeoffPreparationStartedAt ??= observedAt;
+        nextTakeoffRequestAt ??= observedAt;
 
-            flightDisabled = true;
-            takeoffRequestedAt = null;
-            return null;
-        }
+        if (observedAt - takeoffPreparationStartedAt.Value >= TakeoffPreparationTimeout)
+            return Unavailable(LocalTravelMode.Flight, "TakeoffTimeout", "Could not take off after repeated automatic attempts.");
 
-        if (!observation.CanTakeOff || observation.MountTransition || observation.Casting || !actions.TryTakeOff())
-        {
-            flightDisabled = true;
-            return null;
-        }
+        if (observation.MountTransition || observation.Casting ||
+            observedAt < nextTakeoffRequestAt.Value ||
+            !observation.CanTakeOff)
+            return Waiting(LocalTravelMode.Flight, "AwaitingTakeoff", "Waiting for takeoff before starting the flight path.");
 
-        takeoffRequestedAt = observedAt;
-        return Waiting(LocalTravelMode.Flight, "TakeoffRequested", "Taking off before starting the flight path.");
+        var takeoffAccepted = actions.TryTakeOff();
+        nextTakeoffRequestAt = observedAt.Add(TakeoffRetryInterval);
+        return Waiting(
+            LocalTravelMode.Flight,
+            takeoffAccepted
+                ? firstAttempt ? "TakeoffRequested" : "TakeoffRetryRequested"
+                : firstAttempt ? "TakeoffRequestPending" : "TakeoffRetryPending",
+            takeoffAccepted
+                ? firstAttempt
+                    ? "Taking off before starting the flight path."
+                    : "Retrying takeoff before starting the flight path."
+                : "Waiting to retry takeoff before starting the flight path.");
     }
 
     private LocalTravelPreparationResult? PrepareGroundMount(LocalTravelObservation observation, DateTimeOffset observedAt)
     {
         if (observation.Mounted)
         {
-            mountRequestedAt = null;
+            ResetMountPreparation();
             return Ready(LocalTravelMode.GroundMount, "GroundMountReady", "Riding to the destination.");
         }
 
         if (mountDisabled)
             return null;
 
-        if (mountRequestedAt is { } requestedAt)
-        {
-            if (observedAt - requestedAt < MountConfirmationTimeout)
-                return Waiting(LocalTravelMode.GroundMount, "AwaitingMount", "Waiting for the mount before starting the route.");
-
-            mountRequestedAt = null;
-            mountDisabled = true;
-            return null;
-        }
-
-        if (observation.MountTransition || observation.Casting)
-            return Waiting(LocalTravelMode.GroundMount, "MountTransition", "Waiting for the current mount action to finish.");
-
-        if (!observation.CanMount || !actions.TryMount())
+        if (!observation.MountAllowed)
         {
             mountDisabled = true;
             return null;
         }
 
-        mountRequestedAt = observedAt;
-        return Waiting(LocalTravelMode.GroundMount, "MountRequested", "Mounting before starting the route.");
+        var firstAttempt = mountPreparationStartedAt is null;
+        mountPreparationStartedAt ??= observedAt;
+        nextMountRequestAt ??= observedAt;
+
+        if (observedAt - mountPreparationStartedAt.Value >= MountPreparationTimeout)
+            return Unavailable(LocalTravelMode.GroundMount, "MountTimeout", "Could not summon a mount after repeated automatic attempts.");
+
+        if (observation.MountTransition || observation.Casting ||
+            observedAt < nextMountRequestAt.Value ||
+            !observation.CanMount)
+            return Waiting(LocalTravelMode.GroundMount, "AwaitingMount", "Waiting for the mount before starting the route.");
+
+        var mountAccepted = actions.TryMount();
+        nextMountRequestAt = observedAt.Add(MountRetryInterval);
+        return Waiting(
+            LocalTravelMode.GroundMount,
+            mountAccepted
+                ? firstAttempt ? "MountRequested" : "MountRetryRequested"
+                : firstAttempt ? "MountRequestPending" : "MountRetryPending",
+            mountAccepted
+                ? firstAttempt
+                    ? "Mounting before starting the route."
+                    : "Retrying the mount before starting the route."
+                : "Waiting to retry the mount before starting the route.");
     }
 
     private LocalTravelPreparationResult? PrepareDismount(LocalTravelObservation observation, DateTimeOffset observedAt)
@@ -208,14 +240,14 @@ public sealed class DalamudLocalTravelRunner
         {
             requiresDismount = false;
             dismountRequestedAt = null;
-            mountRequestedAt = null;
+            ResetMountPreparation();
             mountDisabled = false;
             return null;
         }
 
         if (dismountRequestedAt is { } requestedAt)
         {
-            return observedAt - requestedAt < TakeoffConfirmationTimeout
+            return observedAt - requestedAt < DismountConfirmationTimeout
                 ? Waiting(LocalTravelMode.GroundMount, "AwaitingDismount", "Landing before retrying the route by ground.")
                 : Unavailable(LocalTravelMode.GroundMount, "DismountTimeout", "Could not land and dismount for the ground-route retry.");
         }
@@ -244,6 +276,18 @@ public sealed class DalamudLocalTravelRunner
         return Ready(LocalTravelMode.Walk, "WalkingFallback", "Walking to the destination because no faster local movement is available.");
     }
 
+    private void ResetMountPreparation()
+    {
+        mountPreparationStartedAt = null;
+        nextMountRequestAt = null;
+    }
+
+    private void ResetTakeoffPreparation()
+    {
+        takeoffPreparationStartedAt = null;
+        nextTakeoffRequestAt = null;
+    }
+
     private static LocalTravelPreparationResult Ready(LocalTravelMode mode, string code, string message) =>
         new(LocalTravelPreparationState.Ready, mode, code, message);
 
@@ -261,6 +305,7 @@ internal sealed record LocalTravelObservation(
     bool MountTransition,
     bool Casting,
     bool AccelerationActive,
+    bool MountAllowed,
     bool CanMount,
     bool CanTakeOff,
     bool CanDismount,
@@ -286,11 +331,28 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
 
     private readonly ICondition condition;
     private readonly IObjectTable objectTable;
+    private readonly ICommandManager? commandManager;
+    private readonly IDataManager? dataManager;
+    private readonly IClientState? clientState;
 
     public DalamudLocalTravelActions(ICondition condition, IObjectTable objectTable)
     {
         this.condition = condition ?? throw new ArgumentNullException(nameof(condition));
         this.objectTable = objectTable ?? throw new ArgumentNullException(nameof(objectTable));
+    }
+
+    public DalamudLocalTravelActions(
+        ICondition condition,
+        IObjectTable objectTable,
+        ICommandManager commandManager,
+        IDataManager dataManager,
+        IClientState clientState)
+    {
+        this.condition = condition ?? throw new ArgumentNullException(nameof(condition));
+        this.objectTable = objectTable ?? throw new ArgumentNullException(nameof(objectTable));
+        this.commandManager = commandManager ?? throw new ArgumentNullException(nameof(commandManager));
+        this.dataManager = dataManager ?? throw new ArgumentNullException(nameof(dataManager));
+        this.clientState = clientState ?? throw new ArgumentNullException(nameof(clientState));
     }
 
     public LocalTravelObservation Observe()
@@ -300,6 +362,10 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
             var playerState = PlayerState.Instance();
             var manager = ActionManager.Instance();
             var mounted = condition[ConditionFlag.Mounted];
+            var canMount = manager != null && manager->GetActionStatus(ActionType.GeneralAction, MountRouletteGeneralActionId) == 0;
+            var mountAllowed = dataManager is not null && clientState is not null
+                ? dataManager.GetExcelSheet<TerritoryType>().GetRowOrDefault(clientState.TerritoryType)?.Mount ?? true
+                : canMount;
             return new(
                 FlightUnlocked: playerState != null && playerState->CanFly,
                 Mounted: mounted,
@@ -308,7 +374,8 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
                 Casting: condition[ConditionFlag.Casting],
                 AccelerationActive: objectTable.LocalPlayer?.StatusList.Any(status =>
                     AccelerationStatusIds.Contains(status.StatusId)) == true,
-                CanMount: manager != null && manager->GetActionStatus(ActionType.GeneralAction, MountRouletteGeneralActionId) == 0,
+                MountAllowed: mountAllowed,
+                CanMount: canMount,
                 CanTakeOff: mounted && Control.GetFlightAllowedStatus() == Control.FlightAllowedStatus.CanFly &&
                     manager != null && manager->GetActionStatus(ActionType.GeneralAction, JumpGeneralActionId) == 0,
                 CanDismount: mounted && manager != null &&
@@ -319,15 +386,15 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
         }
         catch
         {
-            return new(false, false, false, false, false, false, false, false, false, false);
+            return new(false, false, false, false, false, false, false, false, false, false, false);
         }
     }
 
-    public bool TryMount() => TryUse(ActionType.GeneralAction, MountRouletteGeneralActionId);
+    public bool TryMount() => TryUseGeneralAction(MountRouletteGeneralActionId);
 
-    public bool TryTakeOff() => TryUse(ActionType.GeneralAction, JumpGeneralActionId);
+    public bool TryTakeOff() => TryUseGeneralAction(JumpGeneralActionId);
 
-    public bool TryDismount() => TryUse(ActionType.GeneralAction, DismountGeneralActionId);
+    public bool TryDismount() => TryUseGeneralAction(DismountGeneralActionId);
 
     public bool TryAccelerate()
     {
@@ -359,4 +426,25 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
             return false;
         }
     }
+
+    private bool TryUseGeneralAction(uint id)
+    {
+        try
+        {
+            var manager = ActionManager.Instance();
+            if (manager == null || manager->GetActionStatus(ActionType.GeneralAction, id) != 0)
+                return false;
+            if (commandManager is null || dataManager is null)
+                return TryUse(ActionType.GeneralAction, id);
+            var name = dataManager.GetExcelSheet<GeneralAction>().GetRowOrDefault(id)?.Name.ToString();
+            return !string.IsNullOrWhiteSpace(name) &&
+                   commandManager.ProcessCommand($"/generalaction \"{EscapeArgument(name)}\"");
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string EscapeArgument(string value) => value.Replace("\"", string.Empty, StringComparison.Ordinal);
 }

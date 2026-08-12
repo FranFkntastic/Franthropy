@@ -63,6 +63,41 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         System.Action? beginAutomation = null,
         System.Action? endAutomation = null,
         Func<DateTimeOffset>? utcNow = null)
+        : this(
+            access,
+            shop,
+            vnavmesh,
+            aetheryteTravel,
+            aethernetTravel,
+            objectInteractor,
+            travelReadiness,
+            dataManager,
+            clientState,
+            objectTable,
+            condition,
+            commandManager: null,
+            beginAutomation: beginAutomation,
+            endAutomation: endAutomation,
+            utcNow: utcNow)
+    {
+    }
+
+    public DalamudGilVendorBuyRuntime(
+        DalamudGilVendorAccessReader access,
+        DalamudOrdinaryGilShop shop,
+        DalamudVNavmeshTravel vnavmesh,
+        DalamudLifestreamAetheryteTravel aetheryteTravel,
+        DalamudLifestreamAethernetTravel aethernetTravel,
+        DalamudLifestreamObjectInteractor objectInteractor,
+        DalamudTravelReadiness travelReadiness,
+        IDataManager dataManager,
+        IClientState clientState,
+        IObjectTable objectTable,
+        ICondition condition,
+        ICommandManager? commandManager,
+        System.Action? beginAutomation = null,
+        System.Action? endAutomation = null,
+        Func<DateTimeOffset>? utcNow = null)
     {
         this.access = access ?? throw new ArgumentNullException(nameof(access));
         this.shop = shop ?? throw new ArgumentNullException(nameof(shop));
@@ -74,9 +109,16 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         this.dataManager = dataManager ?? throw new ArgumentNullException(nameof(dataManager));
         this.clientState = clientState ?? throw new ArgumentNullException(nameof(clientState));
         this.objectTable = objectTable ?? throw new ArgumentNullException(nameof(objectTable));
-        localTravel = new DalamudLocalTravelRunner(
-            condition ?? throw new ArgumentNullException(nameof(condition)),
-            objectTable);
+        localTravel = commandManager is null
+            ? new DalamudLocalTravelRunner(
+                condition ?? throw new ArgumentNullException(nameof(condition)),
+                objectTable)
+            : new DalamudLocalTravelRunner(
+                condition ?? throw new ArgumentNullException(nameof(condition)),
+                objectTable,
+                commandManager,
+                dataManager,
+                clientState);
         this.beginAutomation = beginAutomation ?? (() => { });
         this.endAutomation = endAutomation ?? (() => { });
         this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
