@@ -168,6 +168,21 @@ public sealed record AgentBridgeCaptureRegion(
     {
     }
 
+    [Obsolete("Use the overload that includes the rendered viewport ID.")]
+    public void Deconstruct(
+        out System.Numerics.Vector2 windowPosition,
+        out System.Numerics.Vector2 windowSize,
+        out System.Numerics.Vector2 viewportPosition,
+        out System.Numerics.Vector2 viewportSize,
+        out DateTimeOffset renderedAtUtc)
+    {
+        windowPosition = WindowPosition;
+        windowSize = WindowSize;
+        viewportPosition = ViewportPosition;
+        viewportSize = ViewportSize;
+        renderedAtUtc = RenderedAtUtc;
+    }
+
     public bool IsRecent() => DateTimeOffset.UtcNow - RenderedAtUtc <= TimeSpan.FromSeconds(5);
 
     public System.Numerics.Vector2 GetUv0() => new(
