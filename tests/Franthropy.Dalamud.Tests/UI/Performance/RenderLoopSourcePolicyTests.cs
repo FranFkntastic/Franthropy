@@ -71,4 +71,20 @@ public sealed class RenderLoopSourcePolicyTests
         var violation = Assert.Single(RenderLoopSourcePolicy.Analyze(source));
         Assert.Equal("DrawSecond", violation.MethodName);
     }
+
+    [Fact]
+    public void DoesNotAcceptACommentedOutJustification()
+    {
+        const string source = """
+            // [RenderFrameWorkJustification("This is not an active attribute.", 2)]
+            private void DrawRows()
+            {
+                foreach (var row in rows)
+                    DrawRow(row);
+            }
+            """;
+
+        var violation = Assert.Single(RenderLoopSourcePolicy.Analyze(source));
+        Assert.Equal("DrawRows", violation.MethodName);
+    }
 }

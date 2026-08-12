@@ -258,7 +258,7 @@ public sealed class DalamudPlotContainer
 
         var visibleSpec = state.Viewport.ApplyForRendering(spec);
         var result = renderer.Draw(
-            "Viewport",
+            $"{id}:Viewport",
             new PlotRenderRevision(revision, state.ViewportRevision),
             visibleSpec,
             new(requestedSize.X, state.Height),
@@ -280,12 +280,11 @@ public sealed class DalamudPlotContainer
             return false;
         var io = ImGui.GetIO();
         var rightDragging = ImGui.IsMouseDragging(ImGuiMouseButton.Right, 0f);
-        PlotViewportInputController.Apply(
+        return PlotViewportInputController.Apply(
             viewport,
             spec,
             frame,
             new(io.MouseWheel, io.KeyCtrl, rightDragging, ImGui.GetMousePos(), io.MouseDelta));
-        return rightDragging;
     }
 
     private static DalamudPlotContainerControl Control(

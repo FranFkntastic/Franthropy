@@ -22,7 +22,8 @@ public static partial class RenderLoopSourcePolicy
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceName);
-        var masked = MaskCommentsAndLiterals(source);
+        var masked = MaskSource(source, maskLiterals: true);
+        var commentMasked = MaskSource(source, maskLiterals: false);
         var violations = new List<RenderLoopPolicyViolation>();
         foreach (Match method in DrawMethodPattern().Matches(masked))
         {
@@ -34,7 +35,7 @@ public static partial class RenderLoopSourcePolicy
                 continue;
             var body = masked[openBrace..(closeBrace + 1)];
             var loop = LoopPattern().Match(body);
-            if (!loop.Success || HasJustification(source, method.Index))
+            if (!loop.Success || HasJustification(commentMasked, method.Index))
                 continue;
 
             var loopOffset = openBrace + loop.Index;
@@ -71,7 +72,7 @@ public static partial class RenderLoopSourcePolicy
         return -1;
     }
 
-    private static string MaskCommentsAndLiterals(string source)
+    private static string MaskSource(string source, bool maskLiterals)
     {
         var result = new StringBuilder(source);
         var state = LexicalState.Code;
@@ -92,11 +93,11 @@ public static partial class RenderLoopSourcePolicy
                     state = LexicalState.BlockComment;
                     break;
                 case LexicalState.Code when current == '"':
-                    result[index] = ' ';
+                    if (maskLiterals) result[index] = ' ';
                     state = LexicalState.String;
                     break;
                 case LexicalState.Code when current == '\'':
-                    result[index] = ' ';
+                    if (maskLiterals) result[index] = ' ';
                     state = LexicalState.Character;
                     break;
                 case LexicalState.LineComment:
@@ -115,28 +116,28 @@ public static partial class RenderLoopSourcePolicy
                 case LexicalState.String:
                     if (current == '\\' && next != '\0')
                     {
-                        result[index] = result[index + 1] = ' ';
+                        if (maskLiterals) result[index] = result[index + 1] = ' ';
                         index++;
                     }
                     else if (current == '"')
                     {
-                        result[index] = ' ';
+                        if (maskLiterals) result[index] = ' ';
                         state = LexicalState.Code;
                     }
-                    else if (current != '\n') result[index] = ' ';
+                    else if (maskLiterals && current != '\n') result[index] = ' ';
                     break;
                 case LexicalState.Character:
                     if (current == '\\' && next != '\0')
                     {
-                        result[index] = result[index + 1] = ' ';
+                        if (maskLiterals) result[index] = result[index + 1] = ' ';
                         index++;
                     }
                     else if (current == '\'')
                     {
-                        result[index] = ' ';
+                        if (maskLiterals) result[index] = ' ';
                         state = LexicalState.Code;
                     }
-                    else if (current != '\n') result[index] = ' ';
+                    else if (maskLiterals && current != '\n') result[index] = ' ';
                     break;
             }
         }
