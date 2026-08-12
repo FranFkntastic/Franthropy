@@ -57,6 +57,7 @@ public sealed class DalamudTableProjection<TRow>
 {
     private readonly IReadOnlyList<DalamudTableColumn<TRow>> columns;
     private readonly DalamudTableSelection<TRow> selection;
+    private readonly Func<TRow, IComparable>? sortGroupKey;
     private readonly string[] filters;
     private IEnumerable<TRow>? appliedSource;
     private IReadOnlyList<TRow> appliedRows = [];
@@ -67,7 +68,8 @@ public sealed class DalamudTableProjection<TRow>
 
     public DalamudTableProjection(
         IReadOnlyList<DalamudTableColumn<TRow>> columns,
-        DalamudTableSelection<TRow>? selection = null)
+        DalamudTableSelection<TRow>? selection = null,
+        Func<TRow, IComparable>? sortGroupKey = null)
     {
         if (columns.Count == 0)
             throw new ArgumentException("A table projection requires at least one column.", nameof(columns));
@@ -80,6 +82,7 @@ public sealed class DalamudTableProjection<TRow>
             throw new ArgumentException($"Table column identity '{duplicateIdentity.Key}' is duplicated.", nameof(columns));
         this.columns = columns;
         this.selection = selection ?? DalamudTableSelection<TRow>.None;
+        this.sortGroupKey = sortGroupKey;
         filters = new string[columns.Count];
         Array.Fill(filters, string.Empty);
     }
@@ -448,13 +451,23 @@ public sealed class DalamudTableProjection<TRow>
         var hasSort = sortSpecs.Handle != null && sortSpecs.SpecsCount > 0;
         var sortColumn = hasSort ? (int)sortSpecs.Specs.ColumnIndex : -1;
         var sortDirection = hasSort ? sortSpecs.Specs.SortDirection : ImGuiSortDirection.None;
+        var result = Apply(rows, sortColumn, sortDirection);
+        if (sortSpecs.Handle != null)
+            sortSpecs.SpecsDirty = false;
+        return result;
+    }
+
+    internal IReadOnlyList<TRow> Apply(
+        IEnumerable<TRow> rows,
+        int sortColumn,
+        ImGuiSortDirection sortDirection)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
         if (ReferenceEquals(rows, appliedSource) &&
             sortColumn == appliedSortColumn &&
             sortDirection == appliedSortDirection &&
             filters.SequenceEqual(appliedFilters, StringComparer.Ordinal))
         {
-            if (sortSpecs.Handle != null)
-                sortSpecs.SpecsDirty = false;
             return appliedRows;
         }
 
@@ -463,9 +476,19 @@ public sealed class DalamudTableProjection<TRow>
         if (sortColumn >= 0 && sortColumn < columns.Count)
         {
             var key = columns[sortColumn].SortKey ?? (row => columns[sortColumn].Text(row));
-            result = sortDirection == ImGuiSortDirection.Descending
-                ? filtered.OrderByDescending(row => key(row)).ToArray()
-                : filtered.OrderBy(row => key(row)).ToArray();
+            if (sortGroupKey is null)
+            {
+                result = sortDirection == ImGuiSortDirection.Descending
+                    ? filtered.OrderByDescending(row => key(row)).ToArray()
+                    : filtered.OrderBy(row => key(row)).ToArray();
+            }
+            else
+            {
+                var grouped = filtered.OrderBy(row => sortGroupKey(row));
+                result = sortDirection == ImGuiSortDirection.Descending
+                    ? grouped.ThenByDescending(row => key(row)).ToArray()
+                    : grouped.ThenBy(row => key(row)).ToArray();
+            }
         }
 
         appliedSource = rows;
@@ -474,8 +497,6 @@ public sealed class DalamudTableProjection<TRow>
         appliedSortColumn = sortColumn;
         appliedSortDirection = sortDirection;
         ApplyCount++;
-        if (sortSpecs.Handle != null)
-            sortSpecs.SpecsDirty = false;
         return result;
     }
 

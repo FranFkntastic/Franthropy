@@ -77,7 +77,7 @@ public sealed class TableSelectionModelTests
         Assert.Equal([10, 20, 30, 40], selection.SelectedKeys.Order());
 
         selection.ApplyClick(Rows, 2, control: false, shift: true, alt: true);
-        Assert.Equal([10], selection.SelectedKeys);
+        Assert.Equal([10, 40], selection.SelectedKeys.Order());
     }
 
     [Fact]

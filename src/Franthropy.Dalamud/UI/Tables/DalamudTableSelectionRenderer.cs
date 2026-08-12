@@ -30,17 +30,14 @@ public static class DalamudTableSelectionRenderer
 
         if (!enabled)
             ImGui.BeginDisabled();
-        ImGui.Selectable(
-            $"##{id}",
-            selected,
-            ImGuiSelectableFlags.SpanAllColumns | ImGuiSelectableFlags.AllowItemOverlap,
-            targetSize);
+        ImGui.InvisibleButton(id, targetSize, ImGuiButtonFlags.MouseButtonLeft);
         if (!enabled)
             ImGui.EndDisabled();
 
         var hovered = enabled && ImGui.IsItemHovered();
         var active = enabled && ImGui.IsItemActive();
         var activated = enabled && ImGui.IsItemClicked(ImGuiMouseButton.Left);
+        ApplyRowBackground(ResolveBackground(selected, hovered, active));
         return new DalamudTableRowInteraction(activated, hovered, active);
     }
 
@@ -100,5 +97,22 @@ public static class DalamudTableSelectionRenderer
                 : selected
                     ? DalamudTableRowBackground.Selected
                     : DalamudTableRowBackground.None;
+
+    private static void ApplyRowBackground(DalamudTableRowBackground background)
+    {
+        var color = background switch
+        {
+            DalamudTableRowBackground.Selected => ImGuiCol.Header,
+            DalamudTableRowBackground.Hovered => ImGuiCol.HeaderHovered,
+            DalamudTableRowBackground.Active => ImGuiCol.HeaderActive,
+            _ => (ImGuiCol?)null,
+        };
+        if (color is not { } rowColor)
+            return;
+
+        ImGui.TableSetBgColor(
+            ImGuiTableBgTarget.RowBg0,
+            ImGui.GetColorU32(rowColor));
+    }
 
 }

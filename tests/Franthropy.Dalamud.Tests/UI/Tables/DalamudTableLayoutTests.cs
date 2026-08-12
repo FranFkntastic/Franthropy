@@ -73,6 +73,25 @@ public sealed class DalamudTableLayoutTests
     }
 
     [Fact]
+    public void Projection_preserves_row_groups_when_a_column_sort_is_applied()
+    {
+        var table = new DalamudTableProjection<GroupedRow>(
+            [new("Value", 80f, row => row.Value, row => row.Value)],
+            sortGroupKey: row => row.Group);
+        GroupedRow[] rows =
+        [
+            new(1, "Zulu"),
+            new(0, "Bravo"),
+            new(0, "Alpha"),
+            new(1, "Able"),
+        ];
+
+        var sorted = table.Apply(rows, sortColumn: 0, sortDirection: ImGuiSortDirection.Descending);
+
+        Assert.Equal(["Bravo", "Alpha", "Zulu", "Able"], sorted.Select(row => row.Value));
+    }
+
+    [Fact]
     public void Stable_column_identity_does_not_change_with_the_visible_label()
     {
         var first = DalamudTableProjection<int>.StableColumnId("listing-shortfall");
@@ -146,4 +165,6 @@ public sealed class DalamudTableLayoutTests
 
         Assert.All(methods, method => Assert.NotNull(method.GetCustomAttribute<ObsoleteAttribute>()));
     }
+
+    private sealed record GroupedRow(int Group, string Value);
 }
