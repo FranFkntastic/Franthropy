@@ -135,19 +135,23 @@ public sealed class DalamudPlotRenderer
         }
 
         var ring = radius + 2f;
-        foreach (var role in EnumerateRoles(visual.Role))
-        {
-            drawList.AddCircle(point.Position, ring, ToU32(RoleColor(role)), 20, 1.5f);
-            ring += 2.5f;
-        }
+        DrawRoleRing(drawList, point.Position, visual.Role, PlotPointRole.Selected, ref ring);
+        DrawRoleRing(drawList, point.Position, visual.Role, PlotPointRole.Nominated, ref ring);
+        DrawRoleRing(drawList, point.Position, visual.Role, PlotPointRole.Warning, ref ring);
+        DrawRoleRing(drawList, point.Position, visual.Role, PlotPointRole.Failure, ref ring);
     }
 
-    private static IEnumerable<PlotPointRole> EnumerateRoles(PlotPointRole roles)
+    private static void DrawRoleRing(
+        ImDrawListPtr drawList,
+        Vector2 position,
+        PlotPointRole roles,
+        PlotPointRole role,
+        ref float ring)
     {
-        if (roles.HasFlag(PlotPointRole.Selected)) yield return PlotPointRole.Selected;
-        if (roles.HasFlag(PlotPointRole.Nominated)) yield return PlotPointRole.Nominated;
-        if (roles.HasFlag(PlotPointRole.Warning)) yield return PlotPointRole.Warning;
-        if (roles.HasFlag(PlotPointRole.Failure)) yield return PlotPointRole.Failure;
+        if ((roles & role) == 0)
+            return;
+        drawList.AddCircle(position, ring, ToU32(RoleColor(role)), 20, 1.5f);
+        ring += 2.5f;
     }
 
     private static PlotColor RoleColor(PlotPointRole role) => role switch
