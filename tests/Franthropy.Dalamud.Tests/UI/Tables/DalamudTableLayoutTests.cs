@@ -118,6 +118,32 @@ public sealed class DalamudTableLayoutTests
     }
 
     [Fact]
+    public void Column_can_reserve_its_right_half_for_standard_row_selection()
+    {
+        var column = new DalamudTableColumn<int>(
+            "Queued",
+            150f,
+            value => value.ToString(),
+            SelectionTargetFraction: 0.5f);
+
+        Assert.Equal(0.5f, column.SelectionTargetFraction);
+        Assert.Equal(75f, DalamudTableProjection<int>.ResolveSelectionTargetWidth(150f, column.SelectionTargetFraction));
+    }
+
+    [Theory]
+    [InlineData(-0.01f)]
+    [InlineData(1.01f)]
+    public void Projection_rejects_invalid_cell_selection_target_fraction(float fraction)
+    {
+        var exception = Assert.Throws<ArgumentOutOfRangeException>(() => new DalamudTableProjection<int>(
+        [
+            new("Queued", 150f, value => value.ToString(), SelectionTargetFraction: fraction),
+        ]));
+
+        Assert.Contains("selection target fraction", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Projection_rejects_duplicate_stable_column_identity()
     {
         var exception = Assert.Throws<ArgumentException>(() => new DalamudTableProjection<int>(
