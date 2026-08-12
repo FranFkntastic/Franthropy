@@ -48,4 +48,20 @@ public sealed class DalamudVNavmeshTravelTests
         Assert.True(result.Submitted);
         Assert.False(submittedFlight);
     }
+
+    [Fact]
+    public void Stop_cancels_an_accepted_path_before_it_reports_running()
+    {
+        var stopCalls = 0;
+        var travel = new DalamudVNavmeshTravel(
+            () => true,
+            () => true,
+            () => false,
+            (_, _, _) => true,
+            () => stopCalls++,
+            _ => { });
+
+        Assert.True(travel.TryStop());
+        Assert.Equal(1, stopCalls);
+    }
 }

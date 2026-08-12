@@ -419,7 +419,9 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     {
         if (!ownsNavigation)
             return true;
-        if (vnavmesh.Observe().IsRunning && !vnavmesh.TryStop())
+        // An accepted asynchronous submission is ours before vnavmesh reports it running.
+        // Cancel it unconditionally so a reset cannot release a path that starts later.
+        if (!vnavmesh.TryStop())
             return false;
         ownsNavigation = false;
         activeTravelMode = null;
