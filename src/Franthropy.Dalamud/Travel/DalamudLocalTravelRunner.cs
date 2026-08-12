@@ -202,43 +202,35 @@ public sealed class DalamudLocalTravelRunner
         if (mountDisabled)
             return null;
 
-        if (mountPreparationStartedAt is { } startedAt)
-        {
-            if (observedAt - startedAt >= MountPreparationTimeout)
-                return Unavailable(LocalTravelMode.GroundMount, "MountTimeout", "Could not summon a mount after repeated automatic attempts.");
-
-            if (observation.MountTransition || observation.Casting ||
-                nextMountRequestAt is { } nextRequestAt && observedAt < nextRequestAt ||
-                !observation.CanMount)
-                return Waiting(LocalTravelMode.GroundMount, "AwaitingMount", "Waiting for the mount before starting the route.");
-
-            var accepted = actions.TryMount();
-            nextMountRequestAt = observedAt.Add(MountRetryInterval);
-            return Waiting(
-                LocalTravelMode.GroundMount,
-                accepted ? "MountRetryRequested" : "MountRetryPending",
-                accepted
-                    ? "Retrying the mount before starting the route."
-                    : "Waiting to retry the mount before starting the route.");
-        }
-
-        if (observation.MountTransition || observation.Casting)
-            return Waiting(LocalTravelMode.GroundMount, "MountTransition", "Waiting for the current mount action to finish.");
-
         if (!observation.MountAllowed)
         {
             mountDisabled = true;
             return null;
         }
 
-        mountPreparationStartedAt = observedAt;
+        var firstAttempt = mountPreparationStartedAt is null;
+        mountPreparationStartedAt ??= observedAt;
+        nextMountRequestAt ??= observedAt;
+
+        if (observedAt - mountPreparationStartedAt.Value >= MountPreparationTimeout)
+            return Unavailable(LocalTravelMode.GroundMount, "MountTimeout", "Could not summon a mount after repeated automatic attempts.");
+
+        if (observation.MountTransition || observation.Casting ||
+            observedAt < nextMountRequestAt.Value ||
+            !observation.CanMount)
+            return Waiting(LocalTravelMode.GroundMount, "AwaitingMount", "Waiting for the mount before starting the route.");
+
+        var mountAccepted = actions.TryMount();
         nextMountRequestAt = observedAt.Add(MountRetryInterval);
-        var mountAccepted = observation.CanMount && actions.TryMount();
         return Waiting(
             LocalTravelMode.GroundMount,
-            mountAccepted ? "MountRequested" : "MountRequestPending",
             mountAccepted
-                ? "Mounting before starting the route."
+                ? firstAttempt ? "MountRequested" : "MountRetryRequested"
+                : firstAttempt ? "MountRequestPending" : "MountRetryPending",
+            mountAccepted
+                ? firstAttempt
+                    ? "Mounting before starting the route."
+                    : "Retrying the mount before starting the route."
                 : "Waiting to retry the mount before starting the route.");
     }
 
@@ -372,7 +364,7 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
             var mounted = condition[ConditionFlag.Mounted];
             var canMount = manager != null && manager->GetActionStatus(ActionType.GeneralAction, MountRouletteGeneralActionId) == 0;
             var mountAllowed = dataManager is not null && clientState is not null
-                ? dataManager.GetExcelSheet<TerritoryType>().GetRowOrDefault(clientState.TerritoryType)?.Mount == true
+                ? dataManager.GetExcelSheet<TerritoryType>().GetRowOrDefault(clientState.TerritoryType)?.Mount ?? true
                 : canMount;
             return new(
                 FlightUnlocked: playerState != null && playerState->CanFly,

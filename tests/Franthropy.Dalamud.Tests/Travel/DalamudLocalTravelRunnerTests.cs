@@ -110,7 +110,7 @@ public sealed class DalamudLocalTravelRunnerTests
         var pending = runner.Advance(100f, StartedAt);
 
         Assert.Equal(LocalTravelPreparationState.Waiting, pending.State);
-        Assert.Equal("MountRequestPending", pending.Code);
+        Assert.Equal("AwaitingMount", pending.Code);
         Assert.Equal(0, actions.MountRequests);
         Assert.Equal(0, actions.AccelerationRequests);
 
