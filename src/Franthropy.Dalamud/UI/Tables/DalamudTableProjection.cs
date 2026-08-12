@@ -364,37 +364,11 @@ public sealed class DalamudTableProjection<TRow>
         return clicked;
     }
 
-    public unsafe int DrawClippedRows(
+    public int DrawClippedRows(
         IReadOnlyList<TRow> rows,
         Action<TRow, int> drawRow,
-        float rowHeight = -1f)
-    {
-        ArgumentNullException.ThrowIfNull(rows);
-        ArgumentNullException.ThrowIfNull(drawRow);
-        if (rows.Count == 0)
-            return 0;
-
-        var rendered = 0;
-        var clipper = ImGui.ImGuiListClipper();
-        try
-        {
-            clipper.Begin(rows.Count, rowHeight);
-            while (clipper.Step())
-            {
-                for (var index = clipper.DisplayStart; index < clipper.DisplayEnd; index++)
-                {
-                    drawRow(rows[index], index);
-                    rendered++;
-                }
-            }
-        }
-        finally
-        {
-            clipper.Destroy();
-        }
-
-        return rendered;
-    }
+        float rowHeight = -1f) =>
+        DalamudVirtualizedRows.Draw(rows, drawRow, rowHeight);
 
     private void DrawCells(TRow row, string? id)
     {

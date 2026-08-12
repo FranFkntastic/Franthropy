@@ -113,6 +113,7 @@
     <Compile Remove="AgentBridge\DalamudRenderedUiTextActionDispatcher.cs" />
     <Compile Remove="AgentBridge\DalamudPluginLifecycleBridge.cs" />
     <Compile Remove="UI\Plots\DalamudPlotRenderer.cs" />
+    <Compile Remove="UI\Tables\DalamudVirtualizedRows.cs" />
     <Compile Remove="UI\Tables\DalamudTableProjection.cs" />
     <Compile Remove="UI\Tables\DalamudTableSelectionRenderer.cs" />
     <Compile Remove="Diagnostics\DalamudConditionTrustProbe.cs" />
