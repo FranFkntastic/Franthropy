@@ -190,6 +190,84 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Re-reads the exact persisted armed purchase after a delayed or mismatched
+    /// receipt became indeterminate. This never submits another purchase: it can
+    /// only recover a later exact item-and-gil delta and then complete or pause
+    /// the frozen run for an explicit resume.
+    /// </summary>
+    public bool TryReconcileIndeterminate(out string message)
+    {
+        if (activeRun is not { Phase: GilVendorBuyPhase.Indeterminate, ArmedPurchase: { } intent } run)
+        {
+            message = "No indeterminate armed vendor purchase is available to reconcile.";
+            return false;
+        }
+        var line = run.Lines.FirstOrDefault(candidate => candidate.ItemId == intent.ItemId);
+        if (line?.Offer is null)
+        {
+            message = "The persisted armed purchase no longer has its exact vendor offer; no reconciliation was attempted.";
+            return false;
+        }
+        var snapshot = runtime.CaptureInventory([line.ItemId]);
+        if (!snapshot.IsComplete || snapshot.Gil is null)
+        {
+            message = snapshot.Message;
+            return false;
+        }
+        var requestResult = GilVendorBuyRequest.Create(line.Offer.ToOffer(), checked((uint)intent.Quantity));
+        if (!requestResult.IsSuccess)
+        {
+            message = requestResult.Message;
+            return false;
+        }
+        var request = requestResult.Request!;
+        var evidence = GilVendorPurchaseEvidenceClassifier.Classify(
+            request,
+            new(intent.BeforeItemCount, intent.BeforeGil),
+            new(snapshot.ItemCounts.GetValueOrDefault(line.ItemId), snapshot.Gil.Value));
+        if (evidence.Evidence != GilVendorPurchaseEvidence.Verified)
+        {
+            message = evidence.Message;
+            return false;
+        }
+
+        var receipt = evidence.Receipt!;
+        run.Receipts.Add(new()
+        {
+            ItemId = receipt.ItemId,
+            Quantity = checked((int)receipt.Quantity),
+            SpentGil = receipt.SpentGil,
+            BeforeItemCount = receipt.BeforeItemCount,
+            AfterItemCount = receipt.AfterItemCount,
+            BeforeGil = receipt.BeforeGil,
+            AfterGil = receipt.AfterGil,
+            VerifiedAtUtc = utcNow().UtcDateTime,
+        });
+        line.PurchasedQuantity = checked(line.PurchasedQuantity + (int)receipt.Quantity);
+        line.PurchaseRetryCount = 0;
+        line.Status = $"Verified {line.PurchasedQuantity:N0} bought";
+        run.ArmedPurchase = null;
+        var hasRemaining = run.Lines.Any(candidate =>
+            RemainingForLine(candidate, snapshot.ItemCounts.GetValueOrDefault(candidate.ItemId)) > 0);
+        run.Phase = run.StopRequested
+            ? GilVendorBuyPhase.Stopped
+            : hasRemaining
+                ? GilVendorBuyPhase.Paused
+                : GilVendorBuyPhase.Completed;
+        run.ResumePhase = GilVendorBuyPhase.RefreshPreconditions;
+        run.StopRequested = false;
+        run.Message = run.Phase switch
+        {
+            GilVendorBuyPhase.Completed => "The delayed purchase receipt was verified; vendor buy is complete.",
+            GilVendorBuyPhase.Stopped => "The delayed purchase receipt was verified; vendor buy is stopped.",
+            _ => "The delayed purchase receipt was verified. Review current inventory, then resume the frozen vendor buy.",
+        };
+        Persist();
+        message = run.Message;
+        return true;
+    }
+
     private void TickRefreshPreconditions(GilVendorBuyRunSnapshot run)
     {
         var snapshot = runtime.CaptureInventory(run.Lines.Select(line => line.ItemId).ToArray());

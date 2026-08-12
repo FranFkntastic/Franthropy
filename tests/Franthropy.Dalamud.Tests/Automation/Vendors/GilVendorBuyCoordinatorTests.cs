@@ -100,6 +100,23 @@ public sealed class GilVendorBuyCoordinatorTests
         Assert.Empty(coordinator.ActiveRun.Receipts);
     }
 
+    [Fact]
+    public void Delayed_exact_receipt_repairs_indeterminate_run_without_resubmitting()
+    {
+        var runtime = new ScriptedRuntime { MutateGilOnSubmit = false };
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
+        TickUntilTerminal(coordinator, 10);
+        Assert.Equal(GilVendorBuyPhase.Indeterminate, coordinator.ActiveRun!.Phase);
+
+        runtime.Gil -= 20;
+        Assert.True(coordinator.TryReconcileIndeterminate(out var message), message);
+
+        Assert.Equal(GilVendorBuyPhase.Completed, coordinator.ActiveRun!.Phase);
+        Assert.Equal(1, runtime.SubmitCalls);
+        Assert.Equal(2, Assert.Single(coordinator.ActiveRun.Receipts).Quantity);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
