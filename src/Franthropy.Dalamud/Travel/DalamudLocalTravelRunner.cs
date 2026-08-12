@@ -362,10 +362,9 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
             var playerState = PlayerState.Instance();
             var manager = ActionManager.Instance();
             var mounted = condition[ConditionFlag.Mounted];
-            var canMount = manager != null && manager->GetActionStatus(ActionType.GeneralAction, MountRouletteGeneralActionId) == 0;
             var mountAllowed = dataManager is not null && clientState is not null
                 ? dataManager.GetExcelSheet<TerritoryType>().GetRowOrDefault(clientState.TerritoryType)?.Mount ?? true
-                : canMount;
+                : manager != null;
             return new(
                 FlightUnlocked: playerState != null && playerState->CanFly,
                 Mounted: mounted,
@@ -375,7 +374,10 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
                 AccelerationActive: objectTable.LocalPlayer?.StatusList.Any(status =>
                     AccelerationStatusIds.Contains(status.StatusId)) == true,
                 MountAllowed: mountAllowed,
-                CanMount: canMount,
+                // GeneralAction status is not a reliable readiness signal for Mount Roulette.
+                // Let the throttled command/native submission make the attempt and bound it by
+                // the runner's mount timeout instead of waiting forever without submitting.
+                CanMount: manager != null && mountAllowed,
                 CanTakeOff: mounted && Control.GetFlightAllowedStatus() == Control.FlightAllowedStatus.CanFly &&
                     manager != null && manager->GetActionStatus(ActionType.GeneralAction, JumpGeneralActionId) == 0,
                 CanDismount: mounted && manager != null &&
@@ -419,7 +421,7 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
         try
         {
             var manager = ActionManager.Instance();
-            return manager != null && manager->GetActionStatus(type, id) == 0 && manager->UseAction(type, id);
+            return manager != null && manager->UseAction(type, id);
         }
         catch
         {
@@ -431,14 +433,16 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
     {
         try
         {
-            var manager = ActionManager.Instance();
-            if (manager == null || manager->GetActionStatus(ActionType.GeneralAction, id) != 0)
+            if (ActionManager.Instance() == null)
                 return false;
-            if (commandManager is null || dataManager is null)
-                return TryUse(ActionType.GeneralAction, id);
-            var name = dataManager.GetExcelSheet<GeneralAction>().GetRowOrDefault(id)?.Name.ToString();
-            return !string.IsNullOrWhiteSpace(name) &&
-                   commandManager.ProcessCommand($"/generalaction \"{EscapeArgument(name)}\"");
+            if (commandManager is not null && dataManager is not null)
+            {
+                var name = dataManager.GetExcelSheet<GeneralAction>().GetRowOrDefault(id)?.Name.ToString();
+                if (!string.IsNullOrWhiteSpace(name) &&
+                    commandManager.ProcessCommand($"/generalaction \"{EscapeArgument(name)}\""))
+                    return true;
+            }
+            return TryUse(ActionType.GeneralAction, id);
         }
         catch
         {
