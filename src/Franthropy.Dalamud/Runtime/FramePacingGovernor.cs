@@ -31,7 +31,7 @@ public sealed class FramePacingGovernor : IDisposable
     private readonly object sync = new();
     private readonly Func<long> timestampProvider;
     private readonly long timestampFrequency;
-    private readonly Action<TimeSpan> delay;
+    private readonly Action<TimeSpan>? delay;
     private readonly Dictionary<long, LeaseState> leases = [];
     private long nextLeaseId;
     private long leaseRevision;
@@ -42,17 +42,17 @@ public sealed class FramePacingGovernor : IDisposable
     private bool disposed;
 
     public FramePacingGovernor()
-        : this(Stopwatch.GetTimestamp, Stopwatch.Frequency, duration => Thread.Sleep(NormalizeDefaultDelay(duration)))
+        : this(Stopwatch.GetTimestamp, Stopwatch.Frequency, null)
     {
     }
 
     internal FramePacingGovernor(
         Func<long> timestampProvider,
         long timestampFrequency,
-        Action<TimeSpan> delay)
+        Action<TimeSpan>? delay)
     {
         this.timestampProvider = timestampProvider ?? throw new ArgumentNullException(nameof(timestampProvider));
-        this.delay = delay ?? throw new ArgumentNullException(nameof(delay));
+        this.delay = delay;
         if (timestampFrequency <= 0)
             throw new ArgumentOutOfRangeException(nameof(timestampFrequency));
         this.timestampFrequency = timestampFrequency;
@@ -71,6 +71,7 @@ public sealed class FramePacingGovernor : IDisposable
             var id = ++nextLeaseId;
             leases.Add(id, new LeaseState(owner.Trim(), maximumFramesPerSecond));
             leaseRevision++;
+            Monitor.PulseAll(sync);
             lastFrameTimestamp ??= timestampProvider();
             return new Lease(this, id, owner.Trim(), maximumFramesPerSecond);
         }
@@ -84,6 +85,7 @@ public sealed class FramePacingGovernor : IDisposable
 
     public void PaceFrame()
     {
+        var frameRequestedDelay = TimeSpan.Zero;
         while (true)
         {
             long revision;
@@ -107,15 +109,25 @@ public sealed class FramePacingGovernor : IDisposable
                 if (remainingTicks <= 0)
                 {
                     lastFrameTimestamp = currentTimestamp;
-                    lastRequestedDelay = TimeSpan.Zero;
+                    if (frameRequestedDelay > TimeSpan.Zero)
+                    {
+                        totalDelayedFrames++;
+                        lastRequestedDelay = frameRequestedDelay;
+                    }
+                    else
+                    {
+                        lastRequestedDelay = TimeSpan.Zero;
+                    }
                     return;
                 }
 
                 revision = leaseRevision;
                 requestedDelay = TimeSpan.FromSeconds(remainingTicks / (double)timestampFrequency);
+                totalRequestedDelay += requestedDelay;
             }
 
-            delay(requestedDelay);
+            frameRequestedDelay += requestedDelay;
+            var delayCompleted = WaitForDelay(requestedDelay, revision);
             var completedTimestamp = timestampProvider();
 
             lock (sync)
@@ -127,18 +139,33 @@ public sealed class FramePacingGovernor : IDisposable
                     return;
                 }
 
-                if (revision != leaseRevision)
+                if (!delayCompleted || revision != leaseRevision)
                 {
-                    lastRequestedDelay = TimeSpan.Zero;
                     continue;
                 }
 
                 lastFrameTimestamp = completedTimestamp;
                 totalDelayedFrames++;
-                totalRequestedDelay += requestedDelay;
-                lastRequestedDelay = requestedDelay;
+                lastRequestedDelay = frameRequestedDelay;
                 return;
             }
+        }
+    }
+
+    private bool WaitForDelay(TimeSpan requestedDelay, long revision)
+    {
+        if (delay != null)
+        {
+            delay(requestedDelay);
+            return true;
+        }
+
+        lock (sync)
+        {
+            if (disposed || leases.Count == 0 || revision != leaseRevision)
+                return false;
+
+            return !Monitor.Wait(sync, NormalizeDefaultDelay(requestedDelay));
         }
     }
 
@@ -160,6 +187,7 @@ public sealed class FramePacingGovernor : IDisposable
             disposed = true;
             leases.Clear();
             leaseRevision++;
+            Monitor.PulseAll(sync);
             lastFrameTimestamp = null;
             lastRequestedDelay = TimeSpan.Zero;
         }
@@ -173,6 +201,7 @@ public sealed class FramePacingGovernor : IDisposable
                 return;
 
             leaseRevision++;
+            Monitor.PulseAll(sync);
             if (leases.Count == 0)
             {
                 lastFrameTimestamp = null;

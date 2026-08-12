@@ -120,8 +120,25 @@ public sealed class FramePacingGovernorTests
             Assert.InRange(delays[0].TotalMilliseconds, 15.6, 15.7);
             Assert.InRange(delays[1].TotalMilliseconds, 83.3, 83.4);
             Assert.Equal(10, governor.Snapshot().EffectiveMaximumFramesPerSecond);
+            Assert.InRange(governor.Snapshot().TotalRequestedDelay.TotalMilliseconds, 98.9, 99.1);
+            Assert.InRange(governor.Snapshot().LastRequestedDelay.TotalMilliseconds, 98.9, 99.1);
             strictLease!.Dispose();
         }
+    }
+
+    [Fact]
+    public async Task Final_lease_release_interrupts_the_default_wait()
+    {
+        using var governor = new FramePacingGovernor();
+        var lease = governor.Acquire("slow", 1);
+        var pacing = Task.Run(governor.PaceFrame);
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        Assert.False(pacing.IsCompleted);
+
+        lease.Dispose();
+
+        await pacing.WaitAsync(TimeSpan.FromMilliseconds(250));
+        Assert.False(governor.Snapshot().IsActive);
     }
 
     private sealed class TestClock
