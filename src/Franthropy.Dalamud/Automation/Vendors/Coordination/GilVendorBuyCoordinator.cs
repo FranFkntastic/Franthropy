@@ -279,6 +279,8 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         var quantities = RemainingPurchaseQuantities(run, snapshot.ItemCounts);
         if (quantities.Count == 0)
         {
+            if (FailIfUnavailableTargetsRemain(run, snapshot.ItemCounts))
+                return;
             Complete("Vendor buy completed.");
             return;
         }
@@ -302,6 +304,8 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         NormalizeCurrentStop(run, snapshot.ItemCounts);
         if (run.StopIndex >= run.Stops.Count)
         {
+            if (FailIfUnavailableTargetsRemain(run, snapshot.ItemCounts))
+                return;
             Complete("Vendor buy completed.");
             return;
         }
@@ -326,7 +330,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
                 Persist();
                 return;
             case GilVendorReachState.Unavailable:
-                ReplanOrSkipCurrentStop(run, out var message);
+                ReplanOrSkipCurrentStop(run, result.Message, out var message);
                 run.Phase = GilVendorBuyPhase.RefreshPreconditions;
                 run.Message = message;
                 runtime.ResetVendorApproach();
@@ -547,7 +551,10 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         Fail(GilVendorBuyPhase.Failed, $"No {line.ItemName} mutation was observed after the single safe retry.");
     }
 
-    private void ReplanOrSkipCurrentStop(GilVendorBuyRunSnapshot run, out string message)
+    private void ReplanOrSkipCurrentStop(
+        GilVendorBuyRunSnapshot run,
+        string failureReason,
+        out string message)
     {
         var failed = CurrentStop(run);
         var remaining = failed.ItemIds
@@ -577,7 +584,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             else
             {
                 line.VendorUnavailable = true;
-                line.Status = "No accessible vendor";
+                line.Status = $"No accessible vendor: {failureReason}";
                 line.AlternativeOffers.Clear();
             }
         }
@@ -638,6 +645,28 @@ public sealed class GilVendorBuyCoordinator : IDisposable
                 $"Skipped {string.Join(", ", remaining.Select(line => line.ItemName))} because no accessible vendor remains; continuing the vendor plan.",
         };
         return new(replacements, selections, message);
+    }
+
+    private bool FailIfUnavailableTargetsRemain(
+        GilVendorBuyRunSnapshot run,
+        IReadOnlyDictionary<uint, int> observedCounts)
+    {
+        var unmet = run.Lines
+            .Where(line => line.VendorUnavailable)
+            .Where(line => line.TargetTotalQuantity is { } target
+                ? observedCounts.GetValueOrDefault(line.ItemId) < target
+                : line.PurchasedQuantity < line.ApprovedQuantity)
+            .ToArray();
+        if (unmet.Length == 0)
+            return false;
+
+        var details = string.Join(
+            "; ",
+            unmet.Select(line => $"{line.ItemName}: {line.Status}"));
+        Fail(
+            GilVendorBuyPhase.Failed,
+            $"Vendor buy ended with {unmet.Length:N0} unmet vendor line(s). {details}");
+        return true;
     }
 
     private static Dictionary<uint, int> RemainingPurchaseQuantities(

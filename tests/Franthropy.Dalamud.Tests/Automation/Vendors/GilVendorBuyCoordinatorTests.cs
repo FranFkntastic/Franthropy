@@ -462,6 +462,28 @@ public sealed class GilVendorBuyCoordinatorTests
         Assert.Equal(2, runtime.ReachCalls);
     }
 
+    [Fact]
+    public void Unreachable_vendor_without_alternative_fails_instead_of_completing_zero()
+    {
+        var runtime = new ScriptedRuntime();
+        runtime.ReachResults.Enqueue(new(
+            GilVendorReachState.Unavailable,
+            "Could not summon a mount after repeated automatic attempts."));
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+
+        Assert.True(coordinator.TryStart(
+            Plan([Line(1, 4, targetTotal: 4)], [Stop(100, 1)]),
+            Context,
+            out var error), error);
+        TickUntilTerminal(coordinator, 10);
+
+        Assert.Equal(GilVendorBuyPhase.Failed, coordinator.ActiveRun!.Phase);
+        Assert.True(coordinator.ActiveRun.Lines[0].VendorUnavailable);
+        Assert.Empty(coordinator.ActiveRun.Receipts);
+        Assert.Contains("unmet vendor line", coordinator.ActiveRun.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Could not summon a mount", coordinator.ActiveRun.Message);
+    }
+
     private static GilVendorBuyPlan Plan(
         IReadOnlyList<GilVendorBuyLineSnapshot> lines,
         IReadOnlyList<GilVendorBuyStopSnapshot> stops) => new()
