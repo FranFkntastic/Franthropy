@@ -10,7 +10,8 @@ public enum DalamudTableSelectionMode
 public sealed class DalamudTableSelection<TRow>
 {
     private readonly Func<TRow, bool>? isSelected;
-    private readonly Func<IReadOnlyList<TRow>, int, bool, bool, bool>? applyClick;
+    private readonly Func<TRow, bool>? isSelectable;
+    private readonly Func<IReadOnlyList<TRow>, int, bool, bool, bool, bool>? applyClick;
     private readonly Func<IReadOnlyList<TRow>, int, bool>? applyDrag;
     private readonly Func<bool>? isDragging;
     private readonly Action? endDrag;
@@ -18,13 +19,15 @@ public sealed class DalamudTableSelection<TRow>
     private DalamudTableSelection(
         DalamudTableSelectionMode mode,
         Func<TRow, bool>? isSelected = null,
-        Func<IReadOnlyList<TRow>, int, bool, bool, bool>? applyClick = null,
+        Func<TRow, bool>? isSelectable = null,
+        Func<IReadOnlyList<TRow>, int, bool, bool, bool, bool>? applyClick = null,
         Func<IReadOnlyList<TRow>, int, bool>? applyDrag = null,
         Func<bool>? isDragging = null,
         Action? endDrag = null)
     {
         Mode = mode;
         this.isSelected = isSelected;
+        this.isSelectable = isSelectable;
         this.applyClick = applyClick;
         this.applyDrag = applyDrag;
         this.isDragging = isDragging;
@@ -43,21 +46,26 @@ public sealed class DalamudTableSelection<TRow>
 
     public static DalamudTableSelection<TRow> Multi<TKey>(
         TableSelectionModel<TKey> selection,
-        Func<TRow, TKey> keySelector)
+        Func<TRow, TKey> keySelector,
+        Func<TRow, bool>? isSelectable = null)
         where TKey : notnull =>
-        Create(DalamudTableSelectionMode.Multi, selection, keySelector);
+        Create(DalamudTableSelectionMode.Multi, selection, keySelector, isSelectable);
 
     internal bool IsSelected(TRow row) => isSelected?.Invoke(row) == true;
+    internal bool IsSelectable(TRow row) => isSelectable?.Invoke(row) != false;
 
     internal bool ApplyClick(
         IReadOnlyList<TRow> orderedRows,
         int rowIndex,
         bool control,
-        bool shift) =>
-        applyClick?.Invoke(orderedRows, rowIndex, control, shift) == true;
+        bool shift,
+        bool alt) =>
+        IsSelectable(orderedRows[rowIndex]) &&
+        applyClick?.Invoke(orderedRows, rowIndex, control, shift, alt) == true;
 
     internal bool ApplyDrag(IReadOnlyList<TRow> orderedRows, int rowIndex) =>
         Mode == DalamudTableSelectionMode.Multi &&
+        IsSelectable(orderedRows[rowIndex]) &&
         applyDrag?.Invoke(orderedRows, rowIndex) == true;
 
     internal bool IsDragging =>
@@ -68,7 +76,8 @@ public sealed class DalamudTableSelection<TRow>
     private static DalamudTableSelection<TRow> Create<TKey>(
         DalamudTableSelectionMode mode,
         TableSelectionModel<TKey> selection,
-        Func<TRow, TKey> keySelector)
+        Func<TRow, TKey> keySelector,
+        Func<TRow, bool>? isSelectable = null)
         where TKey : notnull
     {
         ArgumentNullException.ThrowIfNull(selection);
@@ -77,17 +86,48 @@ public sealed class DalamudTableSelection<TRow>
         return new DalamudTableSelection<TRow>(
             mode,
             row => selection.IsSelected(keySelector(row)),
-            (rows, rowIndex, control, shift) => selection.ApplyClick(
-                new ProjectedReadOnlyList<TKey>(rows, keySelector),
-                rowIndex,
+            isSelectable,
+            (rows, rowIndex, control, shift, alt) => selection.ApplyClick(
+                ProjectKeys(rows, keySelector, isSelectable, rowIndex, out var selectableIndex),
+                selectableIndex,
                 mode,
                 control,
-                shift),
+                shift,
+                alt),
             (rows, rowIndex) => selection.ApplyDrag(
-                new ProjectedReadOnlyList<TKey>(rows, keySelector),
-                rowIndex),
+                ProjectKeys(rows, keySelector, isSelectable, rowIndex, out var selectableIndex),
+                selectableIndex),
             () => selection.IsDragging,
             selection.EndDrag);
+    }
+
+    private static IReadOnlyList<TKey> ProjectKeys<TKey>(
+        IReadOnlyList<TRow> rows,
+        Func<TRow, TKey> keySelector,
+        Func<TRow, bool>? isSelectable,
+        int rowIndex,
+        out int selectableIndex)
+        where TKey : notnull
+    {
+        if (isSelectable == null)
+        {
+            selectableIndex = rowIndex;
+            return new ProjectedReadOnlyList<TKey>(rows, keySelector);
+        }
+
+        var keys = new List<TKey>(rows.Count);
+        selectableIndex = -1;
+        for (var index = 0; index < rows.Count; index++)
+        {
+            if (isSelectable?.Invoke(rows[index]) == false)
+                continue;
+            if (index == rowIndex)
+                selectableIndex = keys.Count;
+            keys.Add(keySelector(rows[index]));
+        }
+        if (selectableIndex < 0)
+            throw new InvalidOperationException("The selected table row is not eligible for selection.");
+        return keys;
     }
 
     private sealed class ProjectedReadOnlyList<TKey>(
