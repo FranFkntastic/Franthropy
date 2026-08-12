@@ -2,8 +2,8 @@ namespace Franthropy.Dalamud.AgentBridge;
 
 /// <summary>
 /// Coordinates a single short-lived, frame-confirmed UI presentation for capture. The plugin
-/// remains responsible for rendering only its explicitly named surface and applying viewport
-/// placement while <see cref="ShouldPresentInMainViewport"/> is true.
+/// remains responsible for rendering only its explicitly named surface while
+/// <see cref="ShouldPresent"/> is true.
 /// </summary>
 public sealed class AgentBridgeUiCaptureTransactionManager
 {
@@ -73,7 +73,7 @@ public sealed class AgentBridgeUiCaptureTransactionManager
         }
     }
 
-    public bool ShouldPresentInMainViewport(string target)
+    public bool ShouldPresent(string target)
     {
         lock (gate)
         {
@@ -81,6 +81,9 @@ public sealed class AgentBridgeUiCaptureTransactionManager
             return active != null && string.Equals(active.Target, target, StringComparison.Ordinal);
         }
     }
+
+    [Obsolete("Capture presentation does not require moving the window to the main viewport. Use ShouldPresent instead.")]
+    public bool ShouldPresentInMainViewport(string target) => ShouldPresent(target);
 
     public void MarkRendered(string target, long frameId)
     {

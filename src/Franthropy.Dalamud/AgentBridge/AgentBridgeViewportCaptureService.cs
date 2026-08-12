@@ -57,10 +57,15 @@ public sealed class AgentBridgeViewportCaptureService
                 if (!fullViewport && (currentRegion is null || !currentRegion.IsRecent()))
                     throw new InvalidOperationException("The requested plugin surface is not currently rendered.");
 
+                var viewportId = ResolveCaptureViewportId(
+                    fullViewport,
+                    ImGui.GetMainViewport().ID,
+                    currentRegion);
+
                 textureTask = textureProvider.CreateFromImGuiViewportAsync(
                     new ImGuiViewportTextureArgs
                     {
-                        ViewportId = ImGui.GetMainViewport().ID,
+                        ViewportId = viewportId,
                         AutoUpdate = false,
                         TakeBeforeImGuiRender = false,
                         KeepTransparency = false,
@@ -121,6 +126,17 @@ public sealed class AgentBridgeViewportCaptureService
         }
     }
 
+    internal static uint ResolveCaptureViewportId(
+        bool fullViewport,
+        uint mainViewportId,
+        AgentBridgeCaptureRegion? region)
+    {
+        var viewportId = fullViewport ? mainViewportId : region?.ViewportId ?? 0;
+        return viewportId != 0
+            ? viewportId
+            : throw new InvalidOperationException("The requested plugin surface has no captureable viewport.");
+    }
+
     private void PruneOldCaptures()
     {
         foreach (var file in new DirectoryInfo(captureDirectory)
@@ -134,6 +150,7 @@ public sealed class AgentBridgeViewportCaptureService
 public sealed record AgentBridgeCaptureRegion(
     System.Numerics.Vector2 WindowPosition,
     System.Numerics.Vector2 WindowSize,
+    uint ViewportId,
     System.Numerics.Vector2 ViewportPosition,
     System.Numerics.Vector2 ViewportSize,
     DateTimeOffset RenderedAtUtc)
