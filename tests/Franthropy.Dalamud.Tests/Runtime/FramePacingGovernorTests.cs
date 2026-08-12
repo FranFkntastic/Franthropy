@@ -83,6 +83,47 @@ public sealed class FramePacingGovernorTests
         lease.Dispose();
     }
 
+    [Fact]
+    public void Default_delay_rounds_fractional_milliseconds_up_to_preserve_the_maximum()
+    {
+        var normalized = FramePacingGovernor.NormalizeDefaultDelay(TimeSpan.FromMilliseconds(4.167));
+
+        Assert.Equal(TimeSpan.FromMilliseconds(5), normalized);
+    }
+
+    [Fact]
+    public void Stricter_lease_acquired_during_delay_extends_the_same_frame_budget()
+    {
+        const long frequency = 1_000_000;
+        long timestamp = 0;
+        var delays = new List<TimeSpan>();
+        FramePacingGovernor? governor = null;
+        IFramePacingLease? strictLease = null;
+        governor = new FramePacingGovernor(
+            () => timestamp,
+            frequency,
+            duration =>
+            {
+                delays.Add(duration);
+                timestamp += (long)Math.Round(duration.TotalSeconds * frequency, MidpointRounding.AwayFromZero);
+                if (delays.Count == 1)
+                    strictLease = governor!.Acquire("strict", 10);
+            });
+        using (governor)
+        using (governor.Acquire("base", 60))
+        {
+            timestamp += 1_000;
+
+            governor.PaceFrame();
+
+            Assert.Equal(2, delays.Count);
+            Assert.InRange(delays[0].TotalMilliseconds, 15.6, 15.7);
+            Assert.InRange(delays[1].TotalMilliseconds, 83.3, 83.4);
+            Assert.Equal(10, governor.Snapshot().EffectiveMaximumFramesPerSecond);
+            strictLease!.Dispose();
+        }
+    }
+
     private sealed class TestClock
     {
         private const long Frequency = 1_000_000;

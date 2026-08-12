@@ -42,7 +42,7 @@ public sealed class FramePacingGovernor : IDisposable
     private bool disposed;
 
     public FramePacingGovernor()
-        : this(Stopwatch.GetTimestamp, Stopwatch.Frequency, Thread.Sleep)
+        : this(Stopwatch.GetTimestamp, Stopwatch.Frequency, duration => Thread.Sleep(NormalizeDefaultDelay(duration)))
     {
     }
 
@@ -84,52 +84,70 @@ public sealed class FramePacingGovernor : IDisposable
 
     public void PaceFrame()
     {
-        long revision;
-        long currentTimestamp;
-        TimeSpan requestedDelay;
-
-        lock (sync)
+        while (true)
         {
-            if (disposed || leases.Count == 0)
+            long revision;
+            long currentTimestamp;
+            TimeSpan requestedDelay;
+
+            lock (sync)
             {
-                lastFrameTimestamp = null;
-                lastRequestedDelay = TimeSpan.Zero;
-                return;
+                if (disposed || leases.Count == 0)
+                {
+                    lastFrameTimestamp = null;
+                    lastRequestedDelay = TimeSpan.Zero;
+                    return;
+                }
+
+                currentTimestamp = timestampProvider();
+                var effectiveFramesPerSecond = leases.Values.Min(value => value.MaximumFramesPerSecond);
+                var targetFrameTicks = Math.Max(1L, (long)Math.Ceiling(timestampFrequency / (double)effectiveFramesPerSecond));
+                var previousTimestamp = lastFrameTimestamp ?? currentTimestamp;
+                var remainingTicks = targetFrameTicks - Math.Max(0L, currentTimestamp - previousTimestamp);
+                if (remainingTicks <= 0)
+                {
+                    lastFrameTimestamp = currentTimestamp;
+                    lastRequestedDelay = TimeSpan.Zero;
+                    return;
+                }
+
+                revision = leaseRevision;
+                requestedDelay = TimeSpan.FromSeconds(remainingTicks / (double)timestampFrequency);
             }
 
-            currentTimestamp = timestampProvider();
-            var effectiveFramesPerSecond = leases.Values.Min(value => value.MaximumFramesPerSecond);
-            var targetFrameTicks = Math.Max(1L, (long)Math.Ceiling(timestampFrequency / (double)effectiveFramesPerSecond));
-            var previousTimestamp = lastFrameTimestamp ?? currentTimestamp;
-            var remainingTicks = targetFrameTicks - Math.Max(0L, currentTimestamp - previousTimestamp);
-            if (remainingTicks <= 0)
+            delay(requestedDelay);
+            var completedTimestamp = timestampProvider();
+
+            lock (sync)
             {
-                lastFrameTimestamp = currentTimestamp;
-                lastRequestedDelay = TimeSpan.Zero;
+                if (disposed || leases.Count == 0)
+                {
+                    lastFrameTimestamp = null;
+                    lastRequestedDelay = TimeSpan.Zero;
+                    return;
+                }
+
+                if (revision != leaseRevision)
+                {
+                    lastRequestedDelay = TimeSpan.Zero;
+                    continue;
+                }
+
+                lastFrameTimestamp = completedTimestamp;
+                totalDelayedFrames++;
+                totalRequestedDelay += requestedDelay;
+                lastRequestedDelay = requestedDelay;
                 return;
             }
-
-            revision = leaseRevision;
-            requestedDelay = TimeSpan.FromSeconds(remainingTicks / (double)timestampFrequency);
         }
+    }
 
-        delay(requestedDelay);
-        var completedTimestamp = timestampProvider();
+    internal static TimeSpan NormalizeDefaultDelay(TimeSpan requestedDelay)
+    {
+        if (requestedDelay <= TimeSpan.Zero)
+            return TimeSpan.Zero;
 
-        lock (sync)
-        {
-            if (disposed || leases.Count == 0 || revision != leaseRevision)
-            {
-                lastFrameTimestamp = leases.Count == 0 ? null : completedTimestamp;
-                lastRequestedDelay = TimeSpan.Zero;
-                return;
-            }
-
-            lastFrameTimestamp = completedTimestamp;
-            totalDelayedFrames++;
-            totalRequestedDelay += requestedDelay;
-            lastRequestedDelay = requestedDelay;
-        }
+        return TimeSpan.FromMilliseconds(Math.Ceiling(requestedDelay.TotalMilliseconds));
     }
 
     public void Dispose()
