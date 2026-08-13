@@ -73,35 +73,46 @@ public static class DalamudUiChrome
         var palette = theme.Palette;
         var accent = palette.Resolve(tone);
         var minimum = ImGui.GetCursorScreenPos();
-        using var colors = ImRaii.PushColor(ImGuiCol.ChildBg, palette.ToneSurface(tone, 0.13f))
-            .Push(ImGuiCol.Border, DalamudUiPalette.WithAlpha(accent, 0.48f));
-        using var styles = ImRaii.PushStyle(ImGuiStyleVar.ChildBorderSize, theme.Metrics.BorderSize)
-            .Push(ImGuiStyleVar.ChildRounding, theme.Metrics.ChildRounding)
-            .Push(ImGuiStyleVar.WindowPadding, theme.Metrics.WindowPadding);
+        var width = ImGui.GetContentRegionAvail().X;
         var lineCount = string.IsNullOrWhiteSpace(detail) ? 1f : 2f;
         var actionHeight = drawActions is null ? 0f : ImGui.GetFrameHeight() + theme.Metrics.ItemSpacing.Y;
         var height = (ImGui.GetTextLineHeightWithSpacing() * lineCount) +
                      actionHeight +
                      (theme.Metrics.WindowPadding.Y * 2f);
-        using var child = ImRaii.Child(
-            id,
-            new Vector2(0f, height),
-            true,
-            ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
-        if (child)
-        {
-            ImGui.TextColored(accent, title);
-            if (!string.IsNullOrWhiteSpace(detail))
-                ImGui.TextWrapped(detail);
-            drawActions?.Invoke();
-        }
-
-        ImGui.GetWindowDrawList().AddRectFilled(
+        var maximum = new Vector2(minimum.X + width, minimum.Y + height);
+        var drawList = ImGui.GetWindowDrawList();
+        drawList.AddRectFilled(
             minimum,
-            new Vector2(minimum.X + 3f, minimum.Y + height),
+            maximum,
+            ImGui.GetColorU32(palette.ToneSurface(tone, 0.13f)),
+            theme.Metrics.ChildRounding);
+        drawList.AddRect(
+            minimum,
+            maximum,
+            ImGui.GetColorU32(DalamudUiPalette.WithAlpha(accent, 0.48f)),
+            theme.Metrics.ChildRounding,
+            ImDrawFlags.None,
+            theme.Metrics.BorderSize);
+        drawList.AddRectFilled(
+            minimum,
+            new Vector2(minimum.X + 3f, maximum.Y),
             ImGui.GetColorU32(accent),
             theme.Metrics.ChildRounding,
             ImDrawFlags.RoundCornersLeft);
+
+        var contentMinimum = minimum + theme.Metrics.WindowPadding;
+        ImGui.SetCursorScreenPos(contentMinimum);
+        ImGui.TextColored(accent, title);
+        if (!string.IsNullOrWhiteSpace(detail))
+        {
+            ImGui.PushTextWrapPos(maximum.X - theme.Metrics.WindowPadding.X);
+            ImGui.TextUnformatted(detail);
+            ImGui.PopTextWrapPos();
+        }
+        drawActions?.Invoke();
+
+        ImGui.SetCursorScreenPos(new Vector2(minimum.X, maximum.Y));
+        ImGui.Dummy(Vector2.Zero);
     }
 
     public static void DrawSectionHeading(
