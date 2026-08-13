@@ -1,3 +1,5 @@
+using ECommons.Automation;
+using ECommons.GameHelpers;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -208,16 +210,31 @@ public sealed class DalamudLocalTravelRunner
             return null;
         }
 
+        if (observation.AnimationLocked || observation.MountTransition || observation.Casting)
+        {
+            // Lifestream keeps its mount task pending and pushes the next mount check two
+            // seconds past transient animation, cast, and mount-transition state. Do not
+            // consume the bounded submission window while the client cannot accept input.
+            mountPreparationStartedAt = null;
+            nextMountRequestAt = observedAt.Add(MountRetryInterval);
+            return Waiting(LocalTravelMode.GroundMount, "AwaitingMount", "Waiting for the mount before starting the route.");
+        }
+
         var firstAttempt = mountPreparationStartedAt is null;
         mountPreparationStartedAt ??= observedAt;
         nextMountRequestAt ??= observedAt;
 
         if (observedAt - mountPreparationStartedAt.Value >= MountPreparationTimeout)
-            return Unavailable(LocalTravelMode.GroundMount, "MountTimeout", "Could not summon a mount after repeated automatic attempts.");
+        {
+            // Mounting is an optimization, not a destination or spending boundary. Keep
+            // the reviewed route alive and let the caller submit ground vnavmesh with the
+            // best remaining acceleration instead of misclassifying the vendor as absent.
+            mountDisabled = true;
+            ResetMountPreparation();
+            return null;
+        }
 
-        if (observation.MountTransition || observation.Casting ||
-            observedAt < nextMountRequestAt.Value ||
-            !observation.CanMount)
+        if (observedAt < nextMountRequestAt.Value || !observation.CanMount)
             return Waiting(LocalTravelMode.GroundMount, "AwaitingMount", "Waiting for the mount before starting the route.");
 
         var mountAccepted = actions.TryMount();
@@ -304,6 +321,7 @@ internal sealed record LocalTravelObservation(
     bool InFlight,
     bool MountTransition,
     bool Casting,
+    bool AnimationLocked,
     bool AccelerationActive,
     bool MountAllowed,
     bool CanMount,
@@ -371,6 +389,7 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
                 InFlight: condition[ConditionFlag.InFlight],
                 MountTransition: condition[ConditionFlag.MountOrOrnamentTransition],
                 Casting: condition[ConditionFlag.Casting],
+                AnimationLocked: Player.IsAnimationLocked,
                 AccelerationActive: objectTable.LocalPlayer?.StatusList.Any(status =>
                     AccelerationStatusIds.Contains(status.StatusId)) == true,
                 MountAllowed: mountAllowed,
@@ -388,11 +407,27 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
         }
         catch
         {
-            return new(false, false, false, false, false, false, false, false, false, false, false);
+            return new(false, false, false, false, false, false, false, false, false, false, false, false);
         }
     }
 
-    public bool TryMount() => TryUseGeneralAction(MountRouletteGeneralActionId);
+    public bool TryMount()
+    {
+        try
+        {
+            if (ActionManager.Instance() == null)
+                return false;
+
+            // Match Lifestream's proven mount-roulette submission. The caller owns pacing
+            // and waits for ConditionFlag.Mounted before it permits navigation to begin.
+            Chat.ExecuteGeneralAction(MountRouletteGeneralActionId);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     public bool TryTakeOff() => TryUseGeneralAction(JumpGeneralActionId);
 
@@ -451,4 +486,5 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
     }
 
     private static string EscapeArgument(string value) => value.Replace("\"", string.Empty, StringComparison.Ordinal);
+
 }
