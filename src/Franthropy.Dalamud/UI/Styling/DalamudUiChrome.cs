@@ -170,29 +170,33 @@ public static class DalamudUiChrome
         Action drawContent,
         float height = 38f)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentNullException.ThrowIfNull(drawContent);
         var minimum = ImGui.GetCursorScreenPos();
         var accent = palette.Resolve(tone);
-
-        using var colors = ImRaii.PushColor(ImGuiCol.ChildBg, palette.ToneSurface(tone))
-            .Push(ImGuiCol.Border, DalamudUiPalette.WithAlpha(accent, 0.50f));
-        using var styles = ImRaii.PushStyle(ImGuiStyleVar.ChildBorderSize, 1f)
-            .Push(ImGuiStyleVar.WindowPadding, new Vector2(10f, 7f));
-        using var child = ImRaii.Child(
-            id,
-            new Vector2(0f, height),
-            true,
-            ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
-        if (child)
-        {
-            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + 4f);
-            drawContent();
-        }
-
-        ImGui.GetWindowDrawList().AddRectFilled(
+        var maximum = new Vector2(minimum.X + ImGui.GetContentRegionAvail().X, minimum.Y + height);
+        var drawList = ImGui.GetWindowDrawList();
+        drawList.AddRectFilled(
+            minimum,
+            maximum,
+            ImGui.GetColorU32(palette.ToneSurface(tone)),
+            3f);
+        drawList.AddRect(
+            minimum,
+            maximum,
+            ImGui.GetColorU32(DalamudUiPalette.WithAlpha(accent, 0.50f)),
+            3f);
+        drawList.AddRectFilled(
             minimum,
             new Vector2(minimum.X + 3f, minimum.Y + height),
             ImGui.GetColorU32(accent));
+
+        ImGui.SetCursorScreenPos(new Vector2(minimum.X + 14f, minimum.Y + 7f));
+        ImGui.PushID(id);
+        drawContent();
+        ImGui.PopID();
+        ImGui.SetCursorScreenPos(new Vector2(minimum.X, maximum.Y));
+        ImGui.Dummy(Vector2.Zero);
     }
 
     public static void DrawStatusFact(

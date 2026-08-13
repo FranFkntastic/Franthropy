@@ -1,11 +1,14 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility.Raii;
+using Franthropy.Dalamud.UI.Styling;
 
 namespace Franthropy.Dalamud.UI.Settings;
 
 public sealed class DalamudSettingsTreeRenderer
 {
     private const float CompactWidthThreshold = 720f;
+    private static readonly DalamudUiTheme DefaultTheme = DalamudUiTheme.Dark(new Vector4(0.25f, 0.65f, 0.95f, 1f));
     private readonly string id;
     private readonly List<SettingsPageControl> renderedPageControls = [];
     private readonly List<SettingsFolderControl> renderedFolderControls = [];
@@ -20,42 +23,76 @@ public sealed class DalamudSettingsTreeRenderer
     public IReadOnlyList<SettingsFolderControl> RenderedFolderControls => renderedFolderControls;
 
     public void Draw(SettingsNavigationCatalog catalog, SettingsNavigationState state, Action? navigationChanged = null)
+        => Draw(catalog, state, DefaultTheme, navigationChanged);
+
+    public void Draw(
+        SettingsNavigationCatalog catalog,
+        SettingsNavigationState state,
+        DalamudUiTheme theme,
+        Action? navigationChanged = null)
     {
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(theme);
         renderedPageControls.Clear();
         renderedFolderControls.Clear();
 
         var available = ImGui.GetContentRegionAvail();
         if (available.X < CompactWidthThreshold)
-            DrawCompact(catalog, state, navigationChanged);
+            DrawCompact(catalog, state, theme, navigationChanged);
         else
-            DrawSplit(catalog, state, available, navigationChanged);
+            DrawSplit(catalog, state, theme, available, navigationChanged);
     }
 
-    private void DrawSplit(SettingsNavigationCatalog catalog, SettingsNavigationState state, Vector2 available, Action? navigationChanged)
+    private void DrawSplit(
+        SettingsNavigationCatalog catalog,
+        SettingsNavigationState state,
+        DalamudUiTheme theme,
+        Vector2 available,
+        Action? navigationChanged)
     {
         var navigationWidth = Math.Clamp(available.X * 0.24f, 210f, 300f);
-        if (ImGui.BeginChild($"##SettingsNavigation{id}", new Vector2(navigationWidth, 0), true))
-        {
-            DrawFilter(state);
-            ImGui.Separator();
-            DrawTree(catalog, state, navigationChanged);
-        }
-        ImGui.EndChild();
+        using var colors = ImRaii.PushColor(ImGuiCol.TableBorderStrong, theme.Palette.Border)
+            .Push(ImGuiCol.TableBorderLight, DalamudUiPalette.WithAlpha(theme.Palette.Border, 0.58f));
+        using var style = ImRaii.PushStyle(ImGuiStyleVar.CellPadding, theme.Metrics.WindowPadding);
+        if (!ImGui.BeginTable(
+                $"##SettingsLayout{id}",
+                2,
+                ImGuiTableFlags.SizingStretchProp |
+                ImGuiTableFlags.BordersInnerV |
+                ImGuiTableFlags.NoSavedSettings))
+            return;
 
-        ImGui.SameLine();
-        if (ImGui.BeginChild($"##SettingsContent{id}", Vector2.Zero, false))
-            DrawSelectedPage(catalog, state);
-        ImGui.EndChild();
+        ImGui.TableSetupColumn(
+            "Navigation",
+            ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize,
+            navigationWidth);
+        ImGui.TableSetupColumn("Settings", ImGuiTableColumnFlags.WidthStretch);
+        ImGui.TableNextRow();
+        ImGui.TableNextColumn();
+        ImGui.TableSetBgColor(ImGuiTableBgTarget.CellBg, ImGui.GetColorU32(theme.Palette.Surface));
+        {
+            DrawFilter(state, theme);
+            ImGui.Separator();
+            DrawTree(catalog, state, theme, navigationChanged);
+        }
+
+        ImGui.TableNextColumn();
+        DrawSelectedPage(catalog, state, theme);
+        ImGui.EndTable();
     }
 
-    private void DrawCompact(SettingsNavigationCatalog catalog, SettingsNavigationState state, Action? navigationChanged)
+    private void DrawCompact(
+        SettingsNavigationCatalog catalog,
+        SettingsNavigationState state,
+        DalamudUiTheme theme,
+        Action? navigationChanged)
     {
-        DrawFilter(state);
+        DrawFilter(state, theme);
         var visible = catalog.GetVisiblePages(state.Filter);
         var selected = catalog.ResolveSelectedPage(state);
         ImGui.SetNextItemWidth(-1);
+        using var input = DalamudUiChrome.PushInput(theme);
         if (ImGui.BeginCombo($"##SettingsPageSelector{id}", selected?.Path ?? "No matching settings page"))
         {
             foreach (var page in visible)
@@ -75,18 +112,23 @@ public sealed class DalamudSettingsTreeRenderer
         }
 
         ImGui.Separator();
-        DrawSelectedPage(catalog, state);
+        DrawSelectedPage(catalog, state, theme);
     }
 
-    private static void DrawFilter(SettingsNavigationState state)
+    private static void DrawFilter(SettingsNavigationState state, DalamudUiTheme theme)
     {
         var filter = state.Filter;
         ImGui.SetNextItemWidth(-1);
+        using var input = DalamudUiChrome.PushInput(theme);
         if (ImGui.InputTextWithHint("##SettingsFilter", "Search settings...", ref filter, 256))
             state.SetFilter(filter);
     }
 
-    private void DrawTree(SettingsNavigationCatalog catalog, SettingsNavigationState state, Action? navigationChanged)
+    private void DrawTree(
+        SettingsNavigationCatalog catalog,
+        SettingsNavigationState state,
+        DalamudUiTheme theme,
+        Action? navigationChanged)
     {
         var visible = catalog.GetVisiblePages(state.Filter);
         if (visible.Count == 0)
@@ -98,10 +140,15 @@ public sealed class DalamudSettingsTreeRenderer
         var roots = BuildFolders(visible);
         var selected = catalog.ResolveSelectedPage(state);
         foreach (var folder in roots)
-            DrawFolder(folder, selected, state, navigationChanged);
+            DrawFolder(folder, selected, state, theme, navigationChanged);
     }
 
-    private void DrawFolder(Folder folder, SettingsPageDescriptor? selected, SettingsNavigationState state, Action? navigationChanged)
+    private void DrawFolder(
+        Folder folder,
+        SettingsPageDescriptor? selected,
+        SettingsNavigationState state,
+        DalamudUiTheme theme,
+        Action? navigationChanged)
     {
         var forceOpen = !string.IsNullOrWhiteSpace(state.Filter);
         var expanded = forceOpen || state.ExpandedFolderPaths.Contains(folder.Path);
@@ -120,12 +167,16 @@ public sealed class DalamudSettingsTreeRenderer
             return;
 
         foreach (var child in folder.Children)
-            DrawFolder(child, selected, state, navigationChanged);
+            DrawFolder(child, selected, state, theme, navigationChanged);
 
         foreach (var page in folder.Pages)
         {
             var isSelected = string.Equals(page.Id, selected?.Id, StringComparison.Ordinal);
-            if (ImGui.Selectable($"{page.Name}##SettingsPage{id}{page.Id}", isSelected))
+            if (DalamudUiControls.SegmentedOption(
+                    $"{page.Name}##SettingsPage{id}{page.Id}",
+                    isSelected,
+                    theme,
+                    new Vector2(-1f, 0f)))
             {
                 state.SelectPage(page.Id);
                 navigationChanged?.Invoke();
@@ -136,7 +187,10 @@ public sealed class DalamudSettingsTreeRenderer
         ImGui.TreePop();
     }
 
-    private static void DrawSelectedPage(SettingsNavigationCatalog catalog, SettingsNavigationState state)
+    private static void DrawSelectedPage(
+        SettingsNavigationCatalog catalog,
+        SettingsNavigationState state,
+        DalamudUiTheme theme)
     {
         var selected = catalog.ResolveSelectedPage(state);
         if (selected is null)
@@ -145,8 +199,13 @@ public sealed class DalamudSettingsTreeRenderer
             return;
         }
 
-        ImGui.TextUnformatted(selected.Path);
-        ImGui.Separator();
+        var parentPath = selected.Segments.Count > 1
+            ? string.Join(" / ", selected.Segments.Take(selected.Segments.Count - 1))
+            : null;
+        DalamudUiChrome.DrawSectionHeading(
+            selected.Name,
+            parentPath,
+            theme.Palette);
         selected.Draw(new SettingsPageContext(state.Filter, selected.Path));
     }
 
