@@ -6,6 +6,9 @@ namespace Franthropy.Dalamud.UI.Styling;
 
 public static class DalamudUiChrome
 {
+    public static IDisposable PushTable(DalamudUiTheme theme) =>
+        PushTable(theme.Palette);
+
     public static IDisposable PushTable(DalamudUiPalette palette)
     {
         var colors = ImRaii.PushColor(ImGuiCol.TableHeaderBg, palette.SurfaceRaised);
@@ -33,6 +36,12 @@ public static class DalamudUiChrome
         return colors;
     }
 
+    public static IDisposable PushButton(
+        DalamudUiTheme theme,
+        DalamudUiTone tone = DalamudUiTone.Accent,
+        bool quiet = false) =>
+        PushButton(theme.Palette, tone, quiet);
+
     public static IDisposable PushInput(
         DalamudUiPalette palette,
         DalamudUiTone tone = DalamudUiTone.Accent)
@@ -42,6 +51,57 @@ public static class DalamudUiChrome
         colors.Push(ImGuiCol.FrameBgActive, palette.ToneSurface(tone, 0.38f));
         colors.Push(ImGuiCol.Border, DalamudUiPalette.WithAlpha(palette.Resolve(tone), 0.55f));
         return colors;
+    }
+
+    public static IDisposable PushInput(
+        DalamudUiTheme theme,
+        DalamudUiTone tone = DalamudUiTone.Accent) =>
+        PushInput(theme.Palette, tone);
+
+    public static void DrawCallout(
+        string id,
+        string title,
+        string? detail,
+        DalamudUiTheme theme,
+        DalamudUiTone tone = DalamudUiTone.Neutral,
+        Action? drawActions = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        ArgumentException.ThrowIfNullOrWhiteSpace(title);
+        ArgumentNullException.ThrowIfNull(theme);
+
+        var palette = theme.Palette;
+        var accent = palette.Resolve(tone);
+        var minimum = ImGui.GetCursorScreenPos();
+        using var colors = ImRaii.PushColor(ImGuiCol.ChildBg, palette.ToneSurface(tone, 0.13f))
+            .Push(ImGuiCol.Border, DalamudUiPalette.WithAlpha(accent, 0.48f));
+        using var styles = ImRaii.PushStyle(ImGuiStyleVar.ChildBorderSize, theme.Metrics.BorderSize)
+            .Push(ImGuiStyleVar.ChildRounding, theme.Metrics.ChildRounding)
+            .Push(ImGuiStyleVar.WindowPadding, theme.Metrics.WindowPadding);
+        var lineCount = string.IsNullOrWhiteSpace(detail) ? 1f : 2f;
+        var actionHeight = drawActions is null ? 0f : ImGui.GetFrameHeight() + theme.Metrics.ItemSpacing.Y;
+        var height = (ImGui.GetTextLineHeightWithSpacing() * lineCount) +
+                     actionHeight +
+                     (theme.Metrics.WindowPadding.Y * 2f);
+        using var child = ImRaii.Child(
+            id,
+            new Vector2(0f, height),
+            true,
+            ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+        if (child)
+        {
+            ImGui.TextColored(accent, title);
+            if (!string.IsNullOrWhiteSpace(detail))
+                ImGui.TextWrapped(detail);
+            drawActions?.Invoke();
+        }
+
+        ImGui.GetWindowDrawList().AddRectFilled(
+            minimum,
+            new Vector2(minimum.X + 3f, minimum.Y + height),
+            ImGui.GetColorU32(accent),
+            theme.Metrics.ChildRounding,
+            ImDrawFlags.RoundCornersLeft);
     }
 
     public static void DrawSectionHeading(
