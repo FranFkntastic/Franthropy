@@ -7,7 +7,7 @@ using Dalamud.Plugin.Services;
 namespace Franthropy.Dalamud.AgentBridge;
 
 /// <summary>Captures a rendered ImGui viewport region into the authenticated bridge handoff.</summary>
-public sealed class AgentBridgeViewportCaptureService
+public sealed class AgentBridgeViewportCaptureService : IDisposable
 {
     private readonly string captureDirectory;
     private readonly string pluginInstanceId;
@@ -17,6 +17,8 @@ public sealed class AgentBridgeViewportCaptureService
     private readonly ITextureProvider textureProvider;
     private readonly ITextureReadbackProvider readbackProvider;
     private readonly SemaphoreSlim captureLock = new(1, 1);
+    private readonly object pendingWindowGate = new();
+    private PendingWindowCapture? pendingWindowCapture;
 
     public AgentBridgeViewportCaptureService(
         string configDirectory,
@@ -51,6 +53,7 @@ public sealed class AgentBridgeViewportCaptureService
                 throw new InvalidOperationException("The requested plugin surface is not currently rendered.");
 
             Task<IDalamudTextureWrap>? textureTask = null;
+            uint? capturedViewportId = null;
             await dispatchOnFramework(() =>
             {
                 var currentRegion = captureRegion();
@@ -61,6 +64,7 @@ public sealed class AgentBridgeViewportCaptureService
                     fullViewport,
                     ImGui.GetMainViewport().ID,
                     currentRegion);
+                capturedViewportId = viewportId;
 
                 textureTask = textureProvider.CreateFromImGuiViewportAsync(
                     new ImGuiViewportTextureArgs
@@ -78,51 +82,182 @@ public sealed class AgentBridgeViewportCaptureService
 
             using var texture = await (textureTask ??
                 throw new InvalidOperationException("Viewport capture was not scheduled.")).ConfigureAwait(false);
-            var pngCodec = readbackProvider.GetSupportedImageEncoderInfos()
-                .Single(codec => codec.MimeTypes.Contains("image/png", StringComparer.OrdinalIgnoreCase));
-            await using var output = new MemoryStream();
-            await readbackProvider.SaveToStreamAsync(
+            return await PersistCaptureAsync(
                 texture,
-                pngCodec.ContainerGuid,
-                output,
-                new Dictionary<string, object>(),
-                leaveWrapOpen: true,
-                leaveStreamOpen: true,
+                fullViewport ? "FullViewport" : "PluginWindow",
+                "ImGuiViewport",
+                capturedViewportId,
                 cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            captureLock.Release();
+        }
+    }
 
-            var captureId = Guid.NewGuid().ToString("N");
-            var fileName = $"{captureId}.bin";
-            Directory.CreateDirectory(captureDirectory);
-            var path = Path.Combine(captureDirectory, fileName);
-            var pngBytes = output.ToArray();
+    /// <summary>
+    /// Captures one rendered ImGui window from its draw list instead of leasing the platform
+    /// viewport back buffer. This is the safe path for detachable plugin windows because a
+    /// platform viewport may be destroyed or recreated between presentation and post-render
+    /// texture readback during login, logout, display, or docking transitions.
+    /// </summary>
+    public async Task<AgentBridgeCaptureReceipt> CaptureWindowAsync(
+        Func<string> windowName,
+        string scope,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(windowName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(scope);
+        await captureLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var pending = new PendingWindowCapture(
+                windowName,
+                new(TaskCreationOptions.RunContinuationsAsynchronously));
+            lock (pendingWindowGate)
+            {
+                if (pendingWindowCapture is not null)
+                    throw new InvalidOperationException("A plugin window capture is already waiting for an ImGui draw frame.");
+                pendingWindowCapture = pending;
+            }
+
             try
             {
-                var protectedBytes = AgentBridgeDataProtection.ProtectBytes(pngBytes, pluginInstanceId);
-                try { await File.WriteAllBytesAsync(path, protectedBytes, cancellationToken).ConfigureAwait(false); }
-                finally { CryptographicOperations.ZeroMemory(protectedBytes); }
-                var receipt = new AgentBridgeCaptureReceipt
+                var rendered = await pending.Completion.Task
+                    .WaitAsync(TimeSpan.FromSeconds(2), cancellationToken)
+                    .ConfigureAwait(false);
+                using (rendered.Texture)
                 {
-                    SchemaVersion = 1,
-                    CaptureId = captureId,
-                    FileName = fileName,
-                    CapturedAtUtc = DateTimeOffset.UtcNow,
-                    Width = texture.Width,
-                    Height = texture.Height,
-                    Sha256 = Convert.ToHexString(SHA256.HashData(pngBytes)),
-                    ProcessId = Environment.ProcessId,
-                    Scope = fullViewport ? "FullViewport" : "PluginWindow",
-                };
-                PruneOldCaptures();
-                return receipt;
+                    return await PersistCaptureAsync(
+                        rendered.Texture,
+                        scope,
+                        "ImGuiDrawList",
+                        rendered.ViewportId,
+                        cancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch (TimeoutException exception)
+            {
+                throw new InvalidOperationException(
+                    "Plugin surface capture bounds were not rendered during the two-second ImGui draw lease.",
+                    exception);
             }
             finally
             {
-                CryptographicOperations.ZeroMemory(pngBytes);
+                lock (pendingWindowGate)
+                {
+                    if (ReferenceEquals(pendingWindowCapture, pending))
+                        pendingWindowCapture = null;
+                }
             }
         }
         finally
         {
             captureLock.Release();
+        }
+    }
+
+    /// <summary>Completes a pending draw-list capture after the owning window has rendered.</summary>
+    public unsafe void RenderPendingWindowCapture()
+    {
+        PendingWindowCapture? pending;
+        lock (pendingWindowGate)
+            pending = pendingWindowCapture;
+        if (pending is null || pending.Completion.Task.IsCompleted)
+            return;
+
+        try
+        {
+            var name = pending.WindowName();
+            if (string.IsNullOrWhiteSpace(name))
+                throw new InvalidOperationException("The plugin surface did not provide a capture window name.");
+            var window = ImGuiP.FindWindowByName(new ImU8String(name));
+            if (window.IsNull || (!window.Active && !window.WasActive) || window.Hidden)
+                return;
+
+            var texture = textureProvider.CreateDrawListTexture($"{captureLabel} agent bridge window capture");
+            try
+            {
+                texture.ResizeAndDrawWindow(window, System.Numerics.Vector2.One);
+                if (texture.Width <= 0 || texture.Height <= 0)
+                    throw new InvalidOperationException(
+                        $"Plugin surface capture bounds are unavailable because '{name}' rendered with zero size.");
+                if (!pending.Completion.TrySetResult(new(
+                        texture,
+                        window.ViewportId == 0 ? null : window.ViewportId)))
+                    texture.Dispose();
+            }
+            catch
+            {
+                texture.Dispose();
+                throw;
+            }
+        }
+        catch (Exception exception)
+        {
+            pending.Completion.TrySetException(exception);
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (pendingWindowGate)
+        {
+            pendingWindowCapture?.Completion.TrySetCanceled();
+            pendingWindowCapture = null;
+        }
+        captureLock.Dispose();
+    }
+
+    private async Task<AgentBridgeCaptureReceipt> PersistCaptureAsync(
+        IDalamudTextureWrap texture,
+        string scope,
+        string captureMethod,
+        uint? viewportId,
+        CancellationToken cancellationToken)
+    {
+        var pngCodec = readbackProvider.GetSupportedImageEncoderInfos()
+            .Single(codec => codec.MimeTypes.Contains("image/png", StringComparer.OrdinalIgnoreCase));
+        await using var output = new MemoryStream();
+        await readbackProvider.SaveToStreamAsync(
+            texture,
+            pngCodec.ContainerGuid,
+            output,
+            new Dictionary<string, object>(),
+            leaveWrapOpen: true,
+            leaveStreamOpen: true,
+            cancellationToken).ConfigureAwait(false);
+
+        var captureId = Guid.NewGuid().ToString("N");
+        var fileName = $"{captureId}.bin";
+        Directory.CreateDirectory(captureDirectory);
+        var path = Path.Combine(captureDirectory, fileName);
+        var pngBytes = output.ToArray();
+        try
+        {
+            var protectedBytes = AgentBridgeDataProtection.ProtectBytes(pngBytes, pluginInstanceId);
+            try { await File.WriteAllBytesAsync(path, protectedBytes, cancellationToken).ConfigureAwait(false); }
+            finally { CryptographicOperations.ZeroMemory(protectedBytes); }
+            var receipt = new AgentBridgeCaptureReceipt
+            {
+                SchemaVersion = 1,
+                CaptureId = captureId,
+                FileName = fileName,
+                CapturedAtUtc = DateTimeOffset.UtcNow,
+                Width = texture.Width,
+                Height = texture.Height,
+                Sha256 = Convert.ToHexString(SHA256.HashData(pngBytes)),
+                ProcessId = Environment.ProcessId,
+                Scope = scope,
+                CaptureMethod = captureMethod,
+                ViewportId = viewportId,
+            };
+            PruneOldCaptures();
+            return receipt;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(pngBytes);
         }
     }
 
@@ -145,6 +280,14 @@ public sealed class AgentBridgeViewportCaptureService
                      .Skip(20))
             file.Delete();
     }
+
+    private sealed record PendingWindowCapture(
+        Func<string> WindowName,
+        TaskCompletionSource<RenderedWindowCapture> Completion);
+
+    private sealed record RenderedWindowCapture(
+        IDrawListTextureWrap Texture,
+        uint? ViewportId);
 }
 
 public sealed record AgentBridgeCaptureRegion(
