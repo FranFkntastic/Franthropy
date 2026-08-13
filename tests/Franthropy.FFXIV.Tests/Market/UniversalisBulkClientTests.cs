@@ -134,12 +134,32 @@ public sealed class UniversalisBulkClientTests
         Assert.Equal(2, handler.Requests.Count);
     }
 
+    [Fact]
+    public async Task MissingItemRecovery_CanBeDisabledForCatalogDiscovery()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse(
+            HttpStatusCode.OK,
+            """{"itemIDs":[1,2],"items":{"1":{"itemID":1}}}"""));
+        var client = CreateClient(handler, retryMissingItems: false);
+
+        var result = await client.FetchAsync<ItemResponse>(new UniversalisBulkRequest
+        {
+            WorldOrDataCenter = "Aether",
+            ItemIds = [1, 2],
+        });
+
+        Assert.Single(result.Items);
+        Assert.Equal([2u], result.MissingItemIds);
+        Assert.Single(handler.Requests);
+    }
+
     private static UniversalisBulkClient CreateClient(
         HttpMessageHandler handler,
         int chunkSize = 10,
         int maxConcurrency = 2,
         int maxAttempts = 2,
-        TimeSpan? attemptTimeout = null) =>
+        TimeSpan? attemptTimeout = null,
+        bool retryMissingItems = true) =>
         new(
             new HttpClient(handler),
             new Uri("https://example.test/api/v2/"),
@@ -148,6 +168,7 @@ public sealed class UniversalisBulkClientTests
                 ChunkSize = chunkSize,
                 MaxConcurrentRequests = maxConcurrency,
                 MaxAttemptsPerChunk = maxAttempts,
+                RetryMissingItems = retryMissingItems,
                 MinimumRequestSpacing = TimeSpan.Zero,
                 DefaultRetryDelay = TimeSpan.Zero,
                 DefaultRateLimitCooldown = TimeSpan.Zero,

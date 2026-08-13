@@ -47,6 +47,8 @@ public sealed record UniversalisBulkClientOptions
 
     public int MaximumSplitDepth { get; init; } = 2;
 
+    public bool RetryMissingItems { get; init; } = true;
+
     public TimeSpan AttemptTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     public TimeSpan MinimumRequestSpacing { get; init; } = TimeSpan.FromMilliseconds(150);
@@ -140,7 +142,7 @@ public sealed class UniversalisBulkClient
             cancellationToken).ConfigureAwait(false);
 
         var missing = itemIds.Where(itemId => !items.ContainsKey(itemId)).ToArray();
-        if (missing.Length > 0)
+        if (missing.Length > 0 && options.RetryMissingItems)
         {
             var retryChunks = missing
                 .Chunk(Math.Min(options.ChunkSize, 5))
