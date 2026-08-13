@@ -25,7 +25,7 @@ public enum EquipmentStatSemantic
     Strength, Dexterity, Vitality, Intelligence, Mind,
     CriticalHit, Determination, DirectHit, SkillSpeed, SpellSpeed, Tenacity, Piety,
     Craftsmanship, Control, CraftingPoints, Gathering, Perception, GatheringPoints,
-    PhysicalDamage, MagicalDamage, PhysicalDefense, MagicalDefense,
+    PhysicalDamage, MagicalDamage, PhysicalDefense, MagicalDefense, BlockStrength, BlockRate,
     PiercingResistance,
 }
 
