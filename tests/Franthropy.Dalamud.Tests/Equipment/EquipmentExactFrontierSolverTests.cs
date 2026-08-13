@@ -21,6 +21,25 @@ public sealed class EquipmentExactFrontierSolverTests
     }
 
     [Fact]
+    public void Solve_ModelsDeclaredEmptyBaselineWhileRequiringRecommendationsToFillTheSlot()
+    {
+        var upgrade = Offer(EquipmentLoadoutPosition.Head, 101, 20, 500);
+        var baseline = new Dictionary<EquipmentLoadoutPosition, EquipmentOfferAllocationKey?>
+        {
+            [EquipmentLoadoutPosition.Head] = null,
+        };
+
+        var result = Solve([upgrade], [EquipmentLoadoutPosition.Head], baseline);
+
+        var noPurchase = All(result).Single(solution => solution.Candidate.SolutionId == "baseline");
+        Assert.Empty(noPurchase.Candidate.Selections);
+        Assert.Equal(0, noPurchase.Utility.UtilityScore);
+        var recommendation = Assert.Single(result.Pareto.Frontier, solution => solution.Candidate.SolutionId != "baseline");
+        Assert.Equal(EquipmentLoadoutPosition.Head, Assert.Single(recommendation.Candidate.Selections).Position);
+        Assert.Equal(500ul, recommendation.AcquisitionCostGil);
+    }
+
+    [Fact]
     public void Solve_PreservesEquivalentNqAndHqObservationVariants()
     {
         var baseline = Offer(EquipmentLoadoutPosition.Head, 100, 10, 0, source: EquipmentAcquisitionSourceKind.Owned);

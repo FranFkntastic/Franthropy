@@ -299,7 +299,12 @@ public sealed class EquipmentExactFrontierSolver
                     continue;
                 }
 
-                foreach (var choice in offersByPosition[position])
+                var baselineKey = request.Baseline[position];
+                var choices = state.HasBaselineGap
+                    ? offersByPosition[position].Where(choice => baselineKey is not null &&
+                        choice.EquivalentOffers.Any(offer => offer.AllocationKey == baselineKey))
+                    : offersByPosition[position];
+                foreach (var choice in choices)
                 {
                     expanded++;
                     if (!resources.TryAllocate(state.Resources, position, choice.Primary, out var allocatedResources))
@@ -309,6 +314,14 @@ public sealed class EquipmentExactFrontierSolver
                     }
                     allocatedResources = resources.Project(allocatedResources, futureResources);
                     next.Add(Allocate(state, choice, request.Baseline[position], allocatedResources, utilities));
+                }
+                if (state.IsBaselineSoFar && baselineKey is null)
+                {
+                    next.Add(state with
+                    {
+                        Resources = resources.Project(state.Resources, futureResources),
+                        HasBaselineGap = true,
+                    });
                 }
             }
             if (next.Count == 0)
@@ -504,7 +517,9 @@ public sealed class EquipmentExactFrontierSolver
         var feasibility = feasibilityEvaluator.Evaluate(
             candidate,
             feasibilityOffers,
-            request.RequiredPositions);
+            state.IsBaselineSoFar
+                ? request.RequiredPositions.Where(position => request.Baseline[position] is not null).ToHashSet()
+                : request.RequiredPositions);
         if (!feasibility.IsFeasible)
             throw new InvalidOperationException($"Solver emitted infeasible solution '{solutionId}': {string.Join("; ", feasibility.Violations.Select(value => value.Message))}");
         var labels = selections
@@ -825,7 +840,8 @@ public sealed class EquipmentExactFrontierSolver
             checked(state.PurchaseTransactions + offer.PurchaseTransactions),
             evidenceRisk,
             allocatedResources,
-            state.IsBaselineSoFar && baseline == offer.AllocationKey);
+            state.IsBaselineSoFar && baseline == offer.AllocationKey,
+            state.HasBaselineGap);
     }
 
     private static ExactOfferChoice[] BuildExactOfferFrontier(
@@ -1032,7 +1048,7 @@ public sealed class EquipmentExactFrontierSolver
         var feasibility = new EquipmentLoadoutFeasibilityEvaluator().Evaluate(new(
             baseline,
             feasibilityOffers,
-            request.RequiredPositions));
+            request.RequiredPositions.Where(position => request.Baseline[position] is not null).ToHashSet()));
         if (!feasibility.IsFeasible)
             throw new ArgumentException($"No-purchase baseline is infeasible: {string.Join("; ", feasibility.Violations.Select(value => value.Message))}", nameof(request));
     }
@@ -1045,7 +1061,8 @@ public sealed class EquipmentExactFrontierSolver
         state.EvidenceRisk.IncompleteCoverageCount,
         state.EvidenceRisk.ConfidencePenalty,
         state.Resources,
-        state.IsBaselineSoFar);
+        state.IsBaselineSoFar,
+        state.HasBaselineGap);
 
     private static string CanonicalMetricText(State state) => string.Join("||",
         state.Utility.CanonicalText,
@@ -1074,7 +1091,8 @@ public sealed class EquipmentExactFrontierSolver
         int IncompleteCoverage,
         int Confidence,
         ResourceSignature Resources,
-        bool IsBaselineSoFar);
+        bool IsBaselineSoFar,
+        bool HasBaselineGap);
 
     private abstract class RetainedPathNode
     {
@@ -2576,7 +2594,8 @@ public sealed class EquipmentExactFrontierSolver
         int PurchaseTransactions,
         EquipmentEvidenceRisk EvidenceRisk,
         ResourceSignature Resources,
-        bool IsBaselineSoFar)
+        bool IsBaselineSoFar,
+        bool HasBaselineGap)
     {
         private RetainedPathNode? materializedPaths;
 
@@ -2592,7 +2611,8 @@ public sealed class EquipmentExactFrontierSolver
             PurchaseTransactions,
             EvidenceRisk,
             Resources,
-            IsBaselineSoFar);
+            IsBaselineSoFar,
+            HasBaselineGap);
 
         public static State Empty(
             ResourceSignature resources,
@@ -2604,6 +2624,7 @@ public sealed class EquipmentExactFrontierSolver
             0,
             new(0, 0, 0),
             resources,
-            true);
+            true,
+            false);
     }
 }
