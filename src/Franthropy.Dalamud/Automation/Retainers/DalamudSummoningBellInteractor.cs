@@ -89,6 +89,15 @@ public sealed record RemoteSummoningBellObservation(
     float Distance,
     float OrdinaryInteractionDistance);
 
+public sealed record SummoningBellNavigationTargetObservation(
+    bool Available,
+    string Code,
+    string Message,
+    ulong BellGameObjectId,
+    Vector3 Position,
+    float Distance,
+    float OrdinaryInteractionDistance);
+
 public sealed record NormalSummoningBellCaptureArmResult(
     bool Armed,
     string Code,
@@ -946,6 +955,30 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
                 ? $"Loaded bell {nearest.Object.GameObjectId:X} is {nearest.Distance:F1} yalms away, outside its ordinary {nearest.InteractionDistance:F1}-yalm range."
                 : $"Loaded bell {nearest.Object.GameObjectId:X} is still inside ordinary interaction range ({nearest.Distance:F1}/{nearest.InteractionDistance:F1} yalms).",
             nearest.Object.GameObjectId,
+            nearest.Distance,
+            nearest.InteractionDistance);
+    }
+
+    /// <summary>
+    /// Observes the nearest loaded summoning bell as a navigation target without
+    /// applying any product-specific routing or interaction policy.
+    /// </summary>
+    public SummoningBellNavigationTargetObservation ObserveNavigationTarget()
+    {
+        var nearest = FindLoadedBell();
+        if (nearest is null)
+        {
+            return objectTable.LocalPlayer is null
+                ? new(false, "PlayerUnavailable", "The local player is unavailable.", 0, default, 0, 0)
+                : new(false, "NoLoadedSummoningBell", "No targetable summoning bell is loaded in the current object table.", 0, default, 0, 0);
+        }
+
+        return new(
+            true,
+            "NavigationTargetAvailable",
+            $"Loaded bell {nearest.Object.GameObjectId:X} is {nearest.Distance:F1} yalms away.",
+            nearest.Object.GameObjectId,
+            nearest.Object.Position,
             nearest.Distance,
             nearest.InteractionDistance);
     }
