@@ -26,7 +26,7 @@ public enum EquipmentStatSemantic
     CriticalHit, Determination, DirectHit, SkillSpeed, SpellSpeed, Tenacity, Piety,
     Craftsmanship, Control, CraftingPoints, Gathering, Perception, GatheringPoints,
     PhysicalDamage, MagicalDamage, PhysicalDefense, MagicalDefense, BlockStrength, BlockRate,
-    PiercingResistance,
+    PiercingResistance, ItemLevel,
 }
 
 public enum EquipmentDiscipline { Unknown, Combat, Crafter, Gatherer }
