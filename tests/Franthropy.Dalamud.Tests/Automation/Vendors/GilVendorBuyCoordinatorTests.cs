@@ -118,6 +118,94 @@ public sealed class GilVendorBuyCoordinatorTests
     }
 
     [Fact]
+    public void Delayed_exact_receipt_reacquires_automation_and_continues_remaining_batches()
+    {
+        var line = Line(1, 6, targetTotal: 6);
+        line.PurchasedQuantity = 2;
+        var store = new MemoryStore
+        {
+            Current = new GilVendorBuyRunSnapshot
+            {
+                RunId = "run",
+                ContextSignature = Context,
+                MaximumApprovedGil = 60,
+                Phase = GilVendorBuyPhase.Indeterminate,
+                Lines = [line],
+                Stops = [Stop(100, 1, validated: true)],
+                ArmedPurchase = new()
+                {
+                    ItemId = 1,
+                    Quantity = 2,
+                    ExpectedGil = 20,
+                    ShopRowIndex = 0,
+                    BeforeItemCount = 2,
+                    BeforeGil = 980,
+                    ArmedAtUtc = DateTime.UtcNow,
+                },
+            },
+        };
+        var runtime = new ScriptedRuntime { Gil = 960 };
+        runtime.Counts[1] = 4;
+        var coordinator = new GilVendorBuyCoordinator(store, runtime);
+
+        Assert.True(coordinator.TryReconcileIndeterminate(out var message), message);
+
+        Assert.Equal(GilVendorBuyPhase.RefreshPreconditions, coordinator.ActiveRun!.Phase);
+        Assert.Equal(1, runtime.BeginCalls);
+        Assert.Equal(0, runtime.SubmitCalls);
+
+        TickUntilTerminal(coordinator, 10);
+
+        Assert.Equal(GilVendorBuyPhase.Completed, coordinator.ActiveRun!.Phase);
+        Assert.Equal(1, runtime.SubmitCalls);
+        Assert.Equal([2, 2], coordinator.ActiveRun.Receipts.Select(receipt => receipt.Quantity));
+    }
+
+    [Fact]
+    public void Delayed_exact_receipt_pauses_only_when_automation_cannot_be_reacquired()
+    {
+        var line = Line(1, 6, targetTotal: 6);
+        line.PurchasedQuantity = 2;
+        var store = new MemoryStore
+        {
+            Current = new GilVendorBuyRunSnapshot
+            {
+                RunId = "run",
+                ContextSignature = Context,
+                MaximumApprovedGil = 60,
+                Phase = GilVendorBuyPhase.Indeterminate,
+                Lines = [line],
+                Stops = [Stop(100, 1, validated: true)],
+                ArmedPurchase = new()
+                {
+                    ItemId = 1,
+                    Quantity = 2,
+                    ExpectedGil = 20,
+                    ShopRowIndex = 0,
+                    BeforeItemCount = 2,
+                    BeforeGil = 980,
+                    ArmedAtUtc = DateTime.UtcNow,
+                },
+            },
+        };
+        var runtime = new ScriptedRuntime
+        {
+            Gil = 960,
+            BeginException = new InvalidOperationException("another automation owns the client"),
+        };
+        runtime.Counts[1] = 4;
+        var coordinator = new GilVendorBuyCoordinator(store, runtime);
+
+        Assert.True(coordinator.TryReconcileIndeterminate(out var message), message);
+
+        Assert.Equal(GilVendorBuyPhase.Paused, coordinator.ActiveRun!.Phase);
+        Assert.Equal(GilVendorBuyPhase.RefreshPreconditions, coordinator.ActiveRun.ResumePhase);
+        Assert.Equal(1, runtime.BeginCalls);
+        Assert.Equal(2, Assert.Single(coordinator.ActiveRun.Receipts).Quantity);
+        Assert.Contains("another automation owns the client", coordinator.ActiveRun.Message);
+    }
+
+    [Fact]
     public void Delayed_receipt_checks_every_target_before_completing_multi_line_run()
     {
         var runtime = new ScriptedRuntime { MutateGilOnSubmit = false };
@@ -613,6 +701,8 @@ public sealed class GilVendorBuyCoordinatorTests
         public bool MutateGilOnSubmit { get; set; } = true;
         public bool SubmitSucceeds { get; set; } = true;
         public Exception? SubmitException { get; set; }
+        public Exception? BeginException { get; set; }
+        public int BeginCalls { get; private set; }
         public int ReachCalls { get; private set; }
         public int ShopReadCalls { get; private set; }
         public int SubmitCalls { get; private set; }
@@ -675,7 +765,12 @@ public sealed class GilVendorBuyCoordinatorTests
         public bool TryConfirmPurchasePrompt() => false;
         public int ResolveMaximumBatch(uint itemId) => 99;
         public void CloseShop() { }
-        public void BeginAutomation() { }
+        public void BeginAutomation()
+        {
+            BeginCalls++;
+            if (BeginException is not null)
+                throw BeginException;
+        }
         public void EndAutomation() { }
     }
 }

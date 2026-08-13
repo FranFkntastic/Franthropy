@@ -108,7 +108,7 @@ public sealed class DalamudLocalTravelRunnerTests
     }
 
     [Fact]
-    public void Flight_capable_route_with_exhausted_mount_attempts_degrades_to_ground_sprint()
+    public void Flight_capable_route_with_exhausted_mount_attempts_fails_instead_of_sprinting()
     {
         var actions = new FakeLocalTravelActions(Observation(
             flightUnlocked: true,
@@ -120,17 +120,13 @@ public sealed class DalamudLocalTravelRunnerTests
         foreach (var seconds in new[] { 2, 4, 6, 8, 10 })
             Assert.Equal(LocalTravelPreparationState.Waiting, runner.Advance(100f, StartedAt.AddSeconds(seconds)).State);
 
-        var fallback = runner.Advance(100f, StartedAt.AddSeconds(12));
+        var unavailable = runner.Advance(100f, StartedAt.AddSeconds(12));
 
-        Assert.Equal(LocalTravelPreparationState.Ready, fallback.State);
-        Assert.Equal(LocalTravelMode.Sprint, fallback.Mode);
-        Assert.Equal("AccelerationRequested", fallback.Code);
+        Assert.Equal(LocalTravelPreparationState.Unavailable, unavailable.State);
+        Assert.Equal(LocalTravelMode.Flight, unavailable.Mode);
+        Assert.Equal("FlightMountTimeout", unavailable.Code);
         Assert.Equal(6, actions.MountRequests);
-        Assert.Equal(1, actions.AccelerationRequests);
-
-        Assert.Equal(LocalTravelMode.Sprint, runner.Advance(100f, StartedAt.AddSeconds(13)).Mode);
-        Assert.Equal(6, actions.MountRequests);
-        Assert.Equal(1, actions.AccelerationRequests);
+        Assert.Equal(0, actions.AccelerationRequests);
     }
 
     [Fact]

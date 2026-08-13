@@ -1,4 +1,3 @@
-using ECommons.Automation;
 using ECommons.GameHelpers;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
@@ -118,7 +117,7 @@ public sealed class DalamudLocalTravelRunner
 
         if (distance >= GroundMountDistance)
         {
-            var mount = PrepareGroundMount(observation, observedAt);
+            var mount = PrepareGroundMount(observation, observedAt, allowFallback: true);
             if (mount is not null)
                 return mount;
 
@@ -151,7 +150,7 @@ public sealed class DalamudLocalTravelRunner
     {
         if (!observation.Mounted)
         {
-            var mount = PrepareGroundMount(observation, observedAt);
+            var mount = PrepareGroundMount(observation, observedAt, allowFallback: false);
             if (mount is not null)
                 return mount with
                 {
@@ -193,7 +192,10 @@ public sealed class DalamudLocalTravelRunner
                 : "Waiting to retry takeoff before starting the flight path.");
     }
 
-    private LocalTravelPreparationResult? PrepareGroundMount(LocalTravelObservation observation, DateTimeOffset observedAt)
+    private LocalTravelPreparationResult? PrepareGroundMount(
+        LocalTravelObservation observation,
+        DateTimeOffset observedAt,
+        bool allowFallback)
     {
         if (observation.Mounted)
         {
@@ -226,9 +228,14 @@ public sealed class DalamudLocalTravelRunner
 
         if (observedAt - mountPreparationStartedAt.Value >= MountPreparationTimeout)
         {
-            // Mounting is an optimization, not a destination or spending boundary. Keep
-            // the reviewed route alive and let the caller submit ground vnavmesh with the
-            // best remaining acceleration instead of misclassifying the vendor as absent.
+            if (!allowFallback)
+                return Unavailable(
+                    LocalTravelMode.Flight,
+                    "FlightMountTimeout",
+                    "Could not summon a mount for the flight-capable route after repeated automatic attempts.");
+
+            // For a ground-only route mounting remains an optimization. Keep the reviewed
+            // destination alive and use the best remaining ground acceleration.
             mountDisabled = true;
             ResetMountPreparation();
             return null;
@@ -411,23 +418,7 @@ internal sealed unsafe class DalamudLocalTravelActions : ILocalTravelActions
         }
     }
 
-    public bool TryMount()
-    {
-        try
-        {
-            if (ActionManager.Instance() == null)
-                return false;
-
-            // Match Lifestream's proven mount-roulette submission. The caller owns pacing
-            // and waits for ConditionFlag.Mounted before it permits navigation to begin.
-            Chat.ExecuteGeneralAction(MountRouletteGeneralActionId);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
+    public bool TryMount() => TryUseGeneralAction(MountRouletteGeneralActionId);
 
     public bool TryTakeOff() => TryUseGeneralAction(JumpGeneralActionId);
 

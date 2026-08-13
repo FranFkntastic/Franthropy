@@ -211,7 +211,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         {
             interaction = await framework.RunOnTick(bell.TryInteract, cancellationToken: cancellationToken).ConfigureAwait(false);
             if (interaction.State == SummoningBellInteractionState.Unavailable)
-                return RetainerAutomationResult.Failed("SummoningBellUnavailable", interaction.Message);
+                return RetainerAutomationResult.Failed(interaction.Code, interaction.Message);
             if (interaction.Submitted)
                 break;
             await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
