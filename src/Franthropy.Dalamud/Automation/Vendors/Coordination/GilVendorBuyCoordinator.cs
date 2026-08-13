@@ -193,8 +193,8 @@ public sealed class GilVendorBuyCoordinator : IDisposable
     /// <summary>
     /// Re-reads the exact persisted armed purchase after a delayed or mismatched
     /// receipt became indeterminate. This never submits another purchase: it can
-    /// only recover a later exact item-and-gil delta and then complete or pause
-    /// the frozen run for an explicit resume.
+    /// only recover a later exact item-and-gil delta. A run with remaining work
+    /// resumes from refreshed preconditions after automation ownership is restored.
     /// </summary>
     public bool TryReconcileIndeterminate(out string message)
     {
@@ -255,10 +255,28 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         }
         var hasRemaining = run.Lines.Any(candidate =>
             RemainingForLine(candidate, snapshot.ItemCounts.GetValueOrDefault(candidate.ItemId)) > 0);
+        if (hasRemaining && !run.StopRequested)
+        {
+            try
+            {
+                runtime.BeginAutomation();
+            }
+            catch (Exception exception)
+            {
+                run.Phase = GilVendorBuyPhase.Paused;
+                run.ResumePhase = GilVendorBuyPhase.RefreshPreconditions;
+                run.StopRequested = false;
+                run.Message = $"The delayed purchase receipt was verified, but automation could not resume: {exception.Message}";
+                Persist();
+                message = run.Message;
+                return true;
+            }
+        }
+
         run.Phase = run.StopRequested
             ? GilVendorBuyPhase.Stopped
             : hasRemaining
-                ? GilVendorBuyPhase.Paused
+                ? GilVendorBuyPhase.RefreshPreconditions
                 : GilVendorBuyPhase.Completed;
         run.ResumePhase = GilVendorBuyPhase.RefreshPreconditions;
         run.StopRequested = false;
@@ -266,7 +284,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         {
             GilVendorBuyPhase.Completed => "The delayed purchase receipt was verified; vendor buy is complete.",
             GilVendorBuyPhase.Stopped => "The delayed purchase receipt was verified; vendor buy is stopped.",
-            _ => "The delayed purchase receipt was verified. Review current inventory, then resume the frozen vendor buy.",
+            _ => "The delayed purchase receipt was verified; refreshing preconditions before continuing the vendor buy.",
         };
         Persist();
         message = run.Message;
