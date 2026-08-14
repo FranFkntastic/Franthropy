@@ -54,6 +54,7 @@ public sealed class DalamudSharedObservationClient : IAsyncDisposable
     private long revision;
     private long retainerRevision;
     private TimeSpan retryDelay = MinimumRetryDelay;
+    private int resetRequested;
     private bool started;
     private bool disposed;
 
@@ -131,9 +132,19 @@ public sealed class DalamudSharedObservationClient : IAsyncDisposable
 
     private async Task PollAsync()
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
         while (await timer.WaitForNextTickAsync(lifetime.Token).ConfigureAwait(false))
+        {
+            var checkpoint = Math.Max(Volatile.Read(ref revision), Volatile.Read(ref retainerRevision));
+            if (checkpoint > 0)
+            {
+                var probe = await ObservationDatabaseProbe.ReadAsync(storeOptions, lifetime.Token).ConfigureAwait(false);
+                if (probe.Status is ObservationDatabaseProbeStatus.Compatible or ObservationDatabaseProbeStatus.UpgradeRequired &&
+                    probe.CurrentRevision < checkpoint)
+                    Interlocked.Exchange(ref resetRequested, 1);
+            }
             signals.Writer.TryWrite(true);
+        }
     }
 
     private async Task ProcessAsync()
@@ -144,6 +155,8 @@ public sealed class DalamudSharedObservationClient : IAsyncDisposable
             while (signals.Reader.TryRead(out var ignored)) { _ = ignored; }
             try
             {
+                if (Interlocked.Exchange(ref resetRequested, 0) != 0)
+                    await ResetReaderAsync().ConfigureAwait(false);
                 if (await ConsumeAsync(lifetime.Token).ConfigureAwait(false))
                 {
                     retryDelay = MinimumRetryDelay;
