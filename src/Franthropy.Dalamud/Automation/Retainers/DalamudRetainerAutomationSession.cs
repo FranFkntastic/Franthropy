@@ -28,7 +28,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private const string MarketList = "RetainerMarketList";
     private const string SellingListingEditor = "RetainerSell";
     private const string YesNo = "SelectYesno";
-    private const string ApprovedGameVersion = "2026.08.05.0000.0000";
+    private const string ApprovedGameVersion = "2026.08.11.0000.0000";
     private const string PatchContractId = "franthropy.retainer-ui-callbacks";
     private static readonly IReadOnlyList<InventoryType> PlayerOrdinaryItemContainers =
     [

@@ -7,7 +7,7 @@ public static class CharacterProvisioningDefaults
 {
     public const int SchemaVersion = 1;
     public const string StartingClass = "Marauder";
-    public const string ApprovedGameVersion = "2026.07.16.0001.0000";
+    public const string ApprovedGameVersion = "2026.08.11.0000.0000";
     public static readonly TimeSpan MaximumReviewAge = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan MaximumCommitLifetime = TimeSpan.FromMinutes(10);
 }
