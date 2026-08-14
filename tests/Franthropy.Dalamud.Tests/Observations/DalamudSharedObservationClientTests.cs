@@ -33,6 +33,7 @@ public sealed class DalamudSharedObservationClientTests
         await store.WriteAsync(CreateRoster(otherOwner, 1, 201, "Other"));
 
         var changed = new TaskCompletionSource<SharedRetainerObservationSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var changedCount = 0;
         var invalidated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var invalidatedContainers = new HashSet<ObservationContainerKind>();
         var client = new DalamudSharedObservationClient(new DalamudSharedObservationClientOptions
@@ -52,7 +53,11 @@ public sealed class DalamudSharedObservationClientTests
                 return ValueTask.CompletedTask;
             },
         });
-        client.RetainersChanged += (_, snapshot) => changed.TrySetResult(snapshot);
+        client.RetainersChanged += (_, snapshot) =>
+        {
+            Interlocked.Increment(ref changedCount);
+            changed.TrySetResult(snapshot);
+        };
         client.Start();
 
         var result = await changed.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -62,6 +67,9 @@ public sealed class DalamudSharedObservationClientTests
         Assert.True(client.TryGetRetainers(owner, out var current));
         Assert.Equal(result, current);
         Assert.False(client.TryGetRetainers(otherOwner, out _));
+        client.Refresh();
+        await Task.Delay(250);
+        Assert.Equal(1, Volatile.Read(ref changedCount));
 
         await store.WriteAsync(Invalidate(
             new ObservationScope(owner, ObservationSubject.Retainer(200, owner), ObservationContainerKind.RetainerInventory),

@@ -270,8 +270,12 @@ public sealed class DalamudSharedObservationClient : IAsyncDisposable
             nextOwner,
             retainerRead.CurrentRevision,
             retainerObservations.Values.OrderBy(observation => observation.Revision).ToImmutableArray());
+        var previousRetainers = Volatile.Read(ref currentRetainers);
         Volatile.Write(ref currentRetainers, nextRetainers);
-        PublishRetainersChanged(nextRetainers);
+        if (previousRetainers is null ||
+            previousRetainers.Owner != nextRetainers.Owner ||
+            previousRetainers.Revision != nextRetainers.Revision)
+            PublishRetainersChanged(nextRetainers);
 
         if (playerBaselines.Count > 0 || playerChanges.Count > 0 || retainerRead.Observations.Count > 0 || invalidatedScopes.Count > 0)
         {
