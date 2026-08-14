@@ -29,13 +29,28 @@ public sealed class DalamudSharedObservationClientTests
         var otherOwner = new ObservationOwner(101, 74);
         await store.WriteAsync(CreateRoster(owner, 1, 200, "Alpha"));
         await store.WriteAsync(CreateInventory(owner, 2, 200, 5333));
+        await store.WriteAsync(CreatePlayerInventory(owner, 3));
         await store.WriteAsync(CreateRoster(otherOwner, 1, 201, "Other"));
 
         var changed = new TaskCompletionSource<SharedRetainerObservationSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var invalidated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var invalidatedContainers = new HashSet<ObservationContainerKind>();
         var client = new DalamudSharedObservationClient(new DalamudSharedObservationClientOptions
         {
             PluginConfigDirectory = pluginDirectory,
             CurrentOwner = () => owner,
+            Deliver = (delivery, _) =>
+            {
+                lock (invalidatedContainers)
+                {
+                    foreach (var scope in delivery.InvalidatedScopes)
+                        invalidatedContainers.Add(scope.Container);
+                    if (invalidatedContainers.Contains(ObservationContainerKind.RetainerInventory) &&
+                        invalidatedContainers.Contains(ObservationContainerKind.PlayerInventory))
+                        invalidated.TrySetResult();
+                }
+                return ValueTask.CompletedTask;
+            },
         });
         client.RetainersChanged += (_, snapshot) => changed.TrySetResult(snapshot);
         client.Start();
@@ -47,6 +62,14 @@ public sealed class DalamudSharedObservationClientTests
         Assert.True(client.TryGetRetainers(owner, out var current));
         Assert.Equal(result, current);
         Assert.False(client.TryGetRetainers(otherOwner, out _));
+
+        await store.WriteAsync(Invalidate(
+            new ObservationScope(owner, ObservationSubject.Retainer(200, owner), ObservationContainerKind.RetainerInventory),
+            4));
+        await store.WriteAsync(Invalidate(
+            new ObservationScope(owner, ObservationSubject.Character(owner), ObservationContainerKind.PlayerInventory),
+            5));
+        await invalidated.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         await client.DisposeAsync();
         await store.DisposeAsync();
@@ -79,6 +102,24 @@ public sealed class DalamudSharedObservationClientTests
                 ObservationPayloadContracts.RetainerInventory,
                 ObservationPayloadContracts.Version,
                 new InventoryObservationPayload([10000], [10000], [new InventoryItemObservation(10000, 0, itemId, 3, false)])));
+
+    private static ObservationEnvelope CreatePlayerInventory(ObservationOwner owner, long revision) =>
+        new(
+            new ObservationScope(owner, ObservationSubject.Character(owner), ObservationContainerKind.PlayerInventory),
+            Capture(revision),
+            ObservationPayload.Create(
+                ObservationPayloadContracts.PlayerInventory,
+                ObservationPayloadContracts.Version,
+                new InventoryObservationPayload([1], [1], [new InventoryItemObservation(1, 0, 5333, 1, false)])));
+
+    private static ObservationEnvelope Invalidate(ObservationScope scope, long revision) =>
+        new(
+            scope,
+            Capture(revision) with
+            {
+                Evidence = ObservationEvidence.CompleteAvailable with { Availability = ObservationAvailability.Unavailable },
+            },
+            null);
 
     private static ObservationCapture Capture(long revision) => new(
         revision,

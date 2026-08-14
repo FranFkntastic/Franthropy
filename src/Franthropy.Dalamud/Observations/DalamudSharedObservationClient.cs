@@ -10,7 +10,8 @@ public sealed record SharedObservationDelivery(
     long Revision,
     IReadOnlyList<TrustedObservation> PlayerBaselines,
     IReadOnlyList<InventoryChangeBatch> PlayerChanges,
-    IReadOnlyList<TrustedObservation> RetainerObservations);
+    IReadOnlyList<TrustedObservation> RetainerObservations,
+    IReadOnlyList<ObservationScope> InvalidatedScopes);
 
 public sealed record SharedRetainerObservationSnapshot(
     ObservationOwner Owner,
@@ -47,6 +48,7 @@ public sealed class DalamudSharedObservationClient : IAsyncDisposable
     private readonly Dictionary<string, TrustedObservation> retainerObservations = new(StringComparer.Ordinal);
     private SqliteObservationReader? reader;
     private Task worker = Task.CompletedTask;
+    private Task poller = Task.CompletedTask;
     private ObservationOwner? owner;
     private SharedRetainerObservationSnapshot? currentRetainers;
     private long revision;
@@ -82,6 +84,7 @@ public sealed class DalamudSharedObservationClient : IAsyncDisposable
             return;
         started = true;
         worker = Task.Run(ProcessAsync);
+        poller = Task.Run(PollAsync);
         monitor.StartAsync(lifetime.Token).AsTask().GetAwaiter().GetResult();
         Refresh();
     }
@@ -116,6 +119,8 @@ public sealed class DalamudSharedObservationClient : IAsyncDisposable
         signals.Writer.TryComplete();
         try { await worker.ConfigureAwait(false); }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        try { await poller.ConfigureAwait(false); }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
         await monitor.DisposeAsync().ConfigureAwait(false);
         if (reader is not null)
             await reader.DisposeAsync().ConfigureAwait(false);
@@ -123,6 +128,13 @@ public sealed class DalamudSharedObservationClient : IAsyncDisposable
     }
 
     private void OnDatabaseChanged(object? sender, ObservationDatabaseChanged change) => signals.Writer.TryWrite(true);
+
+    private async Task PollAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        while (await timer.WaitForNextTickAsync(lifetime.Token).ConfigureAwait(false))
+            signals.Writer.TryWrite(true);
+    }
 
     private async Task ProcessAsync()
     {
@@ -185,23 +197,18 @@ public sealed class DalamudSharedObservationClient : IAsyncDisposable
         }
 
         var changes = await reader.ReadInventoryChangesAsync(nextOwner, revision, cancellationToken).ConfigureAwait(false);
+        if (changes.CurrentRevision < revision)
+        {
+            await ResetReaderAsync().ConfigureAwait(false);
+            return false;
+        }
         IReadOnlyList<TrustedObservation> playerBaselines = [];
         IReadOnlyList<InventoryChangeBatch> playerChanges = [];
+        var invalidatedScopes = new List<ObservationScope>();
         switch (changes.Status)
         {
             case InventoryChangeReadStatus.SnapshotRequired:
-            {
-                var player = await reader.ReadCurrentByOwnerAsync(nextOwner, ObservationContainerKind.PlayerInventory, cancellationToken).ConfigureAwait(false);
-                var saddlebag = await reader.ReadCurrentByOwnerAsync(nextOwner, ObservationContainerKind.Saddlebag, cancellationToken).ConfigureAwait(false);
-                if (player.Status is ObservationReadStatus.UnsupportedDatabaseVersion or ObservationReadStatus.Busy or ObservationReadStatus.Unavailable ||
-                    saddlebag.Status is ObservationReadStatus.UnsupportedDatabaseVersion or ObservationReadStatus.Busy or ObservationReadStatus.Unavailable)
-                    return false;
-                if (player.Observations.Any(observation => observation.IsStale) ||
-                    saddlebag.Observations.Any(observation => observation.IsStale))
-                    return false;
-                playerBaselines = [.. player.Observations, .. saddlebag.Observations];
                 break;
-            }
             case InventoryChangeReadStatus.Found:
                 playerChanges = changes.Batches;
                 break;
@@ -215,15 +222,33 @@ public sealed class DalamudSharedObservationClient : IAsyncDisposable
                 throw new ArgumentOutOfRangeException(nameof(changes.Status), changes.Status, null);
         }
 
+        var player = await reader.ReadCurrentByOwnerAsync(nextOwner, ObservationContainerKind.PlayerInventory, cancellationToken).ConfigureAwait(false);
+        var saddlebag = await reader.ReadCurrentByOwnerAsync(nextOwner, ObservationContainerKind.Saddlebag, cancellationToken).ConfigureAwait(false);
+        if (player.Status is ObservationReadStatus.UnsupportedDatabaseVersion or ObservationReadStatus.Busy or ObservationReadStatus.Unavailable ||
+            saddlebag.Status is ObservationReadStatus.UnsupportedDatabaseVersion or ObservationReadStatus.Busy or ObservationReadStatus.Unavailable)
+            return false;
+        var currentPlayer = player.Observations.Concat(saddlebag.Observations).ToArray();
+        invalidatedScopes.AddRange(currentPlayer.Where(observation => observation.IsStale).Select(observation => observation.Scope));
+        if (changes.Status == InventoryChangeReadStatus.SnapshotRequired)
+            playerBaselines = currentPlayer.Where(observation => !observation.IsStale).ToArray();
+
         var retainerRead = await reader.ReadCurrentRetainerChangesAsync(nextOwner, retainerRevision, cancellationToken).ConfigureAwait(false);
         if (retainerRead.Status is ObservationReadStatus.UnsupportedDatabaseVersion or ObservationReadStatus.Busy or ObservationReadStatus.Unavailable)
             return false;
+        if (retainerRead.CurrentRevision < retainerRevision)
+        {
+            await ResetReaderAsync().ConfigureAwait(false);
+            return false;
+        }
 
         foreach (var observation in retainerRead.Observations)
         {
             var key = CreateScopeKey(observation.Scope);
             if (observation.IsStale)
+            {
                 retainerObservations.Remove(key);
+                invalidatedScopes.Add(observation.Scope);
+            }
             else
                 retainerObservations[key] = observation;
         }
@@ -235,14 +260,15 @@ public sealed class DalamudSharedObservationClient : IAsyncDisposable
         Volatile.Write(ref currentRetainers, nextRetainers);
         PublishRetainersChanged(nextRetainers);
 
-        if (playerBaselines.Count > 0 || playerChanges.Count > 0 || retainerRead.Observations.Count > 0)
+        if (playerBaselines.Count > 0 || playerChanges.Count > 0 || retainerRead.Observations.Count > 0 || invalidatedScopes.Count > 0)
         {
             var delivery = new SharedObservationDelivery(
                 nextOwner,
                 Math.Max(changes.CurrentRevision, retainerRead.CurrentRevision),
                 playerBaselines,
                 playerChanges,
-                retainerRead.Observations.Where(observation => !observation.IsStale).ToArray());
+                retainerRead.Observations.Where(observation => !observation.IsStale).ToArray(),
+                invalidatedScopes.Distinct().ToArray());
             if (options.Deliver is not null)
                 await options.Deliver(delivery, cancellationToken).ConfigureAwait(false);
         }
@@ -250,6 +276,17 @@ public sealed class DalamudSharedObservationClient : IAsyncDisposable
         revision = changes.CurrentRevision;
         retainerRevision = retainerRead.CurrentRevision;
         return true;
+    }
+
+    private async ValueTask ResetReaderAsync()
+    {
+        if (reader is not null)
+            await reader.DisposeAsync().ConfigureAwait(false);
+        reader = null;
+        revision = 0;
+        retainerRevision = 0;
+        retainerObservations.Clear();
+        Volatile.Write(ref currentRetainers, null);
     }
 
     private void PublishRetainersChanged(SharedRetainerObservationSnapshot snapshot)
