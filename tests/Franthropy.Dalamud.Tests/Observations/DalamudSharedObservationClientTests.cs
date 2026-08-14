@@ -70,13 +70,16 @@ public sealed class DalamudSharedObservationClientTests
         client.Refresh();
         await Task.Delay(250);
         Assert.Equal(1, Volatile.Read(ref changedCount));
+        await store.WriteAsync(CreatePlayerInventory(owner, 4, 5334));
+        await Task.Delay(250);
+        Assert.Equal(1, Volatile.Read(ref changedCount));
 
         await store.WriteAsync(Invalidate(
             new ObservationScope(owner, ObservationSubject.Retainer(200, owner), ObservationContainerKind.RetainerInventory),
-            4));
+            5));
         await store.WriteAsync(Invalidate(
             new ObservationScope(owner, ObservationSubject.Character(owner), ObservationContainerKind.PlayerInventory),
-            5));
+            6));
         await invalidated.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         await client.DisposeAsync();
@@ -111,14 +114,14 @@ public sealed class DalamudSharedObservationClientTests
                 ObservationPayloadContracts.Version,
                 new InventoryObservationPayload([10000], [10000], [new InventoryItemObservation(10000, 0, itemId, 3, false)])));
 
-    private static ObservationEnvelope CreatePlayerInventory(ObservationOwner owner, long revision) =>
+    private static ObservationEnvelope CreatePlayerInventory(ObservationOwner owner, long revision, uint itemId = 5333) =>
         new(
             new ObservationScope(owner, ObservationSubject.Character(owner), ObservationContainerKind.PlayerInventory),
             Capture(revision),
             ObservationPayload.Create(
                 ObservationPayloadContracts.PlayerInventory,
                 ObservationPayloadContracts.Version,
-                new InventoryObservationPayload([1], [1], [new InventoryItemObservation(1, 0, 5333, 1, false)])));
+                new InventoryObservationPayload([1], [1], [new InventoryItemObservation(1, 0, itemId, 1, false)])));
 
     private static ObservationEnvelope Invalidate(ObservationScope scope, long revision) =>
         new(

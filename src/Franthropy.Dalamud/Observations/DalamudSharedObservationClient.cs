@@ -274,7 +274,7 @@ public sealed class DalamudSharedObservationClient : IAsyncDisposable
         Volatile.Write(ref currentRetainers, nextRetainers);
         if (previousRetainers is null ||
             previousRetainers.Owner != nextRetainers.Owner ||
-            previousRetainers.Revision != nextRetainers.Revision)
+            retainerRead.Observations.Count > 0)
             PublishRetainersChanged(nextRetainers);
 
         if (playerBaselines.Count > 0 || playerChanges.Count > 0 || retainerRead.Observations.Count > 0 || invalidatedScopes.Count > 0)
