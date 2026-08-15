@@ -12,7 +12,11 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
 {
     private static readonly TimeSpan ApproachTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan ActionThrottle = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan AethernetRetryDelay = TimeSpan.FromSeconds(35);
     private static readonly TimeSpan FlightNavigationStartTimeout = TimeSpan.FromSeconds(10);
+    private static readonly IReadOnlySet<string> PendingAethernetOwnedAddonProtection =
+        new HashSet<string>(StringComparer.Ordinal) { "SelectString" };
+    private const int MaximumAethernetSubmissions = 3;
     private static readonly InventoryType[] PlayerBags =
     [
         InventoryType.Inventory1,
@@ -42,6 +46,8 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     private uint activeNpcId;
     private uint? requestedAetheryteId;
     private uint? requestedAethernetId;
+    private DateTimeOffset? aethernetSubmittedAt;
+    private int aethernetSubmissionCount;
     private bool ownsNavigation;
     private LocalTravelMode? activeTravelMode;
     private DateTimeOffset? navigationSubmittedAt;
@@ -179,7 +185,9 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
             return assessment.State == GilVendorAccessState.Unknown
                 ? new(GilVendorReachState.Waiting, assessment.Message)
                 : new(GilVendorReachState.Unavailable, assessment.Message);
-        var readiness = travelReadiness.Advance();
+        if (utcNow() - approachStartedAt > ApproachTimeout)
+            return new(GilVendorReachState.Unavailable, $"Could not reach {offer.NpcName} within two minutes.");
+        var readiness = travelReadiness.Advance(ProtectedOwnedAddonsForPendingAethernet(requestedAethernetId));
         if (readiness.State is TravelReadinessState.Repairing or TravelReadinessState.Waiting)
             return new(GilVendorReachState.Waiting, readiness.Message);
         if (readiness.State == TravelReadinessState.Blocked)
@@ -188,12 +196,34 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
                 return new(GilVendorReachState.Waiting, "Waiting for the in-progress vendor travel to release the game UI.");
             return new(GilVendorReachState.Failed, readiness.Message);
         }
-        if (utcNow() - approachStartedAt > ApproachTimeout)
-            return new(GilVendorReachState.Unavailable, $"Could not reach {offer.NpcName} within two minutes.");
         if (clientState.TerritoryType != offer.TerritoryId)
         {
             if (assessment.RouteAetheryteId is not { } route)
                 return new(GilVendorReachState.Unavailable, "No live owner-accessible route reaches this vendor.");
+            var aethernetRecovery = DetermineAethernetRecovery(
+                clientState.TerritoryType,
+                offer.TerritoryId,
+                assessment.RouteAetheryteTerritoryId,
+                assessment.RouteAethernetId,
+                requestedAethernetId,
+                aethernetSubmittedAt,
+                aethernetSubmissionCount,
+                utcNow());
+            if (aethernetRecovery == GilVendorAethernetRecoveryState.Exhausted)
+            {
+                return new(
+                    GilVendorReachState.Unavailable,
+                    $"Lifestream did not complete the aethernet leg to {offer.NpcName} after {MaximumAethernetSubmissions} attempts.");
+            }
+            if (aethernetRecovery == GilVendorAethernetRecoveryState.Retry)
+            {
+                requestedAethernetId = null;
+                aethernetSubmittedAt = null;
+                nextActionAt = utcNow();
+                return new(
+                    GilVendorReachState.Waiting,
+                    $"Lifestream released the incomplete aethernet leg; retrying travel to {offer.NpcName} ({aethernetSubmissionCount + 1}/{MaximumAethernetSubmissions}).");
+            }
             switch (DetermineTravelLeg(clientState.TerritoryType, offer.TerritoryId, route,
                         assessment.RouteAethernetId, assessment.RouteAetheryteTerritoryId,
                         requestedAetheryteId, requestedAethernetId))
@@ -232,6 +262,8 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
                         {
                             case AetheryteTravelSubmissionState.Submitted:
                                 requestedAethernetId = aethernetId;
+                                aethernetSubmittedAt = utcNow();
+                                aethernetSubmissionCount++;
                                 nextActionAt = utcNow().Add(ActionThrottle);
                                 travelReadiness.Reset();
                                 break;
@@ -253,6 +285,8 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         {
             requestedAetheryteId = null;
             requestedAethernetId = null;
+            aethernetSubmittedAt = null;
+            aethernetSubmissionCount = 0;
             approachStartedAt = utcNow();
             nextActionAt = DateTimeOffset.MinValue;
             recovery.ResetNavigation();
@@ -385,6 +419,8 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         activeNpcId = 0;
         requestedAetheryteId = null;
         requestedAethernetId = null;
+        aethernetSubmittedAt = null;
+        aethernetSubmissionCount = 0;
         travelReadiness.Reset();
         recovery.Reset();
         localTravel.Reset();
@@ -557,6 +593,34 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     internal static bool ShouldWaitForPendingTravelUi(TravelReadinessResult readiness, bool travelRequestPending) =>
         readiness.State == TravelReadinessState.Blocked && readiness.Code == "UnknownUiOwner" && travelRequestPending;
 
+    internal static IReadOnlySet<string>? ProtectedOwnedAddonsForPendingAethernet(uint? requestedAethernetId) =>
+        requestedAethernetId is null ? null : PendingAethernetOwnedAddonProtection;
+
+    internal static GilVendorAethernetRecoveryState DetermineAethernetRecovery(
+        uint currentTerritoryId,
+        uint targetTerritoryId,
+        uint? routeAetheryteTerritoryId,
+        uint? routeAethernetId,
+        uint? requestedAethernetId,
+        DateTimeOffset? submittedAt,
+        int submissionCount,
+        DateTimeOffset observedAt)
+    {
+        if (currentTerritoryId == targetTerritoryId ||
+            routeAetheryteTerritoryId != currentTerritoryId ||
+            routeAethernetId is null ||
+            requestedAethernetId != routeAethernetId ||
+            submittedAt is null ||
+            observedAt - submittedAt.Value < AethernetRetryDelay)
+        {
+            return GilVendorAethernetRecoveryState.Continue;
+        }
+
+        return submissionCount >= MaximumAethernetSubmissions
+            ? GilVendorAethernetRecoveryState.Exhausted
+            : GilVendorAethernetRecoveryState.Retry;
+    }
+
     internal static GilVendorFlightNavigationState DetermineFlightNavigationState(
         bool ownsNavigation,
         LocalTravelMode? activeTravelMode,
@@ -577,3 +641,4 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
 internal enum GilVendorApproachDecision { Interact, WaitForNpc, StartNavigation, WaitForOwnedRoute, BlockedByAnotherRoute, NavigationUnavailable }
 internal enum GilVendorTravelLeg { InvalidRoute, SubmitAetheryte, AwaitAetheryteArrival, SubmitAethernet, AwaitDestination }
 internal enum GilVendorFlightNavigationState { Continue, AwaitingStart, Downgrade }
+internal enum GilVendorAethernetRecoveryState { Continue, Retry, Exhausted }

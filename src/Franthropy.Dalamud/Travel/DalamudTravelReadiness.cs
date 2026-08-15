@@ -50,9 +50,9 @@ public sealed class DalamudTravelReadiness
         this.stableObservationsRequired = Math.Max(1, stableObservationsRequired);
     }
 
-    public TravelReadinessResult Advance()
+    public TravelReadinessResult Advance(IReadOnlySet<string>? protectedOwnedAddonNames = null)
     {
-        var closed = CloseOwnedAddons();
+        var closed = CloseOwnedAddons(protectedOwnedAddonNames);
         if (closed.Count > 0)
         {
             stableObservations = 0;
@@ -96,11 +96,13 @@ public sealed class DalamudTravelReadiness
 
     public void Reset() => stableObservations = 0;
 
-    private unsafe IReadOnlyList<string> CloseOwnedAddons()
+    private unsafe IReadOnlyList<string> CloseOwnedAddons(IReadOnlySet<string>? protectedOwnedAddonNames)
     {
         var closed = new List<string>();
         foreach (var addonName in ownedAddonNames)
         {
+            if (!ShouldCloseOwnedAddon(addonName, protectedOwnedAddonNames))
+                continue;
             var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
             if (addon is null || !addon->IsReady || !addon->IsVisible)
                 continue;
@@ -109,6 +111,11 @@ public sealed class DalamudTravelReadiness
         }
         return closed;
     }
+
+    internal static bool ShouldCloseOwnedAddon(
+        string addonName,
+        IReadOnlySet<string>? protectedOwnedAddonNames) =>
+        protectedOwnedAddonNames is null || !protectedOwnedAddonNames.Contains(addonName);
 
     private TravelReadinessResult Wait(string code, string message)
     {
