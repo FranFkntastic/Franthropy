@@ -87,30 +87,41 @@ public sealed class GilVendorBuyCoordinatorTests
     }
 
     [Fact]
-    public void Indeterminate_evidence_stops_without_retry()
+    public void One_sided_exact_evidence_reconciles_without_retrying()
     {
+        var now = new DateTimeOffset(2026, 8, 15, 0, 0, 0, TimeSpan.Zero);
         var runtime = new ScriptedRuntime { MutateGilOnSubmit = false };
-        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime, () => now);
         Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
 
-        TickUntilTerminal(coordinator, 10);
+        TickUntilPhase(coordinator, GilVendorBuyPhase.VerifyReceipt);
+        coordinator.Tick(Context);
+        Assert.Equal(GilVendorBuyPhase.VerifyReceipt, coordinator.ActiveRun!.Phase);
+        now += TimeSpan.FromSeconds(4);
+        coordinator.Tick(Context);
 
-        Assert.Equal(GilVendorBuyPhase.Indeterminate, coordinator.ActiveRun!.Phase);
+        Assert.Equal(GilVendorBuyPhase.ReconcileReceipt, coordinator.ActiveRun!.Phase);
+        Assert.True(coordinator.IsRunning);
         Assert.Equal(1, runtime.SubmitCalls);
+        Assert.NotNull(coordinator.ActiveRun.ArmedPurchase);
         Assert.Empty(coordinator.ActiveRun.Receipts);
+        Assert.Equal(1, runtime.EndCalls);
     }
 
     [Fact]
-    public void Delayed_exact_receipt_repairs_indeterminate_run_without_resubmitting()
+    public void Delayed_exact_receipt_repairs_run_automatically_without_resubmitting()
     {
+        var now = new DateTimeOffset(2026, 8, 15, 0, 0, 0, TimeSpan.Zero);
         var runtime = new ScriptedRuntime { MutateGilOnSubmit = false };
-        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime, () => now);
         Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
-        TickUntilTerminal(coordinator, 10);
-        Assert.Equal(GilVendorBuyPhase.Indeterminate, coordinator.ActiveRun!.Phase);
+        TickUntilPhase(coordinator, GilVendorBuyPhase.VerifyReceipt);
+        now += TimeSpan.FromSeconds(4);
+        coordinator.Tick(Context);
+        Assert.Equal(GilVendorBuyPhase.ReconcileReceipt, coordinator.ActiveRun!.Phase);
 
         runtime.Gil -= 20;
-        Assert.True(coordinator.TryReconcileIndeterminate(out var message), message);
+        coordinator.Tick(Context);
 
         Assert.Equal(GilVendorBuyPhase.Completed, coordinator.ActiveRun!.Phase);
         Assert.Equal(1, runtime.SubmitCalls);
@@ -148,7 +159,9 @@ public sealed class GilVendorBuyCoordinatorTests
         runtime.Counts[1] = 4;
         var coordinator = new GilVendorBuyCoordinator(store, runtime);
 
-        Assert.True(coordinator.TryReconcileIndeterminate(out var message), message);
+        Assert.Equal(GilVendorBuyPhase.ReconcileReceipt, coordinator.ActiveRun!.Phase);
+        Assert.Equal(0, runtime.BeginCalls);
+        coordinator.Tick(Context);
 
         Assert.Equal(GilVendorBuyPhase.RefreshPreconditions, coordinator.ActiveRun!.Phase);
         Assert.Equal(1, runtime.BeginCalls);
@@ -208,20 +221,23 @@ public sealed class GilVendorBuyCoordinatorTests
     [Fact]
     public void Delayed_receipt_checks_every_target_before_completing_multi_line_run()
     {
+        var now = new DateTimeOffset(2026, 8, 15, 0, 0, 0, TimeSpan.Zero);
         var runtime = new ScriptedRuntime { MutateGilOnSubmit = false };
         runtime.Counts[2] = 5;
-        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime, () => now);
         Assert.True(coordinator.TryStart(
             Plan(
                 [Line(1, 2, targetTotal: 2), Line(2, 5, targetTotal: 5)],
                 [Stop(100, 1)]),
             Context,
             out var error), error);
-        TickUntilTerminal(coordinator, 10);
-        Assert.Equal(GilVendorBuyPhase.Indeterminate, coordinator.ActiveRun!.Phase);
+        TickUntilPhase(coordinator, GilVendorBuyPhase.VerifyReceipt);
+        now += TimeSpan.FromSeconds(4);
+        coordinator.Tick(Context);
+        Assert.Equal(GilVendorBuyPhase.ReconcileReceipt, coordinator.ActiveRun!.Phase);
 
         runtime.Gil -= 20;
-        Assert.True(coordinator.TryReconcileIndeterminate(out var message), message);
+        coordinator.Tick(Context);
 
         Assert.Equal(GilVendorBuyPhase.Completed, coordinator.ActiveRun!.Phase);
         Assert.Equal(1, runtime.SubmitCalls);
@@ -592,6 +608,27 @@ public sealed class GilVendorBuyCoordinatorTests
     }
 
     [Fact]
+    public void Retryable_route_exhaustion_retries_without_invalidating_vendor()
+    {
+        var runtime = new ScriptedRuntime();
+        runtime.ReachResults.Enqueue(new(GilVendorReachState.Retryable, "Aethernet attempt exhausted."));
+        runtime.ReachResults.Enqueue(new(GilVendorReachState.ShopOpen, "Recovered shop open."));
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime);
+
+        Assert.True(coordinator.TryStart(
+            Plan([Line(1, 4, targetTotal: 4)], [Stop(100, 1)]),
+            Context,
+            out var error), error);
+        TickUntilTerminal(coordinator, 30);
+
+        Assert.Equal(GilVendorBuyPhase.Completed, coordinator.ActiveRun!.Phase);
+        Assert.False(coordinator.ActiveRun.Lines[0].VendorUnavailable);
+        Assert.Equal(2, runtime.ReachCalls);
+        Assert.True(runtime.ResetCalls >= 2);
+        Assert.Equal(4, Assert.Single(coordinator.ActiveRun.Receipts).Quantity);
+    }
+
+    [Fact]
     public void Unreachable_vendor_without_alternative_fails_instead_of_completing_zero()
     {
         var runtime = new ScriptedRuntime();
@@ -703,6 +740,8 @@ public sealed class GilVendorBuyCoordinatorTests
         public Exception? SubmitException { get; set; }
         public Exception? BeginException { get; set; }
         public int BeginCalls { get; private set; }
+        public int EndCalls { get; private set; }
+        public int ResetCalls { get; private set; }
         public int ReachCalls { get; private set; }
         public int ShopReadCalls { get; private set; }
         public int SubmitCalls { get; private set; }
@@ -735,7 +774,7 @@ public sealed class GilVendorBuyCoordinatorTests
                 : ReachResults.Dequeue();
         }
 
-        public void ResetVendorApproach() { }
+        public void ResetVendorApproach() => ResetCalls++;
 
         public GilVendorShopReadResult ReadShopRows()
         {
@@ -771,6 +810,6 @@ public sealed class GilVendorBuyCoordinatorTests
             if (BeginException is not null)
                 throw BeginException;
         }
-        public void EndAutomation() { }
+        public void EndAutomation() => EndCalls++;
     }
 }

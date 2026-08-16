@@ -71,11 +71,21 @@ public sealed class GilVendorEngineTests
             request,
             new(10, 1_000),
             new(13, 945));
+        var itemLag = GilVendorPurchaseEvidenceClassifier.Classify(
+            request,
+            new(10, 1_000),
+            new(10, 946));
+        var gilLag = GilVendorPurchaseEvidenceClassifier.Classify(
+            request,
+            new(10, 1_000),
+            new(13, 1_000));
 
         Assert.Equal(GilVendorPurchaseEvidence.Pending, pending.Evidence);
         Assert.Equal(GilVendorPurchaseEvidence.Verified, verified.Evidence);
         Assert.Equal(54UL, verified.Receipt!.SpentGil);
         Assert.Equal(GilVendorPurchaseEvidence.Indeterminate, mismatch.Evidence);
+        Assert.Equal(GilVendorPurchaseEvidence.Reconciling, itemLag.Evidence);
+        Assert.Equal(GilVendorPurchaseEvidence.Reconciling, gilLag.Evidence);
     }
 
     [Fact]

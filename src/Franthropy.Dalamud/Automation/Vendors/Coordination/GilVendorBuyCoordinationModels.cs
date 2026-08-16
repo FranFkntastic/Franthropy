@@ -15,6 +15,7 @@ public enum GilVendorBuyPhase
     Stopped,
     Failed,
     Indeterminate,
+    ReconcileReceipt,
 }
 
 public sealed class GilVendorBuyPlan
@@ -185,6 +186,7 @@ public enum GilVendorReachState
     ShopOpen,
     Unavailable,
     Failed,
+    Retryable,
 }
 
 public sealed record GilVendorReachResult(GilVendorReachState State, string Message);

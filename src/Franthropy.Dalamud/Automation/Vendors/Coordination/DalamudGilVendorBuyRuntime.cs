@@ -186,7 +186,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
                 ? new(GilVendorReachState.Waiting, assessment.Message)
                 : new(GilVendorReachState.Unavailable, assessment.Message);
         if (utcNow() - approachStartedAt > ApproachTimeout)
-            return new(GilVendorReachState.Unavailable, $"Could not reach {offer.NpcName} within two minutes.");
+            return new(GilVendorReachState.Retryable, $"Could not reach {offer.NpcName} within two minutes; releasing this route attempt for automatic recovery.");
         var readiness = travelReadiness.Advance(ProtectedOwnedAddonsForPendingAethernet(requestedAethernetId));
         if (readiness.State is TravelReadinessState.Repairing or TravelReadinessState.Waiting)
             return new(GilVendorReachState.Waiting, readiness.Message);
@@ -212,8 +212,8 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
             if (aethernetRecovery == GilVendorAethernetRecoveryState.Exhausted)
             {
                 return new(
-                    GilVendorReachState.Unavailable,
-                    $"Lifestream did not complete the aethernet leg to {offer.NpcName} after {MaximumAethernetSubmissions} attempts.");
+                    GilVendorReachState.Retryable,
+                    $"Lifestream did not complete the aethernet leg to {offer.NpcName} after {MaximumAethernetSubmissions} attempts; releasing this route attempt for automatic recovery.");
             }
             if (aethernetRecovery == GilVendorAethernetRecoveryState.Retry)
             {
