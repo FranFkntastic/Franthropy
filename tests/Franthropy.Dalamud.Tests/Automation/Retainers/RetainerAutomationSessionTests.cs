@@ -354,6 +354,31 @@ public sealed class RetainerAutomationSessionTests
         Assert.False(RetainerMarketListingObservation.Matches(missingPrice, 5333, 1, false, 1_234_581));
     }
 
+    [Fact]
+    public void MarketListingRemovalObservation_RequiresListingAbsenceAndExactPlayerIncrement()
+    {
+        var expected = new RetainerMarketListingTarget(4, 5333, 2, false, 1_234_581);
+
+        Assert.True(RetainerMarketListingRemovalObservation.Matches(expected, 0, 0, false, 0, 10, 12));
+        Assert.False(RetainerMarketListingRemovalObservation.Matches(expected, 0, 0, false, 0, 10, 11));
+        Assert.False(RetainerMarketListingRemovalObservation.Matches(expected, 5333, 2, false, 1_234_581, 10, 12));
+    }
+
+    [Fact]
+    public async Task MarketListingRemoval_RejectsUnsupportedBuildBeforeTouchingFrameworkState()
+    {
+        var session = CreateSession(
+            "unsupported-build",
+            (method, _) => throw new InvalidOperationException($"Unexpected dependency call: {method.Name}."));
+        var listing = new RetainerMarketListingTarget(4, 5333, 1, false, 1_234_581);
+
+        var result = await session.RemoveMarketListingToPlayerInventoryAsync(listing);
+
+        Assert.Equal(RetainerMarketListingRemovalOutcome.FailedBeforeSend, result.Outcome);
+        Assert.False(result.RequestSent);
+        Assert.Equal("UnsupportedGameBuild", result.Code);
+    }
+
     [Theory]
     [InlineData(4, false, 1_234_581, true)]
     [InlineData(5, false, 1_234_581, false)]

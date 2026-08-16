@@ -123,6 +123,32 @@ public sealed record RetainerMarketListingPostResult(
         new(RetainerMarketListingPostOutcome.Indeterminate, listing, code, message);
 }
 
+public enum RetainerMarketListingRemovalOutcome
+{
+    FailedBeforeSend,
+    Committed,
+    Indeterminate,
+}
+
+public sealed record RetainerMarketListingRemovalResult(
+    RetainerMarketListingRemovalOutcome Outcome,
+    RetainerMarketListingTarget Listing,
+    string Code,
+    string Message)
+{
+    public bool Success => Outcome == RetainerMarketListingRemovalOutcome.Committed;
+    public bool RequestSent => Outcome != RetainerMarketListingRemovalOutcome.FailedBeforeSend;
+
+    public static RetainerMarketListingRemovalResult Succeeded(RetainerMarketListingTarget listing) =>
+        new(RetainerMarketListingRemovalOutcome.Committed, listing, "RetainerMarketListingRemoved", "Removed the exact retainer market listing to player inventory.");
+
+    public static RetainerMarketListingRemovalResult Failed(RetainerMarketListingTarget listing, string code, string message) =>
+        new(RetainerMarketListingRemovalOutcome.FailedBeforeSend, listing, code, message);
+
+    public static RetainerMarketListingRemovalResult Indeterminate(RetainerMarketListingTarget listing, string code, string message) =>
+        new(RetainerMarketListingRemovalOutcome.Indeterminate, listing, code, message);
+}
+
 public sealed class RetainerMarketMutationIndeterminateException : OperationCanceledException
 {
     public RetainerMarketMutationIndeterminateException(
@@ -184,6 +210,9 @@ public interface IRetainerAutomationSession
         DalamudInventoryStack source,
         int quantity,
         uint unitPrice,
+        CancellationToken cancellationToken = default);
+    Task<RetainerMarketListingRemovalResult> RemoveMarketListingToPlayerInventoryAsync(
+        RetainerMarketListingTarget listing,
         CancellationToken cancellationToken = default);
     Task<RetainerSellingUiObservation> ObserveSellingUiAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> ReturnToRetainerListAsync(CancellationToken cancellationToken = default);
@@ -295,6 +324,25 @@ public static class RetainerMarketListingObservation
         expected.IsHq == observedIsHq &&
         expected.UnitPrice is > 0 &&
         expected.UnitPrice == observedUnitPrice;
+}
+
+public static class RetainerMarketListingRemovalObservation
+{
+    public static bool Matches(
+        RetainerMarketListingTarget expected,
+        uint observedSlotItemId,
+        int observedSlotQuantity,
+        bool observedSlotIsHq,
+        ulong observedUnitPrice,
+        int playerVariantQuantityBefore,
+        int playerVariantQuantityAfter) =>
+        !RetainerMarketListingObservation.Matches(
+            expected,
+            observedSlotItemId,
+            observedSlotQuantity,
+            observedSlotIsHq,
+            observedUnitPrice) &&
+        playerVariantQuantityAfter - playerVariantQuantityBefore == expected.Quantity;
 }
 
 internal static class RetainerMarketPriceCommitObservation
