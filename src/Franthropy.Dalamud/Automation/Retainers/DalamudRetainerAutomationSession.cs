@@ -62,6 +62,12 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         string Code,
         string Message);
 
+    private sealed record MarketListingRemovalDispatchResult(
+        MarketListingPostDispatchOutcome Outcome,
+        int PlayerVariantQuantityBefore,
+        string Code,
+        string Message);
+
     public DalamudRetainerAutomationSession(
         IFramework framework,
         IGameGui gameGui,
@@ -567,6 +573,65 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 expected,
                 "RetainerMarketListingPostIndeterminate",
                 $"The listing request may have been sent before an observation fault: {exception.Message} Re-scan before retrying.");
+        }
+    }
+
+    public async Task<RetainerMarketListingRemovalResult> RemoveMarketListingToPlayerInventoryAsync(
+        RetainerMarketListingTarget listing,
+        CancellationToken cancellationToken = default)
+    {
+        var compatibility = EvaluatePatchCompatibility();
+        if (!compatibility.IsApproved)
+            return RetainerMarketListingRemovalResult.Failed(listing, GamePatchCompatibility.FailureCode, compatibility.Message);
+
+        var verified = await framework.RunOnTick(
+            () => VerifyActive(active?.RetainerId ?? 0),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (!verified.Success)
+            return RetainerMarketListingRemovalResult.Failed(listing, verified.Code, verified.Message);
+
+        var requestMayHaveBeenSent = false;
+        try
+        {
+            var started = await framework.RunOnTick(
+                () => StartMarketListingRemoval(listing, () => requestMayHaveBeenSent = true),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (started.Outcome == MarketListingPostDispatchOutcome.FailedBeforeSend)
+                return RetainerMarketListingRemovalResult.Failed(listing, started.Code, started.Message);
+            if (started.Outcome == MarketListingPostDispatchOutcome.Indeterminate)
+                return RetainerMarketListingRemovalResult.Indeterminate(listing, started.Code, started.Message);
+
+            for (var attempt = 0; attempt < 180; attempt++)
+            {
+                var committed = await framework.RunOnTick(
+                    () => ObserveMarketListingRemoval(listing, started.PlayerVariantQuantityBefore),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (committed)
+                    return RetainerMarketListingRemovalResult.Succeeded(listing);
+
+                await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
+            }
+
+            return RetainerMarketListingRemovalResult.Indeterminate(
+                listing,
+                "RetainerMarketListingRemovalIndeterminate",
+                "The removal request was sent, but its exact listing removal and player-inventory increment were not observed. Re-scan before retrying.");
+        }
+        catch (OperationCanceledException exception) when (requestMayHaveBeenSent)
+        {
+            throw new RetainerMarketMutationIndeterminateException(
+                "RetainerMarketListingRemovalCancelledIndeterminate",
+                "Cancellation occurred after the removal request may have been sent. Re-scan before deciding whether to retry.",
+                listing,
+                exception,
+                cancellationToken);
+        }
+        catch (Exception exception) when (requestMayHaveBeenSent)
+        {
+            return RetainerMarketListingRemovalResult.Indeterminate(
+                listing,
+                "RetainerMarketListingRemovalIndeterminate",
+                $"The removal request may have been sent before an observation fault: {exception.Message} Re-scan before retrying.");
         }
     }
 
@@ -1226,6 +1291,89 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 $"The listing call faulted after dispatch began: {exception.Message} Re-scan before retrying.");
         }
     }
+
+    private unsafe MarketListingRemovalDispatchResult StartMarketListingRemoval(
+        RetainerMarketListingTarget listing,
+        System.Action markDispatchStarted)
+    {
+        if (listing.Quantity <= 0 || listing.UnitPrice is not > 0 or > RetainerMarketPricePolicy.MaximumUnitPrice)
+        {
+            return new(
+                MarketListingPostDispatchOutcome.FailedBeforeSend,
+                0,
+                "InvalidObservedMarketListing",
+                "Removal requires an exact observed listing with positive quantity and valid unit price.");
+        }
+
+        var manager = InventoryManager.Instance();
+        var marketContainer = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
+        if (manager == null || marketContainer == null || !marketContainer->IsLoaded)
+        {
+            return new(
+                MarketListingPostDispatchOutcome.FailedBeforeSend,
+                0,
+                "RetainerMarketInventoryUnavailable",
+                "The live retainer market inventory is unavailable.");
+        }
+        if (listing.SlotIndex < 0 || listing.SlotIndex >= marketContainer->Size ||
+            !MatchesMarketListing(manager, marketContainer, listing.SlotIndex, listing))
+        {
+            return new(
+                MarketListingPostDispatchOutcome.FailedBeforeSend,
+                0,
+                "RetainerMarketListingChanged",
+                "The exact observed retainer market listing changed before removal.");
+        }
+
+        var playerQuantityBefore = CountPlayerVariant(listing.ItemId, listing.IsHq);
+        try
+        {
+            markDispatchStarted();
+            manager->MoveFromRetainerMarketToPlayerInventory(
+                InventoryType.RetainerMarket,
+                checked((ushort)listing.SlotIndex),
+                checked((uint)listing.Quantity));
+            return new(
+                MarketListingPostDispatchOutcome.Sent,
+                playerQuantityBefore,
+                "RetainerMarketListingRemovalSent",
+                "The exact listing removal was sent once; awaiting its live postcondition.");
+        }
+        catch (Exception exception)
+        {
+            return new(
+                MarketListingPostDispatchOutcome.Indeterminate,
+                playerQuantityBefore,
+                "RetainerMarketListingRemovalDispatchIndeterminate",
+                $"The removal call faulted after dispatch began: {exception.Message} Re-scan before retrying.");
+        }
+    }
+
+    private static unsafe bool ObserveMarketListingRemoval(
+        RetainerMarketListingTarget expected,
+        int playerQuantityBefore)
+    {
+        var manager = InventoryManager.Instance();
+        var container = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
+        if (manager == null || container == null || !container->IsLoaded ||
+            expected.SlotIndex < 0 || expected.SlotIndex >= container->Size)
+            return false;
+
+        var slot = container->GetInventorySlot(expected.SlotIndex);
+        return RetainerMarketListingRemovalObservation.Matches(
+            expected,
+            slot == null ? 0 : slot->ItemId,
+            slot == null ? 0 : checked((int)slot->Quantity),
+            slot != null && slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality),
+            manager->GetRetainerMarketPrice(checked((short)expected.SlotIndex)),
+            playerQuantityBefore,
+            CountPlayerVariant(expected.ItemId, expected.IsHq));
+    }
+
+    private static int CountPlayerVariant(uint itemId, bool isHighQuality) =>
+        DalamudInventoryStackScanner.ScanLoadedStacks(PlayerOrdinaryItemContainers, new HashSet<uint> { itemId })
+            .Where(stack => stack.IsHighQuality == isHighQuality)
+            .Sum(stack => stack.Quantity);
 
     private static unsafe bool ObserveMarketListingPost(
         DalamudInventoryStack source,
