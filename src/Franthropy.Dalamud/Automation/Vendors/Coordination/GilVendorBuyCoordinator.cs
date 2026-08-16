@@ -23,7 +23,13 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
         this.fallbackReplanner = fallbackReplanner;
         activeRun = store.LoadCurrent() is { } loaded ? CloneRun(loaded) : null;
-        if (IsRunning)
+        if (activeRun is { Phase: GilVendorBuyPhase.Indeterminate, ArmedPurchase: not null } legacy)
+        {
+            legacy.Phase = GilVendorBuyPhase.ReconcileReceipt;
+            legacy.Message = "Recovering the persisted uncertain vendor purchase without resubmitting it.";
+            Persist();
+        }
+        if (activeRun is { } run && RequiresAutomationOwnership(run.Phase))
             runtime.BeginAutomation();
     }
 
@@ -34,7 +40,8 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         GilVendorBuyPhase.ReachVendor or
         GilVendorBuyPhase.ValidateShop or
         GilVendorBuyPhase.PurchaseLine or
-        GilVendorBuyPhase.VerifyReceipt;
+        GilVendorBuyPhase.VerifyReceipt or
+        GilVendorBuyPhase.ReconcileReceipt;
 
     public bool TryStart(GilVendorBuyPlan plan, string contextSignature, out string error)
     {
@@ -132,6 +139,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             case GilVendorBuyPhase.ValidateShop: TickValidateShop(run); break;
             case GilVendorBuyPhase.PurchaseLine: TickPurchaseLine(run); break;
             case GilVendorBuyPhase.VerifyReceipt: TickVerifyReceipt(run); break;
+            case GilVendorBuyPhase.ReconcileReceipt: TickReconcileReceipt(run); break;
         }
     }
 
@@ -164,7 +172,8 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             ? GilVendorBuyPhase.RefreshPreconditions
             : run.ResumePhase;
         run.Message = "Vendor buy resumed.";
-        runtime.BeginAutomation();
+        if (RequiresAutomationOwnership(run.Phase))
+            runtime.BeginAutomation();
         Persist();
         error = string.Empty;
         return true;
@@ -178,7 +187,8 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         if (run.ArmedPurchase is not null)
         {
             run.StopRequested = true;
-            run.Phase = GilVendorBuyPhase.VerifyReceipt;
+            if (run.Phase != GilVendorBuyPhase.ReconcileReceipt)
+                run.Phase = GilVendorBuyPhase.VerifyReceipt;
             run.Message = "Stop requested; reconciling the already-submitted purchase before stopping.";
             Persist();
             return true;
@@ -198,7 +208,8 @@ public sealed class GilVendorBuyCoordinator : IDisposable
     /// </summary>
     public bool TryReconcileIndeterminate(out string message)
     {
-        if (activeRun is not { Phase: GilVendorBuyPhase.Indeterminate, ArmedPurchase: { } intent } run)
+        if (activeRun is not { ArmedPurchase: { } intent } run ||
+            run.Phase is not (GilVendorBuyPhase.Indeterminate or GilVendorBuyPhase.ReconcileReceipt))
         {
             message = "No indeterminate armed vendor purchase is available to reconcile.";
             return false;
@@ -226,6 +237,12 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             request,
             new(intent.BeforeItemCount, intent.BeforeGil),
             new(snapshot.ItemCounts.GetValueOrDefault(line.ItemId), snapshot.Gil.Value));
+        if (evidence.Evidence == GilVendorPurchaseEvidence.Indeterminate)
+        {
+            Fail(GilVendorBuyPhase.Indeterminate, $"{line.ItemName}: {evidence.Message}");
+            message = run.Message;
+            return false;
+        }
         if (evidence.Evidence != GilVendorPurchaseEvidence.Verified)
         {
             message = evidence.Message;
@@ -356,6 +373,12 @@ public sealed class GilVendorBuyCoordinator : IDisposable
                 ReplanOrSkipCurrentStop(run, result.Message, out var message);
                 run.Phase = GilVendorBuyPhase.RefreshPreconditions;
                 run.Message = message;
+                runtime.ResetVendorApproach();
+                Persist();
+                return;
+            case GilVendorReachState.Retryable:
+                run.Phase = GilVendorBuyPhase.RefreshPreconditions;
+                run.Message = result.Message;
                 runtime.ResetVendorApproach();
                 Persist();
                 return;
@@ -554,6 +577,19 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             Fail(GilVendorBuyPhase.Indeterminate, $"{line.ItemName}: {evidence.Message}");
             return;
         }
+        if (evidence.Evidence == GilVendorPurchaseEvidence.Reconciling)
+        {
+            if (utcNow().UtcDateTime - intent.ArmedAtUtc < ReceiptTimeout)
+            {
+                run.Message = $"{line.ItemName}: {evidence.Message}";
+                return;
+            }
+            run.Phase = GilVendorBuyPhase.ReconcileReceipt;
+            run.Message = $"Reconciling {line.ItemName} without resubmitting the armed purchase. {evidence.Message}";
+            Persist();
+            CleanupAutomation();
+            return;
+        }
         if (utcNow().UtcDateTime - intent.ArmedAtUtc < ReceiptTimeout)
             return;
         if (run.StopRequested)
@@ -572,6 +608,16 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             return;
         }
         Fail(GilVendorBuyPhase.Failed, $"No {line.ItemName} mutation was observed after the single safe retry.");
+    }
+
+    private void TickReconcileReceipt(GilVendorBuyRunSnapshot run)
+    {
+        if (TryReconcileIndeterminate(out var message))
+            return;
+        if (run.Phase != GilVendorBuyPhase.ReconcileReceipt)
+            return;
+        run.Message = $"Reconciling the armed vendor purchase without resubmitting it. {message}";
+        Persist();
     }
 
     private void ReplanOrSkipCurrentStop(
@@ -740,6 +786,13 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         var spend = run.Receipts.Count == 0 ? "No gil was spent." : "Verified purchases from earlier stops were preserved.";
         return $"Couldn't reach {npcName}. {spend} {reason}".Trim();
     }
+
+    private static bool RequiresAutomationOwnership(GilVendorBuyPhase phase) => phase is
+        GilVendorBuyPhase.RefreshPreconditions or
+        GilVendorBuyPhase.ReachVendor or
+        GilVendorBuyPhase.ValidateShop or
+        GilVendorBuyPhase.PurchaseLine or
+        GilVendorBuyPhase.VerifyReceipt;
 
     private static bool SameVendor(GilVendorBuyOfferSnapshot left, GilVendorBuyOfferSnapshot right) =>
         left.NpcId == right.NpcId && left.ShopId == right.ShopId && left.TerritoryId == right.TerritoryId;

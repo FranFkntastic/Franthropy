@@ -108,6 +108,15 @@ public static class GilVendorPurchaseEvidenceClassifier
                     after.Gil));
         }
 
+        if ((itemDelta == request.Quantity && after.Gil == before.Gil) ||
+            (itemDelta == 0 && gilDelta == request.MaxTotalGil))
+        {
+            return new(
+                GilVendorPurchaseEvidence.Reconciling,
+                "PartialExactDelta",
+                $"Observed one exact side of the purchase receipt: item delta {itemDelta} and gil delta {gilDelta}; waiting for {request.Quantity} and {request.MaxTotalGil}.");
+        }
+
         return new(
             GilVendorPurchaseEvidence.Indeterminate,
             "DeltaMismatch",

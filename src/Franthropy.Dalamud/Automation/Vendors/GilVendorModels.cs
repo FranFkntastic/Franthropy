@@ -151,6 +151,7 @@ public enum GilVendorPurchaseEvidence
     Pending,
     Verified,
     Indeterminate,
+    Reconciling,
 }
 
 public sealed record GilVendorPurchaseReceipt(
