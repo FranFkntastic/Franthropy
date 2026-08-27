@@ -75,8 +75,14 @@ public static class DalamudGilVendorCatalogBuilder
         var items = dataManager.GetExcelSheet<Item>()
             .Where(row => row.RowId != 0)
             .ToDictionary(row => row.RowId);
+        var routeTerritoryIds = locations.Values
+            .SelectMany(npcLocations => npcLocations)
+            .Select(location => location.TerritoryId)
+            .Distinct()
+            .ToHashSet();
 
         var offers = new List<GilVendorOffer>();
+        var pendingOffers = new List<GilVendorOffer>();
         foreach (var shop in dataManager.GetSubrowExcelSheet<GilShopItem>())
         {
             if (!shopNpcs.TryGetValue(shop.RowId, out var npcs))
@@ -95,14 +101,38 @@ public static class DalamudGilVendorCatalogBuilder
                 foreach (var (npcId, requiredQuestIds) in npcs)
                 {
                     if (!npcNames.TryGetValue(npcId, out var npcName) ||
-                        string.IsNullOrWhiteSpace(npcName) ||
-                        !locations.TryGetValue(npcId, out var npcLocations))
+                        string.IsNullOrWhiteSpace(npcName))
                     {
+                        continue;
+                    }
+
+                    if (!locations.TryGetValue(npcId, out var npcLocations))
+                    {
+                        // Dynamically spawned vendor with no static placement:
+                        // remember the offer without a location so a live
+                        // observation can promote it later.
+                        pendingOffers.Add(new(
+                            itemId,
+                            item.Name.ToString(),
+                            item.Icon,
+                            item.PriceMid,
+                            shop.RowId,
+                            shopRowIndex,
+                            npcId,
+                            npcName,
+                            0,
+                            default,
+                            [])
+                        {
+                            RequiredQuestIds = requiredQuestIds.Order().ToArray(),
+                        });
                         continue;
                     }
 
                     foreach (var location in npcLocations)
                     {
+                        if (!routeTerritoryIds.Contains(location.TerritoryId))
+                            continue;
                         var routes = travelRoutes[location.TerritoryId];
                         offers.Add(new(
                             itemId,
@@ -127,7 +157,27 @@ public static class DalamudGilVendorCatalogBuilder
             }
         }
 
-        return GilVendorCatalog.Create(offers);
+        return GilVendorCatalog.Create(offers, pendingOffers);
+    }
+
+    /// <summary>
+    /// Resolves travel routes for a territory observed at runtime, so callers can
+    /// promote pending vendors to executable offers with live locations.
+    /// </summary>
+    public static IReadOnlyList<GilVendorTravelRoute> ResolveTravelRoutesForTerritory(
+        IDataManager dataManager,
+        uint targetTerritoryId)
+    {
+        ArgumentNullException.ThrowIfNull(dataManager);
+        var nodes = dataManager.GetExcelSheet<Aetheryte>()
+            .Where(row => row.RowId != 0 && row.Territory.RowId != 0)
+            .Select(row => new GilVendorAetheryteNode(
+                row.RowId,
+                row.Territory.RowId,
+                row.AethernetGroup,
+                row.IsAetheryte))
+            .ToArray();
+        return ResolveTravelRoutes(targetTerritoryId, nodes);
     }
 
     internal static IReadOnlyList<GilVendorTravelRoute> ResolveTravelRoutes(

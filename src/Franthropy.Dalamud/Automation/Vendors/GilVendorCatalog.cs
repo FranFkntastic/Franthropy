@@ -3,17 +3,48 @@ namespace Franthropy.Dalamud.Automation.Vendors;
 public sealed class GilVendorCatalog
 {
     private readonly Dictionary<uint, IReadOnlyList<GilVendorOffer>> offersByItemId;
+    private readonly Dictionary<uint, IReadOnlyList<GilVendorOffer>> pendingByItemId;
 
-    private GilVendorCatalog(Dictionary<uint, IReadOnlyList<GilVendorOffer>> offersByItemId)
+    private GilVendorCatalog(
+        Dictionary<uint, IReadOnlyList<GilVendorOffer>> offersByItemId,
+        Dictionary<uint, IReadOnlyList<GilVendorOffer>> pendingByItemId)
     {
         this.offersByItemId = offersByItemId;
+        this.pendingByItemId = pendingByItemId;
     }
 
     public static GilVendorCatalog Create(IEnumerable<GilVendorOffer> offers)
     {
+        return Create(offers, []);
+    }
+
+    /// <summary>
+    /// Builds the catalog from offers with resolved locations plus offers whose
+    /// vendor NPC has no static location yet. Pending offers are remembered so a
+    /// dynamically spawned vendor becomes executable the moment an observed
+    /// location fills in its territory and position.
+    /// </summary>
+    public static GilVendorCatalog Create(
+        IEnumerable<GilVendorOffer> offers,
+        IEnumerable<GilVendorOffer> pendingLocationOffers)
+    {
         ArgumentNullException.ThrowIfNull(offers);
-        return new(offers
-            .Where(offer => offer.IsExecutableOrdinaryGilOffer)
+        ArgumentNullException.ThrowIfNull(pendingLocationOffers);
+        return new(
+            Index(offers.Where(offer => offer.IsExecutableOrdinaryGilOffer)),
+            Index(pendingLocationOffers.Where(offer => IsPendingExecutable(offer))));
+    }
+
+    private static bool IsPendingExecutable(GilVendorOffer offer) =>
+        offer.ItemId != 0 &&
+        !string.IsNullOrWhiteSpace(offer.ItemName) &&
+        offer.UnitPriceGil != 0 &&
+        offer.ShopId != 0 &&
+        offer.NpcId != 0 &&
+        !string.IsNullOrWhiteSpace(offer.NpcName);
+
+    private static Dictionary<uint, IReadOnlyList<GilVendorOffer>> Index(IEnumerable<GilVendorOffer> offers) =>
+        offers
             .Distinct()
             .GroupBy(offer => offer.ItemId)
             .ToDictionary(
@@ -24,11 +55,62 @@ public sealed class GilVendorCatalog
                     .ThenBy(offer => offer.NpcId)
                     .ThenBy(offer => offer.ShopId)
                     .ThenBy(offer => offer.TerritoryId)
-                    .ToArray()));
-    }
+                    .ToArray());
 
     public IReadOnlyList<GilVendorOffer> FindOffers(uint itemId) =>
         offersByItemId.TryGetValue(itemId, out var offers) ? offers : [];
+
+    /// <summary>
+    /// Offers for items whose vendor NPC has no static location yet, keyed by
+    /// ENpcBase id. When the observer reports that NPC's live territory and
+    /// position, its pending offers graduate into the executable catalog.
+    /// </summary>
+    public IReadOnlyDictionary<uint, IReadOnlyList<GilVendorOffer>> PendingByNpcId =>
+        pendingByItemId
+            .SelectMany(pair => pair.Value, (_, offer) => offer)
+            .GroupBy(offer => offer.NpcId)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<GilVendorOffer>)group.ToList());
+
+    /// <summary>
+    /// Promotes pending offers for the given NPC to executable offers at the
+    /// observed location. Returns a new catalog; the original is unchanged.
+    /// </summary>
+    public GilVendorCatalog WithObservedLocation(
+        uint npcId,
+        uint territoryId,
+        System.Numerics.Vector3 position,
+        IReadOnlyList<GilVendorTravelRoute> travelRoutes,
+        IReadOnlyList<uint> routeAetheryteIds)
+    {
+        ArgumentNullException.ThrowIfNull(travelRoutes);
+        ArgumentNullException.ThrowIfNull(routeAetheryteIds);
+        if (!pendingByItemId.Values.Any(offers => offers.Any(offer => offer.NpcId == npcId)))
+            return this;
+
+        var promoted = new List<GilVendorOffer>();
+        var remainingPending = new List<GilVendorOffer>();
+        foreach (var offers in pendingByItemId.Values)
+        foreach (var offer in offers)
+        {
+            if (offer.NpcId != npcId)
+            {
+                remainingPending.Add(offer);
+                continue;
+            }
+            promoted.Add(offer with
+            {
+                TerritoryId = territoryId,
+                Position = position,
+                TravelRoutes = travelRoutes,
+                RouteAetheryteIds = routeAetheryteIds,
+            });
+        }
+
+        var merged = offersByItemId.Values.SelectMany(offers => offers).Concat(promoted);
+        return new(Index(merged), Index(remainingPending));
+    }
 
     public GilVendorBuyRequestCreateResult TryCreateRequest(
         uint itemId,

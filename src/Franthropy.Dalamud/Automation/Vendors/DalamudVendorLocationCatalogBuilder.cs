@@ -14,8 +14,50 @@ public sealed record DalamudVendorLocation(
 
 public enum DalamudVendorLocationSource
 {
+    /// <summary>
+    /// Observed live in the object table. Most authoritative: it is where the NPC
+    /// actually is, regardless of how Square Enix spawns it.
+    /// </summary>
+    Observed = 0,
     Level,
     PlaneventLgb,
+}
+
+/// <summary>
+/// Locations seen live in the object table, keyed by ENpcBase id. Observations
+/// outrank static sheet resolution and survive zone changes so a vendor seen
+/// once stays purchasable. Not persisted: a fresh session relearns naturally.
+/// </summary>
+public sealed class DalamudVendorLocationObserver
+{
+    private readonly Dictionary<uint, DalamudVendorLocation> observations = [];
+    private readonly object gate = new();
+
+    /// <summary>Records or refreshes an observed position for an event NPC.</summary>
+    public void Observe(uint npcId, uint territoryId, System.Numerics.Vector3 position)
+    {
+        if (npcId == 0 || territoryId == 0)
+            return;
+        lock (gate)
+        {
+            observations[npcId] = new(
+                npcId,
+                territoryId,
+                position,
+                DalamudVendorLocationSource.Observed);
+        }
+    }
+
+    /// <summary>Snapshot of every currently remembered observation.</summary>
+    public IReadOnlyDictionary<uint, DalamudVendorLocation> Snapshot()
+    {
+        lock (gate)
+        {
+            return observations.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value);
+        }
+    }
 }
 
 /// <summary>
