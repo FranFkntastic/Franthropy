@@ -9,6 +9,7 @@ using Franthropy.Dalamud.Diagnostics;
 using Franthropy.Observations.Hosting;
 using Franthropy.Observations.Storage;
 using Franthropy.Observations.V1;
+using Franthropy.Dalamud.Observations.Reporting;
 
 namespace Franthropy.Dalamud.Observations;
 
@@ -36,6 +37,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
     private readonly ObservationCollectorCoordinator coordinator;
     public ObservationCaptureSessionRegistry CaptureSessions { get; }
     private DalamudCollector? collector;
+    private Reporting.BaselineStalenessWatchdog? stalenessWatchdog;
     private bool started;
     private bool disposed;
 
@@ -118,6 +120,17 @@ public sealed class DalamudSharedObservationHost : IDisposable
         {
             next.Start();
             collector = next;
+            stalenessWatchdog = new Reporting.BaselineStalenessWatchdog(
+                storeOptions,
+                new Reporting.BaselineStalenessWatchdogOptions
+                {
+                    CurrentContentId = () => options.PlayerState.ContentId,
+                    CurrentHomeWorldId = () => options.PlayerState.HomeWorld.IsValid
+                        ? options.PlayerState.HomeWorld.Value.RowId
+                        : 0,
+                },
+                message => options.Diagnostic?.Invoke($"[BaselineWatchdog] {message}", null));
+            stalenessWatchdog.Start();
         }
         catch
         {
@@ -130,6 +143,8 @@ public sealed class DalamudSharedObservationHost : IDisposable
     {
         var current = collector;
         collector = null;
+        stalenessWatchdog?.Dispose();
+        stalenessWatchdog = null;
         current?.Dispose();
     }
 

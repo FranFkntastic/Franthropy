@@ -132,6 +132,9 @@
     <Compile Remove="Automation\Vendors\Coordination\DalamudGilVendorBuyRuntime.cs" />
     <Compile Remove="Automation\MarketBoard\DalamudMarketBoardListingObserver.cs" />
     <Compile Remove="Observations\DalamudSharedObservationHost.cs" />
+    <Compile Remove="Observations\Reporting\ReportInventoryScanner.cs" />
+    <Compile Remove="Observations\Reporting\ReportRetainerCache.cs" />
+    <Compile Remove="Observations\Reporting\BaselineStalenessWatchdog.cs" />
     <Compile Remove="Legacy\Miosuke\Miosuke.cs" />
     <Compile Remove="Legacy\Miosuke\Service.cs" />
     <Compile Remove="Legacy\Miosuke\Action\Hotkey.cs" />
