@@ -146,14 +146,12 @@ public sealed class CharacterProvisioningContractsTests
     }
 
     [Fact]
-    public void StageDetector_FailsClosedForAnUnreviewedGameVersion()
+    public void StageDetector_FailsClosedForUnknownUiSchema()
     {
         var observation = CharacterCreationStageDetector.Detect(
-            ["_CharaMakeClassSelector"],
-            observedGameVersion: "future-version",
-            approvedGameVersion: CharacterProvisioningDefaults.ApprovedGameVersion);
+            ["UnrecognizedCharacterScreen"]);
 
         Assert.False(observation.Recognized);
-        Assert.Equal("UnsupportedGameVersion", observation.Code);
+        Assert.Equal("UnknownCharacterCreationStage", observation.Code);
     }
 }

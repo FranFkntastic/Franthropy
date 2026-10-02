@@ -47,9 +47,6 @@ internal static class RetainerRetrievalCommandPolicy
 public sealed class DalamudRetainerItemRetrieval
 {
     private const string InputNumericAddon = "InputNumeric";
-    private const string RetainerItemCommandSignature = "48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 57 48 83 EC 30 48 8B 5C 24 ?? 41 8B F0";
-    private const string ApprovedGameVersion = "2026.09.01.0000.0000";
-    private const string PatchContractId = "franthropy.retainer-item-command";
     private static readonly IReadOnlyList<InventoryType> PlayerOrdinaryItemContainers =
     [
         InventoryType.Inventory1,
@@ -176,9 +173,15 @@ public sealed class DalamudRetainerItemRetrieval
         int requestedQuantity,
         int? knownRetainerVariantQuantity)
     {
-        var compatibility = GamePatchCompatibilityGate.Evaluate(PatchContractId, ApprovedGameVersion);
-        if (!compatibility.IsApproved)
-            return PendingRetainerRetrieval.Fail(GamePatchCompatibility.FailureCode, compatibility.Message);
+        try
+        {
+            retainerItemCommand ??= Marshal.GetDelegateForFunctionPointer<RetainerItemCommandDelegate>(
+                RetainerNativeCommandCapability.Resolve(sigScanner));
+        }
+        catch (Exception exception)
+        {
+            return PendingRetainerRetrieval.Fail(NativeCapabilityGuard.FailureCode, exception.Message);
+        }
 
         var supported = stack.Container == InventoryType.RetainerCrystals ||
                         DalamudRetainerInventory.OrdinaryItemContainers.Contains(stack.Container);
@@ -241,10 +244,8 @@ public sealed class DalamudRetainerItemRetrieval
 
         try
         {
-            retainerItemCommand ??= Marshal.GetDelegateForFunctionPointer<RetainerItemCommandDelegate>(
-                sigScanner.ScanText(RetainerItemCommandSignature));
             retainerItemCommand(
-                (nint)retainerAgent + 40,
+                RetainerNativeCommandCapability.Context(retainerAgent),
                 (uint)stack.SlotIndex,
                 stack.Container,
                 0,
@@ -429,6 +430,7 @@ public sealed class DalamudRetainerItemRetrieval
         return true;
     }
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void RetainerItemCommandDelegate(
         nint AgentRetainerItemCommandModule,
         uint Slot,

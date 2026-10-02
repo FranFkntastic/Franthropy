@@ -7,7 +7,6 @@ public static class CharacterProvisioningDefaults
 {
     public const int SchemaVersion = 1;
     public const string StartingClass = "Marauder";
-    public const string ApprovedGameVersion = "2026.09.01.0000.0000";
     public static readonly TimeSpan MaximumReviewAge = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan MaximumCommitLifetime = TimeSpan.FromMinutes(10);
 }
@@ -72,15 +71,9 @@ public static class CharacterCreationStageDetector
 
     public static CharacterCreationStageObservation Detect(
         IEnumerable<string> visibleAddons,
-        bool playerAvailable = false,
-        string? observedGameVersion = null,
-        string? approvedGameVersion = null)
+        bool playerAvailable = false)
     {
         ArgumentNullException.ThrowIfNull(visibleAddons);
-        if (!string.IsNullOrWhiteSpace(approvedGameVersion) &&
-            !string.Equals(observedGameVersion, approvedGameVersion, StringComparison.Ordinal))
-            return new(false, CharacterCreationStage.Unknown, "UnsupportedGameVersion", $"Character provisioning has not been reviewed for game version '{observedGameVersion}'.", [], []);
-
         var visible = visibleAddons
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Select(value => value.Trim())

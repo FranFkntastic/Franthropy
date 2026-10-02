@@ -1,5 +1,6 @@
 using Franthropy.Dalamud.Observations;
-using Franthropy.Dalamud.Diagnostics;
+using System.Reflection;
+using Dalamud.Plugin.Services;
 
 namespace Franthropy.Dalamud.Tests.Observations;
 
@@ -24,22 +25,48 @@ public sealed class SharedObservationPathsTests
         }
     }
 
-    [Fact]
-    public void Shared_host_refuses_an_unapproved_game_build_before_registering_callbacks()
+    [Theory]
+    [InlineData("2026.09.15.0000.0000")]
+    [InlineData("2099.01.01.0000.0000")]
+    [InlineData("unknown")]
+    public void Shared_host_accepts_diagnostic_build_changes_without_registering_callbacks(string diagnosticBuild)
     {
-        var exception = Assert.Throws<GamePatchCompatibilityException>(() =>
-            new DalamudSharedObservationHost(new DalamudSharedObservationHostOptions
+        var root = Path.Combine(Path.GetTempPath(), "Franthropy.Capability.Tests", Guid.NewGuid().ToString("N"));
+        var config = Path.Combine(root, "XIVLauncher", "pluginConfigs", "Test");
+        Directory.CreateDirectory(config);
+        try
+        {
+            using var host = new DalamudSharedObservationHost(new DalamudSharedObservationHostOptions
             {
-                PluginConfigDirectory = "unused",
+                PluginConfigDirectory = config,
                 PluginName = "Test",
                 PluginInstanceId = "instance",
-                GameBuild = "2099.01.01.0000.0000",
-                GameInventory = null!,
-                PlayerState = null!,
-                AddonLifecycle = null!,
-            }));
+                GameBuild = diagnosticBuild,
+                GameInventory = DispatchProxy.Create<IGameInventory, UncalledServiceProxy>(),
+                PlayerState = DispatchProxy.Create<IPlayerState, UncalledServiceProxy>(),
+                AddonLifecycle = DispatchProxy.Create<IAddonLifecycle, UncalledServiceProxy>(),
+            });
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 
-        Assert.Equal("UnsupportedGameBuild", GamePatchCompatibility.FailureCode);
-        Assert.Equal(DalamudSharedObservationHost.ApprovedGameBuild, exception.Compatibility.ApprovedGameVersion);
+    [Fact]
+    public void Shared_host_still_requires_actual_inventory_dependency()
+    {
+        var exception = Assert.Throws<ArgumentNullException>(() => new DalamudSharedObservationHost(new()
+        {
+            PluginConfigDirectory = "unused", PluginName = "Test", PluginInstanceId = "instance", GameBuild = "unknown",
+            GameInventory = null!, PlayerState = null!, AddonLifecycle = null!,
+        }));
+        Assert.Contains("GameInventory", exception.ParamName);
+    }
+
+    public class UncalledServiceProxy : DispatchProxy
+    {
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+            => throw new InvalidOperationException($"Unexpected callback registration before Start: {method?.Name}");
     }
 }

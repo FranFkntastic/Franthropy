@@ -36,9 +36,7 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
     private const double LifecycleRecorderWindowMilliseconds = 180_000;
     private const int MaximumPreludeSamples = 512;
     private const double PreludeRecorderWindowMilliseconds = 5_000;
-    private const nint EventTerminationReceiveRva = 0xB33E40;
-    private const string ApprovedGameVersion = "2026.09.01.0000.0000";
-    private const string PatchContractId = "franthropy.talk-event-packet-transport";
+    private const string EventTerminationReceiveSignature = "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 30 41 8B D9 41 0F B6 F8 48 8B F2 8B E9 E8 ?? ?? ?? ?? 44 8B 54 24 60 44 0F B6 CF 44 89 54 24 28 4C 8B C6 8B D5 89 5C 24 20 48 8B C8 E8 ?? ?? ?? ??";
 
     private readonly Hook<ZoneClient.Delegates.SendPacket> sendPacketHook;
     private readonly Hook<PacketDispatcher.Delegates.OnReceivePacket> receivePacketHook;
@@ -72,14 +70,31 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         IGameInteropProvider interopProvider,
         ISigScanner? sigScanner = null)
     {
-        GamePatchCompatibilityGate.Require(PatchContractId, ApprovedGameVersion);
+        ArgumentNullException.ThrowIfNull(interopProvider);
+        if (sigScanner is null)
+            throw new NativeCapabilityUnavailableException("Talk-event observation requires a signature scanner for its termination hook.");
+        var terminationAddress = NativeCapabilityGuard.ResolveUnique(sigScanner, EventTerminationReceiveSignature, "Event termination observation");
+        NativeCapabilityGuard.RequireAddress((nint)ZoneClient.MemberFunctionPointers.SendPacket, "Zone packet sending");
+        NativeCapabilityGuard.RequireAddress((nint)PacketDispatcher.MemberFunctionPointers.HandleEventPlayPacket, "Event-play observation");
+        NativeCapabilityGuard.RequireAddress((nint)PacketDispatcher.MemberFunctionPointers.HandleEventYieldPacket, "Event-yield observation");
+        NativeCapabilityGuard.RequireAddress((nint)PacketDispatcher.MemberFunctionPointers.HandleActorControlPacket, "Actor-control observation");
+
+        var framework = ClientFramework.Instance();
+        var receiverCallback = framework == null || framework->NetworkModuleProxy == null
+            ? null : framework->NetworkModuleProxy->ReceiverCallback;
+        if (receiverCallback == null)
+            throw new NativeCapabilityUnavailableException("The zone packet receiver callback is unavailable.");
+        var packetDispatcher = &receiverCallback->PacketDispatcher;
+        NativeCapabilityGuard.RequireAddress((nint)(*(nint**)packetDispatcher), "Zone packet receiver vtable");
+        var onReceivePacketAddress = (*(nint**)packetDispatcher)[1];
+        NativeCapabilityGuard.RequireAddress(onReceivePacketAddress, "Zone packet receiver");
 
         if (sigScanner is not null)
         {
             try
             {
                 nativeEventYield = Marshal.GetDelegateForFunctionPointer<NativeEventYieldDelegate>(
-                    sigScanner.ScanText(NativeEventYieldSignature));
+                    NativeCapabilityGuard.ResolveUnique(sigScanner, NativeEventYieldSignature, "Native event-yield builder"));
             }
             catch
             {
@@ -88,49 +103,56 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
             }
         }
 
-        sendPacketHook = interopProvider.HookFromAddress<ZoneClient.Delegates.SendPacket>(
-            (nint)ZoneClient.MemberFunctionPointers.SendPacket,
-            SendPacketDetour);
-        sendPacketHook.Enable();
+        var installed = new List<IDisposable>();
+        try
+        {
+            sendPacketHook = interopProvider.HookFromAddress<ZoneClient.Delegates.SendPacket>(
+                (nint)ZoneClient.MemberFunctionPointers.SendPacket,
+                SendPacketDetour);
+            installed.Add(sendPacketHook);
+            sendPacketHook.Enable();
 
-        eventPlayHook = interopProvider.HookFromAddress<PacketDispatcher.Delegates.HandleEventPlayPacket>(
-            (nint)PacketDispatcher.MemberFunctionPointers.HandleEventPlayPacket,
-            HandleEventPlayPacketDetour);
-        eventPlayHook.Enable();
+            eventPlayHook = interopProvider.HookFromAddress<PacketDispatcher.Delegates.HandleEventPlayPacket>(
+                (nint)PacketDispatcher.MemberFunctionPointers.HandleEventPlayPacket,
+                HandleEventPlayPacketDetour);
+            installed.Add(eventPlayHook);
+            eventPlayHook.Enable();
 
-        eventYieldHook = interopProvider.HookFromAddress<PacketDispatcher.Delegates.HandleEventYieldPacket>(
-            (nint)PacketDispatcher.MemberFunctionPointers.HandleEventYieldPacket,
-            HandleEventYieldPacketDetour);
-        eventYieldHook.Enable();
+            eventYieldHook = interopProvider.HookFromAddress<PacketDispatcher.Delegates.HandleEventYieldPacket>(
+                (nint)PacketDispatcher.MemberFunctionPointers.HandleEventYieldPacket,
+                HandleEventYieldPacketDetour);
+            installed.Add(eventYieldHook);
+            eventYieldHook.Enable();
 
-        actorControlHook = interopProvider.HookFromAddress<PacketDispatcher.Delegates.HandleActorControlPacket>(
-            (nint)PacketDispatcher.MemberFunctionPointers.HandleActorControlPacket,
-            HandleActorControlPacketDetour);
-        actorControlHook.Enable();
+            actorControlHook = interopProvider.HookFromAddress<PacketDispatcher.Delegates.HandleActorControlPacket>(
+                (nint)PacketDispatcher.MemberFunctionPointers.HandleActorControlPacket,
+                HandleActorControlPacketDetour);
+            installed.Add(actorControlHook);
+            actorControlHook.Enable();
 
-        var moduleBase = Process.GetCurrentProcess().MainModule?.BaseAddress ??
-            throw new InvalidOperationException("The game executable module is unavailable.");
-        eventTerminationHook = interopProvider.HookFromAddress<EventTerminationReceiveDelegate>(
-            moduleBase + EventTerminationReceiveRva,
-            HandleEventTerminationReceiveDetour);
-        eventTerminationHook.Enable();
-
-        var framework = ClientFramework.Instance();
-        var networkModuleProxy = framework == null
-            ? null
-            : framework->NetworkModuleProxy;
-        var receiverCallback = networkModuleProxy == null
-            ? null
-            : networkModuleProxy->ReceiverCallback;
-        if (receiverCallback == null)
-            throw new InvalidOperationException("The zone packet receiver callback is unavailable.");
-
-        var packetDispatcher = &receiverCallback->PacketDispatcher;
-        var onReceivePacketAddress = (*(nint**)packetDispatcher)[1];
-        receivePacketHook = interopProvider.HookFromAddress<PacketDispatcher.Delegates.OnReceivePacket>(
-            onReceivePacketAddress,
-            OnReceivePacketDetour);
-        receivePacketHook.Enable();
+            eventTerminationHook = interopProvider.HookFromAddress<EventTerminationReceiveDelegate>(
+                terminationAddress,
+                HandleEventTerminationReceiveDetour);
+            installed.Add(eventTerminationHook);
+            eventTerminationHook.Enable();
+            receivePacketHook = interopProvider.HookFromAddress<PacketDispatcher.Delegates.OnReceivePacket>(
+                onReceivePacketAddress,
+                OnReceivePacketDetour);
+            installed.Add(receivePacketHook);
+            receivePacketHook.Enable();
+        }
+        catch (Exception failure)
+        {
+            var failures = new List<Exception> { failure };
+            for (var index = installed.Count - 1; index >= 0; index--)
+            {
+                try { installed[index].Dispose(); }
+                catch (Exception cleanupFailure) { failures.Add(cleanupFailure); }
+            }
+            if (failures.Count > 1)
+                throw new AggregateException("Talk-event hook initialization and rollback failed.", failures);
+            throw;
+        }
     }
 
     public TalkEventPacketTransportObservation ArmPassThrough(ulong actorId, uint eventId) =>

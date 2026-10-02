@@ -15,9 +15,6 @@ namespace Franthropy.Dalamud.Automation.Retainers;
 public sealed class DalamudRetainerItemTransfer
 {
     private const string InputNumericAddon = "InputNumeric";
-    private const string RetainerItemCommandSignature = "48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 57 48 83 EC 30 48 8B 5C 24 ?? 41 8B F0";
-    private const string ApprovedGameVersion = "2026.09.01.0000.0000";
-    private const string PatchContractId = "franthropy.retainer-item-command";
     private static readonly IReadOnlySet<InventoryType> PlayerItemContainers = new HashSet<InventoryType>
     {
         InventoryType.Inventory1,
@@ -105,9 +102,15 @@ public sealed class DalamudRetainerItemTransfer
         DalamudInventoryStack stack,
         int requestedQuantity)
     {
-        var compatibility = GamePatchCompatibilityGate.Evaluate(PatchContractId, ApprovedGameVersion);
-        if (!compatibility.IsApproved)
-            return PendingRetainerItemTransfer.Fail(GamePatchCompatibility.FailureCode, compatibility.Message);
+        try
+        {
+            retainerItemCommand ??= Marshal.GetDelegateForFunctionPointer<RetainerItemCommandDelegate>(
+                RetainerNativeCommandCapability.Resolve(sigScanner));
+        }
+        catch (Exception exception)
+        {
+            return PendingRetainerItemTransfer.Fail(NativeCapabilityGuard.FailureCode, exception.Message);
+        }
 
         if (!PlayerItemContainers.Contains(stack.Container) || requestedQuantity <= 0)
         {
@@ -162,10 +165,8 @@ public sealed class DalamudRetainerItemTransfer
 
         try
         {
-            retainerItemCommand ??= Marshal.GetDelegateForFunctionPointer<RetainerItemCommandDelegate>(
-                sigScanner.ScanText(RetainerItemCommandSignature));
             retainerItemCommand(
-                (nint)retainerAgent + 40,
+                RetainerNativeCommandCapability.Context(retainerAgent),
                 (uint)stack.SlotIndex,
                 stack.Container,
                 0,
@@ -236,6 +237,7 @@ public sealed class DalamudRetainerItemTransfer
     private static int CountRetainer(uint itemId, bool isHighQuality) => DalamudRetainerInventory.OrdinaryItemContainers.Sum(
         type => DalamudInventoryStackScanner.CountLoadedItem(type, itemId, isHighQuality));
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void RetainerItemCommandDelegate(
         nint AgentRetainerItemCommandModule,
         uint Slot,

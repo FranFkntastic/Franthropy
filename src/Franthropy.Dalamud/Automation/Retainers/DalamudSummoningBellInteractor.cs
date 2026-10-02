@@ -177,7 +177,7 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
             {
                 talkPacketTransport = new(interopProvider, sigScanner);
             }
-            catch (GamePatchCompatibilityException exception)
+            catch (Exception exception)
             {
                 talkPacketTransportUnavailableReason = exception.Message;
             }

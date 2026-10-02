@@ -327,7 +327,7 @@ public sealed class RetainerAutomationSessionTests
     }
 
     [Fact]
-    public async Task MarketListingPost_RejectsUnsupportedBuildBeforeTouchingFrameworkState()
+    public async Task MarketListingPost_RejectsMissingNativeCallbacksBeforeTouchingFrameworkState()
     {
         var session = CreateSession(
             "unsupported-build",
@@ -338,7 +338,7 @@ public sealed class RetainerAutomationSessionTests
 
         Assert.Equal(RetainerMarketListingPostOutcome.FailedBeforeSend, result.Outcome);
         Assert.False(result.RequestSent);
-        Assert.Equal("UnsupportedGameBuild", result.Code);
+        Assert.Equal("NativeCapabilityUnavailable", result.Code);
     }
 
     [Fact]
@@ -365,7 +365,7 @@ public sealed class RetainerAutomationSessionTests
     }
 
     [Fact]
-    public async Task MarketListingRemoval_RejectsUnsupportedBuildBeforeTouchingFrameworkState()
+    public async Task MarketListingRemoval_RejectsMissingNativeCallbacksBeforeTouchingFrameworkState()
     {
         var session = CreateSession(
             "unsupported-build",
@@ -376,7 +376,7 @@ public sealed class RetainerAutomationSessionTests
 
         Assert.Equal(RetainerMarketListingRemovalOutcome.FailedBeforeSend, result.Outcome);
         Assert.False(result.RequestSent);
-        Assert.Equal("UnsupportedGameBuild", result.Code);
+        Assert.Equal("NativeCapabilityUnavailable", result.Code);
     }
 
     [Theory]
@@ -422,10 +422,11 @@ public sealed class RetainerAutomationSessionTests
             CreateProxy<IPluginLog>(unused),
             CreateProxy<IObjectTable>(unused),
             CreateProxy<ITargetManager>(unused),
-            CreateProxy<ISigScanner>(unused),
-            "2026.08.05.0000.0000");
+            CreateProxy<ISigScanner>(unused));
 
-        var open = session.OpenInventoryAsync(cancellation.Token);
+        // The fake scheduler never invokes native UI. The close path does not
+        // require native callback addresses to have resolved in the test process.
+        var open = session.CloseRetainerListAsync(cancellation.Token);
 
         Assert.Equal(cancellation.Token, observed);
         Assert.False(open.IsCompleted);
@@ -444,8 +445,7 @@ public sealed class RetainerAutomationSessionTests
             CreateProxy<IPluginLog>(dependencyHandler),
             CreateProxy<IObjectTable>(dependencyHandler),
             CreateProxy<ITargetManager>(dependencyHandler),
-            CreateProxy<ISigScanner>(dependencyHandler),
-            currentGameVersion);
+            CreateProxy<ISigScanner>(dependencyHandler));
     }
 
     private static T CreateProxy<T>(Func<MethodInfo, object?[]?, object?> handler) where T : class
