@@ -28,7 +28,6 @@ public sealed record DalamudSharedObservationHostOptions
 
 public sealed class DalamudSharedObservationHost : IDisposable
 {
-    public const string ApprovedGameBuild = "2026.09.01.0000.0000";
     public const int CaptureSessionWriterCapability = 3;
     public const int SellingSurfaceWriterCapability = 4;
     private readonly DalamudSharedObservationHostOptions options;
@@ -47,9 +46,9 @@ public sealed class DalamudSharedObservationHost : IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(options.PluginName);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.PluginInstanceId);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.GameBuild);
-        if (string.Equals(options.GameBuild, "unknown", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("The exact game build is unavailable; shared observation hosting is blocked.");
-        GamePatchCompatibilityGate.Require("Franthropy.SharedObservations.V1", ApprovedGameBuild, options.GameBuild);
+        ArgumentNullException.ThrowIfNull(options.GameInventory);
+        ArgumentNullException.ThrowIfNull(options.PlayerState);
+        ArgumentNullException.ThrowIfNull(options.AddonLifecycle);
         paths = SharedObservationPaths.FromPluginConfigDirectory(options.PluginConfigDirectory);
         CaptureSessions = new ObservationCaptureSessionRegistry(paths.CaptureSessionsPath);
         storeOptions = new ObservationStoreOptions

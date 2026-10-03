@@ -87,6 +87,7 @@
     <Compile Remove="Automation\Inventory\DalamudItemContextActionUiTransaction.cs" />
     <Compile Remove="Automation\Retainers\DalamudSummoningBellInteractor.cs" />
     <Compile Remove="Automation\Retainers\DalamudRetainerAutomationSession.cs" />
+    <Compile Remove="Automation\Retainers\RetainerNativeCommandCapability.cs" />
     <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.cs" />
     <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.PositionFrameShadow.cs" />
     <Compile Remove="Automation\Retainers\DalamudTalkEventPacketTransport.WarmSessionProbe.cs" />
@@ -118,6 +119,7 @@
     <Compile Remove="UI\Tables\DalamudTableSelectionRenderer.cs" />
     <Compile Remove="Diagnostics\DalamudConditionTrustProbe.cs" />
     <Compile Remove="Diagnostics\DalamudRenderControl.cs" />
+    <Compile Remove="Diagnostics\NativeCapabilityGuard.cs" />
     <Compile Remove="Travel\DalamudLifestreamObjectInteractor.cs" />
     <Compile Remove="Travel\DalamudLifestreamPropertyTravel.cs" />
     <Compile Remove="Travel\DalamudLifestreamAetheryteTravel.cs" />

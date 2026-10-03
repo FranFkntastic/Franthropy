@@ -173,15 +173,18 @@ public sealed class DalamudSummoningBellInteractor : IDisposable
         this.dataManager = dataManager;
         if (interopProvider is not null)
         {
-            try
-            {
-                talkPacketTransport = new(interopProvider, sigScanner);
-            }
-            catch (GamePatchCompatibilityException exception)
-            {
-                talkPacketTransportUnavailableReason = exception.Message;
-            }
+            var initialized = CreateOptionalTransport(() => new(interopProvider, sigScanner));
+            talkPacketTransport = initialized.Transport;
+            if (initialized.UnavailableReason is { } reason)
+                talkPacketTransportUnavailableReason = reason;
         }
+    }
+
+    internal static (DalamudTalkEventPacketTransport? Transport, string? UnavailableReason)
+        CreateOptionalTransport(Func<DalamudTalkEventPacketTransport> factory)
+    {
+        try { return (factory(), null); }
+        catch (NativeCapabilityUnavailableException exception) { return (null, exception.Message); }
     }
 
     public unsafe SummoningBellInteractionResult TryInteract()

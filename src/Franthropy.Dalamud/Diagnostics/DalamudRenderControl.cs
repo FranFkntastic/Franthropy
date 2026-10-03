@@ -4,18 +4,14 @@ using FFXIVClientStructs.FFXIV.Client.Graphics.Render;
 namespace Franthropy.Dalamud.Diagnostics;
 
 /// <summary>
-/// Direct reader/writer for the client's active-render flag at
-/// <c>Render.Manager.Instance() + 0x38358</c>. This cell is client-owned: the write persists
+/// Direct reader/writer for the SDK's <c>Manager.Is3DRenderingDisabled</c> field.
+/// This cell is client-owned: the write persists
 /// locally and only suppresses local 3D rendering, which makes it safe to use for reducing GPU
-/// load on background clients. The offset is a hardcoded render-manager layout constant and must
-/// be re-verified after any FFXIVClientStructs render-manager layout change. The flag is restored
+/// load on background clients. The SDK supplies the field location; the flag is restored
 /// on dispose when, and only when, this service was the one that cleared it.
 /// </summary>
 public sealed unsafe class DalamudRenderControl : IDisposable
 {
-    private static readonly IntPtr ActiveRenderFlagOffset = new(0x38358);
-    private const string ApprovedGameVersion = "2026.09.01.0000.0000";
-    private const string PatchContractId = "franthropy.render-manager-active-flag";
 
     private readonly IPluginLog log;
     private bool disabledByThisService;
@@ -83,7 +79,7 @@ public sealed unsafe class DalamudRenderControl : IDisposable
                 return;
             }
 
-            *flagPointer = 1;
+            *flagPointer = 0;
             disabledByThisService = false;
             log.Information("[Franthropy] Restored 3D render flag during dispose.");
         }
@@ -98,7 +94,7 @@ public sealed unsafe class DalamudRenderControl : IDisposable
         if (!TryGetRenderFlagPointer(out _, out var flagPointer, out var error))
             throw CreateUnavailableException(error);
 
-        return *flagPointer != 0;
+        return *flagPointer == 0;
     }
 
     private static void SetRenderEnabledRaw(bool enabled)
@@ -106,7 +102,7 @@ public sealed unsafe class DalamudRenderControl : IDisposable
         if (!TryGetRenderFlagPointer(out _, out var flagPointer, out var error))
             throw CreateUnavailableException(error);
 
-        *flagPointer = enabled ? (byte)1 : (byte)0;
+        *flagPointer = enabled ? (byte)0 : (byte)1;
     }
 
     private static bool TryGetRenderFlagPointer(out Manager* manager, out byte* flagPointer, out string error)
@@ -114,13 +110,6 @@ public sealed unsafe class DalamudRenderControl : IDisposable
         manager = null;
         flagPointer = null;
         error = string.Empty;
-
-        var compatibility = GamePatchCompatibilityGate.Evaluate(PatchContractId, ApprovedGameVersion);
-        if (!compatibility.IsApproved)
-        {
-            error = compatibility.Message;
-            return false;
-        }
 
         try
         {
@@ -138,7 +127,13 @@ public sealed unsafe class DalamudRenderControl : IDisposable
             return false;
         }
 
-        flagPointer = (byte*)manager + ActiveRenderFlagOffset.ToInt32();
+        flagPointer = (byte*)&manager->Is3DRenderingDisabled;
+        if (*flagPointer > 1)
+        {
+            error = "The SDK render-disabled field is not a boolean value; render control is unavailable.";
+            flagPointer = null;
+            return false;
+        }
         return true;
     }
 

@@ -34,9 +34,6 @@ public static class RetainerCrystalTransferObservation
 public sealed class DalamudRetainerCrystalTransfer
 {
     private const string InputNumericAddon = "InputNumeric";
-    private const string RetainerItemCommandSignature = "48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 57 48 83 EC 30 48 8B 5C 24 ?? 41 8B F0";
-    private const string ApprovedGameVersion = "2026.09.01.0000.0000";
-    private const string PatchContractId = "franthropy.retainer-item-command";
 
     private readonly ISigScanner sigScanner;
     private readonly IGameGui gameGui;
@@ -127,9 +124,15 @@ public sealed class DalamudRetainerCrystalTransfer
         DalamudInventoryStack stack,
         int requestedQuantity)
     {
-        var compatibility = GamePatchCompatibilityGate.Evaluate(PatchContractId, ApprovedGameVersion);
-        if (!compatibility.IsApproved)
-            return PendingRetainerCrystalTransfer.Fail(GamePatchCompatibility.FailureCode, compatibility.Message);
+        try
+        {
+            retainerItemCommand ??= Marshal.GetDelegateForFunctionPointer<RetainerItemCommandDelegate>(
+                RetainerNativeCommandCapability.Resolve(sigScanner));
+        }
+        catch (Exception exception)
+        {
+            return PendingRetainerCrystalTransfer.Fail(NativeCapabilityGuard.FailureCode, exception.Message);
+        }
 
         if (stack.Container != InventoryType.Crystals ||
             requestedQuantity <= 0 ||
@@ -180,10 +183,8 @@ public sealed class DalamudRetainerCrystalTransfer
 
         try
         {
-            retainerItemCommand ??= Marshal.GetDelegateForFunctionPointer<RetainerItemCommandDelegate>(
-                sigScanner.ScanText(RetainerItemCommandSignature));
             retainerItemCommand(
-                (nint)retainerAgent + 40,
+                RetainerNativeCommandCapability.Context(retainerAgent),
                 (uint)stack.SlotIndex,
                 InventoryType.Crystals,
                 0,
@@ -250,6 +251,7 @@ public sealed class DalamudRetainerCrystalTransfer
             $"Deposit verification pending for item {itemId}: player {playerQuantityBefore}->{playerAfter}, retainer {retainerQuantityBefore}->{retainerAfter}, expected {expected}.");
     }
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void RetainerItemCommandDelegate(
         nint AgentRetainerItemCommandModule,
         uint Slot,
