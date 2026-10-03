@@ -248,6 +248,10 @@ public sealed class DalamudRenderedUiTextActionDispatcher
     /// The caller owns the semantic proof that the index still identifies the intended object.
     /// </summary>
     public unsafe RenderedUiTextActionResult TryActivateListRowIndex(string addonName, int rowIndex)
+        => TryActivateListRowIndex(addonName, rowIndex, doubleClick: false);
+
+    private unsafe RenderedUiTextActionResult TryActivateListRowIndex(string addonName, int rowIndex,
+        bool doubleClick, nint expectedRow = 0)
     {
         if (string.IsNullOrWhiteSpace(addonName) || rowIndex < 0)
             return Fail("InvalidRenderedListAction", "Addon name and a non-negative row index are required.", addonName);
@@ -279,6 +283,8 @@ public sealed class DalamudRenderedUiTextActionDispatcher
 
         var listNode = (AtkComponentNode*)matches[0].ListNode;
         var rowNode = (AtkComponentNode*)matches[0].RowNode;
+        if (expectedRow != 0 && (nint)rowNode != expectedRow)
+            return Fail("RenderedListIdentityChanged", "The named row changed before its native event dispatch.", addonName);
         var list = (AtkComponentList*)listNode->Component;
         var row = (AtkComponentListItemRenderer*)rowNode->Component;
         list->SelectItem(rowIndex, true);
@@ -287,13 +293,14 @@ public sealed class DalamudRenderedUiTextActionDispatcher
 
         var eventData = new AtkEventData();
         var mouseData = new AtkEventData.AtkMouseData();
+        var eventType = doubleClick ? AtkEventType.ListItemDoubleClick : AtkEventType.ListItemClick;
         list->PopulateAtkListItemData(
             &eventData.ListItemData,
             &mouseData,
             checked((uint)rowIndex),
-            AtkEventType.ListItemClick);
+            eventType);
         if (!list->DispatchEvent(
-                AtkEventType.ListItemClick,
+                eventType,
                 null,
                 &eventData,
                 checked((uint)rowIndex),
@@ -308,12 +315,9 @@ public sealed class DalamudRenderedUiTextActionDispatcher
     }
 
     /// <summary>
-    /// Activates one retainer through the RetainerList addon's supported callback contract after
-    /// proving that its name is rendered exactly once and resolving the owning list row. This is
-    /// deliberately narrower than an arbitrary addon callback API: rendered UI supplies identity,
-    /// while the callback only replaces the unsafe synthetic double-click normally used to open it.
-    /// Callers must still prove the expected rendered retainer menu before treating activation as
-    /// complete.
+    /// Activates one uniquely rendered retainer through its owning list's native event machinery.
+    /// The SDK populates the list event payload; no arbitrary addon callback or empty synthetic
+    /// double-click payload is used. Callers must verify the resulting retainer identity/menu.
     /// </summary>
     public unsafe RenderedUiTextActionResult TryActivateUniqueRetainerListRowText(string visibleText)
     {
@@ -338,30 +342,12 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             return Fail("RenderedListStructureChanged", "The rendered retainer name no longer resolves to a standard list row.", addonName, selected.TargetNodePath);
 
         var row = (AtkComponentListItemRenderer*)componentNode->Component;
-        var request = RenderedRetainerListActivationPolicy.Create(row->ListItemIndex);
-        if (!request.Success)
-            return Fail(request.Code, request.Message, addonName, selected.TargetNodePath);
-
-        var values = stackalloc AtkValue[4];
-        values[0] = new AtkValue { Type = AtkValueType.Int, Int = request.Command };
-        values[1] = new AtkValue { Type = AtkValueType.UInt, UInt = request.RowIndex };
-        values[2] = default;
-        values[3] = default;
-        // AtkUnitBase.FireCallback returns the callback handler's game-defined result, not a
-        // transport acknowledgement. RetainerList returns false even when it synchronously opens
-        // the requested retainer menu, so only the caller's rendered postcondition can authorize
-        // completion.
-        addon->FireCallback(4, values, true);
-
-        return new(true, "RenderedRetainerActivationDispatched",
-            $"Activated the unique rendered retainer row at index {row->ListItemIndex} through the RetainerList callback contract.",
-            addonName, selected.TargetNodePath);
+        return TryActivateListRowIndex(addonName, row->ListItemIndex, doubleClick: true, expectedRow: (nint)componentNode);
     }
 
     /// <summary>
-    /// Activates one uniquely rendered SelectString entry through the addon's index callback. This
-    /// avoids synthetic list-item events while retaining the visible label as the sole authority
-    /// for which semantic option is selected.
+    /// Activates one uniquely rendered SelectString entry through its owning list's native event
+    /// machinery, retaining the visible label as authority for the intended semantic option.
     /// </summary>
     public unsafe RenderedUiTextActionResult TryActivateUniqueSelectStringText(string visibleText)
     {
@@ -386,14 +372,7 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             return Fail("RenderedListStructureChanged", "The rendered selection label no longer resolves to a standard list row.", addonName, selected.TargetNodePath);
 
         var row = (AtkComponentListItemRenderer*)componentNode->Component;
-        var request = RenderedSelectStringActivationPolicy.Create(row->ListItemIndex);
-        if (!request.Success)
-            return Fail(request.Code, request.Message, addonName, selected.TargetNodePath);
-
-        addon->FireCallbackInt(request.Command);
-        return new(true, "RenderedSelectionActivationDispatched",
-            $"Activated the unique rendered selection row at index {request.Command} through the SelectString callback contract.",
-            addonName, selected.TargetNodePath);
+        return TryActivateListRowIndex(addonName, row->ListItemIndex, doubleClick: false, expectedRow: (nint)componentNode);
     }
 
     public unsafe RenderedUiTextActionResult TryRollOverUniqueText(string addonName, string visibleText)

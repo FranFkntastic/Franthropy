@@ -20,10 +20,26 @@ public static class NativeCapabilityGuard
         if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
             throw new NativeCapabilityUnavailableException($"{name} requires the Windows x64 native calling convention.");
         var address = ResolveUnique(scanner.ScanAllText(signature), name);
+        RequireExecutableAddress(scanner, address, name);
+        return address;
+    }
+
+    public static void RequireIdentity(nint observed, nint expected, string name)
+    {
+        RequireAddress(expected, name);
+        if (observed != expected)
+            throw new NativeCapabilityUnavailableException($"{name} does not match its resolved SDK identity.");
+    }
+
+    public static void RequireExecutableAddress(ISigScanner scanner, nint address, string name)
+    {
+        ArgumentNullException.ThrowIfNull(scanner);
+        RequireAddress(address, name);
+        if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            throw new NativeCapabilityUnavailableException($"{name} requires the Windows x64 native calling convention.");
         var start = scanner.Module.BaseAddress + checked((nint)scanner.TextSectionOffset);
         if (address < start || address - start >= scanner.TextSectionSize)
             throw new NativeCapabilityUnavailableException($"{name} resolved outside the game's executable code section.");
-        return address;
     }
 
     public static nint ResolveUnique(IReadOnlyList<nint> matches, string name)

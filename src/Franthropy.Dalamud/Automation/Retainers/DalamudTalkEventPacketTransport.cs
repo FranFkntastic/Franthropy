@@ -85,9 +85,11 @@ public sealed unsafe partial class DalamudTalkEventPacketTransport : IDisposable
         if (receiverCallback == null)
             throw new NativeCapabilityUnavailableException("The zone packet receiver callback is unavailable.");
         var packetDispatcher = &receiverCallback->PacketDispatcher;
-        NativeCapabilityGuard.RequireAddress((nint)(*(nint**)packetDispatcher), "Zone packet receiver vtable");
-        var onReceivePacketAddress = (*(nint**)packetDispatcher)[1];
-        NativeCapabilityGuard.RequireAddress(onReceivePacketAddress, "Zone packet receiver");
+        var sdkDispatcherTable = PacketDispatcher.StaticVirtualTablePointer;
+        NativeCapabilityGuard.RequireIdentity((nint)packetDispatcher->VirtualTable,
+            (nint)sdkDispatcherTable, "Zone packet dispatcher vtable");
+        var onReceivePacketAddress = (nint)sdkDispatcherTable->OnReceivePacket;
+        NativeCapabilityGuard.RequireExecutableAddress(sigScanner, onReceivePacketAddress, "Zone packet receiver");
 
         if (sigScanner is not null)
         {

@@ -10,6 +10,18 @@ namespace Franthropy.Dalamud.Tests.Diagnostics;
 public sealed class NativeCapabilityGuardTests
 {
     [Theory]
+    [InlineData(0x1000, 0)]
+    [InlineData(0, 0x1000)]
+    [InlineData(0x2000, 0x1000)]
+    public void ARelocatedWrongVtableCannotBecomeTheExpectedSdkReceiver(int observed, int expected)
+        => Assert.Throws<NativeCapabilityUnavailableException>(() =>
+            NativeCapabilityGuard.RequireIdentity((nint)observed, (nint)expected, "Packet receiver"));
+
+    [Fact]
+    public void ExactResolvedSdkIdentityIsAccepted()
+        => NativeCapabilityGuard.RequireIdentity((nint)0x2400, (nint)0x2400, "Packet receiver");
+
+    [Theory]
     [InlineData(0x1000)]
     [InlineData(0x2400)]
     public void RelocatedUniqueCapabilityIsAvailableWithoutBuildApproval(int address)

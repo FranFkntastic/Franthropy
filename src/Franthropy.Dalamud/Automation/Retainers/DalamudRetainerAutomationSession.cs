@@ -389,10 +389,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             return opened.Result;
 
         var updated = await framework.RunOnTick(
-            () => SetSellingListingPrice(newUnitPrice),
+            () => SetSellingListingPrice(opened.Listing, newUnitPrice),
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (!updated.Success)
-            return updated;
+        if (!updated.Result.Success)
+            return updated.Result;
 
         var preexistingConfirmation = await framework.RunOnTick(
             () => IsReady(YesNo),
@@ -409,7 +409,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         try
         {
             var confirmed = await framework.RunOnTick(
-                () => ConfirmSellingListingPrice(() => mutationMayHaveBeenSent = true),
+                () => ConfirmSellingListingPrice(opened.Listing, newUnitPrice, updated.Editor,
+                    () => mutationMayHaveBeenSent = true),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             if (!confirmed.Success)
                 return confirmed;
@@ -943,10 +944,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (selectedIndex is null)
             return RetainerAutomationResult.Failed("RetainerNotVisible", $"Retainer '{name}' was not visible as an active retainer-list row.");
 
-        var values = stackalloc AtkValue[4];
-        values[0] = new() { Type = AtkValueType.Int, Int = 2 };
-        values[1] = new() { Type = AtkValueType.UInt, UInt = (uint)selectedIndex.Value };
-        addon->FireCallback(4, values, true);
+        var activated = ActivateRenderedRow(RetainerList, entries[selectedIndex.Value].Name);
+        if (!activated.Success)
+            return activated;
         return RetainerAutomationResult.Succeeded("RetainerSelected", $"Selected {name}.");
     }
 
@@ -961,11 +961,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (selectedIndex is null)
             return (RetainerAutomationResult.Failed("RetainerNotVisible", "No active retainer was visible in the retainer list."), null);
 
-        var values = stackalloc AtkValue[4];
-        values[0] = new() { Type = AtkValueType.Int, Int = 2 };
-        values[1] = new() { Type = AtkValueType.UInt, UInt = (uint)selectedIndex.Value };
-        addon->FireCallback(4, values, true);
         var name = entries[selectedIndex.Value].Name;
+        var activated = ActivateRenderedRow(RetainerList, name);
+        if (!activated.Success)
+            return (activated, null);
         return (RetainerAutomationResult.Succeeded("RetainerSelected", $"Selected {name}."), name);
     }
 
@@ -1077,8 +1076,17 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         var index = FindEntry(addon, ResolveAddonText(addonRow));
         if (index < 0)
             return RetainerAutomationResult.Failed("RetainerCommandUnavailable", $"Retainer command entry {addonRow} is unavailable.");
-        addon->AtkUnitBase.FireCallbackInt(index);
-        return RetainerAutomationResult.Succeeded("RetainerCommandSelected", "Retainer command selected.");
+        return ActivateRenderedRow(SelectString, addon->PopupMenu.PopupMenu.EntryNames[index].ToString());
+    }
+
+    private RetainerAutomationResult ActivateRenderedRow(string addonName, string name)
+    {
+        var activated = addonName == RetainerList
+            ? renderedUi.TryActivateUniqueRetainerListRowText(name)
+            : renderedUi.TryActivateUniqueSelectStringText(name);
+        return activated.Success
+            ? RetainerAutomationResult.Succeeded("RetainerRenderedRowActivated", activated.Message)
+            : RetainerAutomationResult.Failed(activated.Code, activated.Message);
     }
 
     private static unsafe int FindEntry(AddonSelectString* addon, string target)
@@ -1390,37 +1398,110 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         return MatchesMarketListing(manager, marketContainer, expected.SlotIndex, expected);
     }
 
-    private unsafe RetainerAutomationResult SetSellingListingPrice(uint newUnitPrice)
+    private unsafe (RetainerAutomationResult Result, nint Editor) SetSellingListingPrice(
+        RetainerMarketListingTarget listing, uint newUnitPrice)
     {
-        var addon = gameGui.GetAddonByName<AtkUnitBase>(SellingListingEditor, 1);
-        if (addon == null || !addon->IsReady || !addon->IsVisible)
-            return RetainerAutomationResult.Failed(
-                "RetainerSellingListingUnavailable",
-                "The verified retainer listing editor is unavailable.");
-
-        var values = stackalloc AtkValue[2];
-        values[0] = new() { Type = AtkValueType.Int, Int = 2 };
-        values[1] = new() { Type = AtkValueType.UInt, UInt = newUnitPrice };
-        addon->FireCallback(2, values, true);
-        return RetainerAutomationResult.Succeeded(
-            "RetainerMarketPriceEntered",
-            "Entered the requested unit price in the verified listing editor.");
+        try
+        {
+            var addon = RequireSellingEditor(listing, listing.UnitPrice ??
+                throw new NativeCapabilityUnavailableException("An exact observed listing price is required before editing."));
+            NativeCapabilityGuard.RequireAddress(AtkComponentNumericInput.Addresses.InnerSetValue.Value,
+                "Retainer price numeric input");
+            RequireOwnedEvent(&addon->AtkUnitBase, &addon->AskingPrice->OwnerNode->AtkResNode, AtkEventType.ValueUpdate);
+            addon->AskingPrice->InnerSetValue(checked((int)newUnitPrice), triggerCallback: true, playSoundEffect: false);
+            if (addon->AskingPrice->Value != newUnitPrice)
+                throw new NativeCapabilityUnavailableException("The listing price input rejected the requested value.");
+            return (RetainerAutomationResult.Succeeded("RetainerMarketPriceEntered",
+                "Entered the requested price through its verified native numeric control."), (nint)addon);
+        }
+        catch (NativeCapabilityUnavailableException exception)
+        {
+            return (RetainerAutomationResult.Failed(NativeCapabilityGuard.FailureCode, exception.Message), 0);
+        }
     }
 
-    private unsafe RetainerAutomationResult ConfirmSellingListingPrice(System.Action markDispatchStarted)
+    private unsafe RetainerAutomationResult ConfirmSellingListingPrice(RetainerMarketListingTarget listing,
+        uint newUnitPrice, nint capturedEditor, System.Action markDispatchStarted)
     {
-        var addon = gameGui.GetAddonByName<AtkUnitBase>(SellingListingEditor, 1);
-        if (addon == null || !addon->IsReady || !addon->IsVisible)
-            return RetainerAutomationResult.Failed(
-                "RetainerSellingListingUnavailable",
-                "The verified retainer listing editor is unavailable at confirmation.");
+        try
+        {
+            var addon = RequireSellingEditor(listing, newUnitPrice);
+            NativeCapabilityGuard.RequireIdentity((nint)addon, capturedEditor, "Retainer listing editor");
+            RequireOwnedEvent(&addon->AtkUnitBase, &addon->Confirm->OwnerNode->AtkResNode, AtkEventType.ButtonClick);
+            if (!addon->Confirm->IsEnabled)
+                throw new NativeCapabilityUnavailableException("The listing confirmation button is disabled.");
+            markDispatchStarted();
+            addon->Confirm->ClickAddonButton(&addon->AtkUnitBase);
+            return RetainerAutomationResult.Succeeded("RetainerMarketPriceConfirmationSent",
+                "Activated the verified listing's native confirmation button exactly once.");
+        }
+        catch (NativeCapabilityUnavailableException exception)
+        {
+            return RetainerAutomationResult.Failed(NativeCapabilityGuard.FailureCode, exception.Message);
+        }
+    }
 
-        markDispatchStarted();
-        var value = new AtkValue { Type = AtkValueType.Int, Int = 0 };
-        addon->FireCallback(1, &value, true);
-        return RetainerAutomationResult.Succeeded(
-            "RetainerMarketPriceConfirmationSent",
-            "Submitted the verified listing price exactly once.");
+    private unsafe AddonRetainerSell* RequireSellingEditor(RetainerMarketListingTarget listing, uint displayedPrice)
+    {
+        var verified = VerifyActive(active?.RetainerId ?? 0);
+        if (!verified.Success)
+            throw new NativeCapabilityUnavailableException(verified.Message);
+        var addon = gameGui.GetAddonByName<AddonRetainerSell>(SellingListingEditor, 1);
+        if (addon == null || !addon->AtkUnitBase.IsReady || !addon->AtkUnitBase.IsVisible ||
+            addon->AskingPrice == null || addon->Quantity == null || addon->Confirm == null || addon->ItemName == null)
+            throw new NativeCapabilityUnavailableException("The typed retainer listing editor is unavailable.");
+        RequireOwnedComponent(&addon->AtkUnitBase, addon->AskingPrice->OwnerNode,
+            (nint)addon->AskingPrice, ComponentType.NumericInput);
+        RequireOwnedComponent(&addon->AtkUnitBase, addon->Quantity->OwnerNode,
+            (nint)addon->Quantity, ComponentType.NumericInput);
+        RequireOwnedComponent(&addon->AtkUnitBase, addon->Confirm->OwnerNode,
+            (nint)addon->Confirm, ComponentType.Button);
+        var manager = InventoryManager.Instance();
+        var container = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
+        if (manager == null || container == null || !container->IsLoaded ||
+            listing.SlotIndex < 0 || listing.SlotIndex >= container->Size ||
+            !MatchesMarketListing(manager, container, listing.SlotIndex, listing))
+            throw new NativeCapabilityUnavailableException("The exact retainer listing changed before editing.");
+        var itemName = dataManager.GetExcelSheet<Item>().GetRow(listing.ItemId).Name.ExtractText();
+        RetainerSellingEditorPolicy.RequireListing(listing.Quantity, displayedPrice, itemName,
+            addon->Quantity->Value, addon->AskingPrice->Value, addon->ItemName->NodeText.ToString());
+        return addon;
+    }
+
+    private static unsafe void RequireOwnedComponent(AtkUnitBase* addon, AtkComponentNode* node,
+        nint component, ComponentType expectedType)
+    {
+        if (node == null || node->Component == null || (nint)node->Component != component ||
+            node->Component->GetComponentType() != expectedType || !node->AtkResNode.IsVisible() ||
+            addon->UldManager.NodeList == null || addon->UldManager.NodeListCount > 4096)
+            throw new NativeCapabilityUnavailableException("The typed listing control has an unsupported structure.");
+        var matches = 0;
+        for (var index = 0; index < addon->UldManager.NodeListCount; index++)
+            if (addon->UldManager.NodeList[index] == &node->AtkResNode)
+                matches++;
+        if (matches != 1)
+            throw new NativeCapabilityUnavailableException("The listing control is not uniquely owned by this addon.");
+    }
+
+    private static unsafe void RequireOwnedEvent(AtkUnitBase* addon, AtkResNode* node, AtkEventType eventType)
+    {
+        var matches = 0;
+        var registered = (AtkEvent*)node->AtkEventManager.Event;
+        var visited = new HashSet<nint>();
+        while (registered != null)
+        {
+            if (visited.Count >= 128 || !visited.Add((nint)registered))
+                throw new NativeCapabilityUnavailableException("The listing control's event chain is unsupported.");
+            if (registered->State.EventType == eventType)
+            {
+                if ((nint)registered->Listener != (nint)addon || registered->Node != node)
+                    throw new NativeCapabilityUnavailableException("The listing event belongs to another native receiver.");
+                matches++;
+            }
+            registered = registered->NextEvent;
+        }
+        if (matches != 1)
+            throw new NativeCapabilityUnavailableException("The listing control does not expose one owned native event.");
     }
 
     private unsafe (bool Committed, bool YesNoReady) ObserveSellingListingPriceCommit(
@@ -1640,5 +1721,18 @@ internal static class RetainerClosingPolicy
         if (observed.ActiveRetainerId != 0 && observed.ActiveRetainerId != expectedRetainerId)
             return RetainerClosingAction.RejectIdentity;
         return RetainerClosingAction.AdvanceTalk;
+    }
+}
+
+internal static class RetainerSellingEditorPolicy
+{
+    public static void RequireListing(int expectedQuantity, uint expectedPrice, string expectedName,
+        int displayedQuantity, int displayedPrice, string displayedName)
+    {
+        if (expectedQuantity <= 0 || expectedPrice == 0 || expectedPrice > int.MaxValue ||
+            displayedQuantity != expectedQuantity || displayedPrice != expectedPrice ||
+            string.IsNullOrWhiteSpace(expectedName) || !string.Equals(expectedName.Trim(),
+                displayedName.Replace("\uE03C", string.Empty, StringComparison.Ordinal).Trim(), StringComparison.Ordinal))
+            throw new NativeCapabilityUnavailableException("The rendered listing item, quantity or price does not match the exact observed listing.");
     }
 }
