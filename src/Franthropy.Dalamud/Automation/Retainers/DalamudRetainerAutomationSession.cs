@@ -1174,6 +1174,11 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         uint unitPrice,
         System.Action markDispatchStarted)
     {
+        if (InventoryManager.Addresses.MoveToRetainerMarket.Value == 0)
+            return new(MarketListingPostDispatchOutcome.FailedBeforeSend, null, 0,
+                NativeCapabilityGuard.FailureCode,
+                "The market listing entry point is unresolved; no request was sent.");
+
         if (!PlayerOrdinaryItemContainers.Contains(source.Container))
         {
             return new(
@@ -1252,15 +1257,20 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             quantity,
             source.IsHighQuality,
             unitPrice);
+        var dispatchStarted = false;
         try
         {
+            var sourceIndex = checked((ushort)source.SlotIndex);
+            var destinationIndex = checked((ushort)marketSlotIndex);
+            var nativeQuantity = checked((uint)quantity);
             markDispatchStarted();
+            dispatchStarted = true;
             manager->MoveToRetainerMarket(
                 source.Container,
-                checked((ushort)source.SlotIndex),
+                sourceIndex,
                 InventoryType.RetainerMarket,
-                checked((ushort)marketSlotIndex),
-                checked((uint)quantity),
+                destinationIndex,
+                nativeQuantity,
                 unitPrice);
             return new(
                 MarketListingPostDispatchOutcome.Sent,
@@ -1272,11 +1282,13 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         catch (Exception exception)
         {
             return new(
-                MarketListingPostDispatchOutcome.Indeterminate,
+                dispatchStarted ? MarketListingPostDispatchOutcome.Indeterminate : MarketListingPostDispatchOutcome.FailedBeforeSend,
                 expected,
                 source.Quantity,
-                "RetainerMarketListingPostDispatchIndeterminate",
-                $"The listing call faulted after dispatch began: {exception.Message} Re-scan before retrying.");
+                dispatchStarted ? "RetainerMarketListingPostDispatchIndeterminate" : "RetainerMarketListingPostNotSent",
+                dispatchStarted
+                    ? $"The listing call faulted after dispatch began: {exception.Message} Re-scan before retrying."
+                    : $"The listing request could not be prepared: {exception.Message} No request was sent.");
         }
     }
 
@@ -1284,6 +1296,11 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         RetainerMarketListingTarget listing,
         System.Action markDispatchStarted)
     {
+        if (InventoryManager.Addresses.MoveFromRetainerMarketToPlayerInventory.Value == 0)
+            return new(MarketListingPostDispatchOutcome.FailedBeforeSend, 0,
+                NativeCapabilityGuard.FailureCode,
+                "The market listing removal entry point is unresolved; no request was sent.");
+
         if (listing.Quantity <= 0 || listing.UnitPrice is not > 0 or > RetainerMarketPricePolicy.MaximumUnitPrice)
         {
             return new(
@@ -1314,13 +1331,17 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         }
 
         var playerQuantityBefore = CountPlayerVariant(listing.ItemId, listing.IsHq);
+        var dispatchStarted = false;
         try
         {
+            var sourceIndex = checked((ushort)listing.SlotIndex);
+            var nativeQuantity = checked((uint)listing.Quantity);
             markDispatchStarted();
+            dispatchStarted = true;
             manager->MoveFromRetainerMarketToPlayerInventory(
                 InventoryType.RetainerMarket,
-                checked((ushort)listing.SlotIndex),
-                checked((uint)listing.Quantity));
+                sourceIndex,
+                nativeQuantity);
             return new(
                 MarketListingPostDispatchOutcome.Sent,
                 playerQuantityBefore,
@@ -1330,10 +1351,12 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         catch (Exception exception)
         {
             return new(
-                MarketListingPostDispatchOutcome.Indeterminate,
+                dispatchStarted ? MarketListingPostDispatchOutcome.Indeterminate : MarketListingPostDispatchOutcome.FailedBeforeSend,
                 playerQuantityBefore,
-                "RetainerMarketListingRemovalDispatchIndeterminate",
-                $"The removal call faulted after dispatch began: {exception.Message} Re-scan before retrying.");
+                dispatchStarted ? "RetainerMarketListingRemovalDispatchIndeterminate" : "RetainerMarketListingRemovalNotSent",
+                dispatchStarted
+                    ? $"The removal call faulted after dispatch began: {exception.Message} Re-scan before retrying."
+                    : $"The removal request could not be prepared: {exception.Message} No request was sent.");
         }
     }
 

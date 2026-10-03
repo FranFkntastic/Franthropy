@@ -43,6 +43,10 @@
       <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\FFXIVClientStructs.dll</HintPath>
       <Private>true</Private>
     </Reference>
+    <Reference Include="InteropGenerator.Runtime">
+      <HintPath>$(AppData)\XIVLauncher\addon\Hooks\dev\InteropGenerator.Runtime.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>
