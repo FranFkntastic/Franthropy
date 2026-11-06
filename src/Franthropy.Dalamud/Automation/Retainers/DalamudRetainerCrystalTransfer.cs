@@ -6,6 +6,8 @@ using FFXIVClientStructs.FFXIV.Component.GUI;
 using Franthropy.Dalamud.Automation.Inventory;
 using Franthropy.Dalamud.Diagnostics;
 
+using Franthropy.Dalamud.Automation.Ui;
+
 namespace Franthropy.Dalamud.Automation.Retainers;
 
 public sealed record RetainerCrystalTransferResult(
@@ -210,15 +212,15 @@ public sealed class DalamudRetainerCrystalTransfer
     private unsafe RetainerCrystalTransferResult SubmitQuantity(uint itemId, int requested)
     {
         var numeric = gameGui.GetAddonByName<AtkUnitBase>(InputNumericAddon, 1);
-        if (numeric == null || !numeric->IsReady || !numeric->IsVisible || numeric->AtkValuesCount <= 3)
+        if (!DalamudNumericDialog.TryGetBounds(numeric, out var minimum, out var maximum))
             return new(false, 0, "QuantityInputPending", $"Numeric quantity popup did not open for item {itemId}.");
 
-        var maximum = checked((int)numeric->AtkValues[3].UInt);
         if (maximum <= 0)
             return new(false, 0, "NoCapacity", $"Retainer reported no deposit capacity for item {itemId}.");
 
-        var submitted = Math.Clamp(requested, 1, maximum);
-        numeric->FireCallbackInt(submitted);
+        var submitted = Math.Clamp(requested, Math.Max(1, minimum), maximum);
+        if (DalamudNumericDialog.TrySubmit(numeric, submitted) != NumericDialogSubmission.Submitted)
+            return new(false, 0, "QuantityInputPending", $"Numeric quantity popup is not ready for item {itemId}.");
         return new(true, submitted, "QuantitySubmitted", $"Submitted {submitted}x item {itemId} for deposit.");
     }
 
