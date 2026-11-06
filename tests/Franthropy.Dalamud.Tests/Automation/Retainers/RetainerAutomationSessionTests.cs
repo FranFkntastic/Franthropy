@@ -10,6 +10,31 @@ namespace Franthropy.Dalamud.Tests.Automation.Retainers;
 public sealed class RetainerAutomationSessionTests
 {
     [Theory]
+    [InlineData(false, "RetainerMenuTimeout")]
+    [InlineData(true, "RetainerMenuReady")]
+    public async Task DispatchedActivationStillRequiresObservedMenu(bool menuReady, string expectedCode)
+    {
+        var observations = 0;
+        var session = CreateSession("unused", (method, _) =>
+        {
+            if (method.Name == nameof(IFramework.RunOnTick))
+            {
+                observations++;
+                return Task.FromResult(new RetainerOpeningObservation(menuReady, false, false, 42));
+            }
+            if (method.Name == nameof(IFramework.DelayTicks))
+                return Task.CompletedTask;
+            throw new InvalidOperationException($"Unexpected dependency call: {method.Name}.");
+        });
+
+        var result = await session.WaitForCurrentRetainerMenuAsync();
+
+        Assert.Equal(menuReady, result.Success);
+        Assert.Equal(expectedCode, result.Code);
+        Assert.Equal(menuReady ? 1 : 180, observations);
+    }
+
+    [Theory]
     [InlineData("Entrust or withdraw items.", "Entrust or withdraw items", true)]
     [InlineData("Entrust or withdraw items. (22)", "Entrust or withdraw items", true)]
     [InlineData("\uE03CEntrust or withdraw items.", "Entrust or withdraw items", true)]
