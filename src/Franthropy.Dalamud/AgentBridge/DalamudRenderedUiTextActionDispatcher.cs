@@ -246,6 +246,8 @@ public sealed class DalamudRenderedUiTextActionDispatcher
     /// <summary>
     /// Activates one verified row index through the addon's standard list-item event machinery.
     /// The caller owns the semantic proof that the index still identifies the intended object.
+    /// Success means dispatch was attempted, not activation completed. The caller must wait for
+    /// its rendered or game-state postcondition and return an explicit failure if it never arrives.
     /// </summary>
     public unsafe RenderedUiTextActionResult TryActivateListRowIndex(string addonName, int rowIndex)
         => TryActivateListRowIndex(addonName, rowIndex, doubleClick: false);
@@ -286,30 +288,35 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         if (expectedRow != 0 && (nint)rowNode != expectedRow)
             return Fail("RenderedListIdentityChanged", "The named row changed before its native event dispatch.", addonName);
         var list = (AtkComponentList*)listNode->Component;
-        var row = (AtkComponentListItemRenderer*)rowNode->Component;
         list->SelectItem(rowIndex, true);
         if (list->SelectedItemIndex != rowIndex)
             return Fail("RenderedListSelectionRejected", "The rendered list rejected the requested row selection.", addonName);
 
+        return DispatchVerifiedListRow(list, addonName, rowIndex, doubleClick);
+    }
+
+    // Preconditions (visible unique list, selected index, and optional expectedRow identity)
+    // are checked by TryActivateListRowIndex before entering this native boundary.
+    internal static unsafe RenderedUiTextActionResult DispatchVerifiedListRow(
+        AtkComponentList* list, string addonName, int rowIndex, bool doubleClick)
+    {
+        // DispatchEvent constructs AtkListItemData from this mouse payload itself. Passing
+        // pre-populated list data reinterprets renderer-pointer bytes as mouse flags.
         var eventData = new AtkEventData();
-        var mouseData = new AtkEventData.AtkMouseData();
         var eventType = doubleClick ? AtkEventType.ListItemDoubleClick : AtkEventType.ListItemClick;
-        list->PopulateAtkListItemData(
-            &eventData.ListItemData,
-            &mouseData,
+        // The bool aggregates listeners' Handled flags, not delivery or completion. A
+        // listener can open the requested menu without marking the event handled. Null
+        // atkEvent is valid with handled:false (no source event needs marking).
+        _ = list->DispatchEvent(
+            eventType,
+            null,
+            &eventData,
             checked((uint)rowIndex),
-            eventType);
-        if (!list->DispatchEvent(
-                eventType,
-                null,
-                &eventData,
-                checked((uint)rowIndex),
-                false))
-            return Fail("RenderedListEventRejected", "The rendered list rejected its standard item-click event.", addonName);
+            false);
         return new(
             true,
-            "RenderedListRowActivated",
-            $"Activated the verified rendered list row at index {row->ListItemIndex} through its owning list.",
+            "RenderedListRowActivationDispatched",
+            $"Dispatched activation for rendered row {rowIndex}; the caller must verify the resulting UI or game state.",
             addonName,
             null);
     }

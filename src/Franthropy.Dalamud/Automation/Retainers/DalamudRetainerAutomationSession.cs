@@ -944,7 +944,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (selectedIndex is null)
             return RetainerAutomationResult.Failed("RetainerNotVisible", $"Retainer '{name}' was not visible as an active retainer-list row.");
 
-        var activated = ActivateRenderedRow(RetainerList, entries[selectedIndex.Value].Name);
+        var activated = FireRetainerListRow(addon, entries, selectedIndex.Value);
         if (!activated.Success)
             return activated;
         return RetainerAutomationResult.Succeeded("RetainerSelected", $"Selected {name}.");
@@ -962,7 +962,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             return (RetainerAutomationResult.Failed("RetainerNotVisible", "No active retainer was visible in the retainer list."), null);
 
         var name = entries[selectedIndex.Value].Name;
-        var activated = ActivateRenderedRow(RetainerList, name);
+        var activated = FireRetainerListRow(addon, entries, selectedIndex.Value);
         if (!activated.Success)
             return (activated, null);
         return (RetainerAutomationResult.Succeeded("RetainerSelected", $"Selected {name}."), name);
@@ -1076,17 +1076,30 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         var index = FindEntry(addon, ResolveAddonText(addonRow));
         if (index < 0)
             return RetainerAutomationResult.Failed("RetainerCommandUnavailable", $"Retainer command entry {addonRow} is unavailable.");
-        return ActivateRenderedRow(SelectString, addon->PopupMenu.PopupMenu.EntryNames[index].ToString());
+        // FindEntry resolved the index from this addon's live entry table on this tick, so the
+        // callback index is bound to the verified label. The game's SelectString handler takes
+        // the zero-based entry index as its single Int callback value.
+        addon->AtkUnitBase.FireCallbackInt(index);
+        return RetainerAutomationResult.Succeeded("RetainerCommandSelected",
+            $"Selected retainer command '{addon->PopupMenu.PopupMenu.EntryNames[index]}' at index {index}.");
     }
 
-    private RetainerAutomationResult ActivateRenderedRow(string addonName, string name)
+    // The retainer list's own selection callback is (Int 2, UInt rowIndex). Synthetic
+    // ListItemClick/DoubleClick dispatch reaches list listeners but does not open the retainer
+    // (verified live 2026-11-06: RetainerMenuTimeout with RetainerList still showing).
+    private static unsafe RetainerAutomationResult FireRetainerListRow(
+        AtkUnitBase* addon, IReadOnlyList<RetainerListEntry> entries, int index)
     {
-        var activated = addonName == RetainerList
-            ? renderedUi.TryActivateUniqueRetainerListRowText(name)
-            : renderedUi.TryActivateUniqueSelectStringText(name);
-        return activated.Success
-            ? RetainerAutomationResult.Succeeded("RetainerRenderedRowActivated", activated.Message)
-            : RetainerAutomationResult.Failed(activated.Code, activated.Message);
+        if (index < 0 || index >= entries.Count || !entries[index].IsActive || string.IsNullOrWhiteSpace(entries[index].Name))
+            return RetainerAutomationResult.Failed("RetainerNotVisible", "The verified retainer row changed before selection.");
+
+        // Same 4-value shape the pre-3a054f9 implementation used successfully in production.
+        var values = stackalloc AtkValue[4];
+        values[0] = new() { Type = AtkValueType.Int, Int = 2 };
+        values[1] = new() { Type = AtkValueType.UInt, UInt = (uint)index };
+        addon->FireCallback(4, values, true);
+        return RetainerAutomationResult.Succeeded("RetainerListRowSelected",
+            $"Selected retainer row {index} ({entries[index].Name}) through the list's native callback.");
     }
 
     private static unsafe int FindEntry(AddonSelectString* addon, string target)
