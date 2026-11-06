@@ -179,11 +179,15 @@ public sealed class SqliteObservationStore : IObservationStore
 
         try
         {
+            ObservationWriteProgress.Mark("open");
             await using var connection = CreateConnection(options, readOnly: false);
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            ObservationWriteProgress.Mark("begin");
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            ObservationWriteProgress.Mark("read");
             var current = await ReadCurrentRowAsync(connection, transaction, scopeKey, cancellationToken).ConfigureAwait(false);
 
+            ObservationWriteProgress.Mark("apply");
             ObservationWriteResult result;
             var sourceOrder = current is null ? 1 : CompareSourceOrder(observation.Capture, current);
             if (current is not null && sourceOrder < 0)
@@ -288,9 +292,12 @@ public sealed class SqliteObservationStore : IObservationStore
                 }
             }
 
+            ObservationWriteProgress.Mark("commit");
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            ObservationWriteProgress.Mark("publish/signal");
             if (change is not null)
                 PublishChange(change);
+            ObservationWriteProgress.Mark("cleanup");
             if (result.Status is ObservationWriteStatus.AcceptedChanged or ObservationWriteStatus.AcceptedConfirmed)
             {
                 try
@@ -701,9 +708,12 @@ public sealed class SqliteObservationStore : IObservationStore
         ObservationChange? notification = null;
         try
         {
+            ObservationWriteProgress.Mark("open");
             await using var connection = CreateConnection(options, readOnly: false);
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            ObservationWriteProgress.Mark("begin");
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            ObservationWriteProgress.Mark("read");
             var current = await ReadCurrentRowAsync(connection, transaction, scopeKey, cancellationToken).ConfigureAwait(false);
             var observedContainers = await ReadObservedInventoryContainersAsync(
                 connection,
@@ -712,7 +722,9 @@ public sealed class SqliteObservationStore : IObservationStore
                 cancellationToken).ConfigureAwait(false);
             if (current is null || current.IsStale || observedContainers is null)
             {
+                ObservationWriteProgress.Mark("commit");
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                ObservationWriteProgress.Mark("cleanup");
                 return new ObservationWriteResult(
                     ObservationWriteStatus.Rejected,
                     "A fresh complete inventory baseline is required before slot changes can be applied.",
@@ -725,7 +737,9 @@ public sealed class SqliteObservationStore : IObservationStore
                 .FirstOrDefault(containerId => !observedContainers.Contains(containerId!.Value));
             if (unobservedContainer is { } missingContainer)
             {
+                ObservationWriteProgress.Mark("commit");
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                ObservationWriteProgress.Mark("cleanup");
                 return new ObservationWriteResult(
                     ObservationWriteStatus.Rejected,
                     $"Inventory container {missingContainer} was not observed by the current baseline; a fresh complete baseline is required.",
@@ -735,7 +749,9 @@ public sealed class SqliteObservationStore : IObservationStore
             var sourceOrder = CompareSourceOrder(observation.Capture, current);
             if (sourceOrder < 0)
             {
+                ObservationWriteProgress.Mark("commit");
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                ObservationWriteProgress.Mark("cleanup");
                 return new ObservationWriteResult(
                     ObservationWriteStatus.IgnoredOlderRevision,
                     "An older inventory revision cannot change trusted slots.",
@@ -743,13 +759,16 @@ public sealed class SqliteObservationStore : IObservationStore
             }
             if (sourceOrder == 0)
             {
+                ObservationWriteProgress.Mark("commit");
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                ObservationWriteProgress.Mark("cleanup");
                 return new ObservationWriteResult(
                     ObservationWriteStatus.IgnoredRepeatedRevision,
                     "A repeated inventory revision cannot change trusted slots.",
                     current.Revision);
             }
 
+            ObservationWriteProgress.Mark("apply");
             var changes = new List<InventorySlotChange>();
             foreach (var update in observation.Updates)
             {
@@ -791,8 +810,11 @@ public sealed class SqliteObservationStore : IObservationStore
                 notification = new ObservationChange(observation.Scope, storeRevision, ObservationChangeKind.Replaced, observation.Capture.ObservedAtUtc);
             }
 
+            ObservationWriteProgress.Mark("commit");
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            ObservationWriteProgress.Mark("publish/signal");
             PublishChange(notification);
+            ObservationWriteProgress.Mark("cleanup");
             try
             {
                 await RunDueCleanupAsync(connection, observation.Capture.ObservedAtUtc, cancellationToken).ConfigureAwait(false);
@@ -1844,7 +1866,7 @@ public sealed class SqliteObservationStore : IObservationStore
         }
     }
 
-    private static string CreateScopeKey(ObservationScope scope) => string.Create(
+    public static string CreateScopeKey(ObservationScope scope) => string.Create(
         CultureInfo.InvariantCulture,
         $"{scope.Owner.LocalContentId:X16}:{scope.Owner.HomeWorldId}:{(int)scope.Subject.Kind}:{scope.Subject.Id:X16}:{(int)scope.Container}");
     private static string FormatOwnerId(ulong value) => value.ToString("X16", CultureInfo.InvariantCulture);
