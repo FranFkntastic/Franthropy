@@ -9,6 +9,8 @@ using Franthropy.Dalamud.Automation.Inventory;
 using Franthropy.Dalamud.Diagnostics;
 using GameInventoryType = Dalamud.Game.Inventory.GameInventoryType;
 
+using Franthropy.Dalamud.Automation.Ui;
+
 namespace Franthropy.Dalamud.Automation.Retainers;
 
 internal enum RetainerRetrievalCommand : long
@@ -272,15 +274,15 @@ public sealed class DalamudRetainerItemRetrieval
     private unsafe RetainerRetrievalResult SubmitQuantity(uint itemId, int requested)
     {
         var numeric = gameGui.GetAddonByName<AtkUnitBase>(InputNumericAddon, 1);
-        if (numeric == null || !numeric->IsReady || !numeric->IsVisible || numeric->AtkValuesCount <= 3)
+        if (!DalamudNumericDialog.TryGetBounds(numeric, out var minimum, out var maximum))
             return new(false, 0, "QuantityInputPending", $"Numeric quantity popup did not open for item {itemId}.");
 
-        var maximum = checked((int)numeric->AtkValues[3].UInt);
         if (maximum <= 0)
             return new(false, 0, "QuantityUnavailable", $"Retainer reported no retrievable quantity for item {itemId}.");
 
-        var submitted = Math.Clamp(requested, 1, maximum);
-        numeric->FireCallbackInt(submitted);
+        var submitted = Math.Clamp(requested, Math.Max(1, minimum), maximum);
+        if (DalamudNumericDialog.TrySubmit(numeric, submitted) != NumericDialogSubmission.Submitted)
+            return new(false, 0, "QuantityInputPending", $"Numeric quantity popup is not ready for item {itemId}.");
         return new(true, submitted, "QuantitySubmitted", $"Submitted {submitted}x item {itemId} for retrieval.");
     }
 
