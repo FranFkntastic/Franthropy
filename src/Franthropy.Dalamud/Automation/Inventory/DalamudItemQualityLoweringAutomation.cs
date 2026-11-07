@@ -110,6 +110,90 @@ public static class ItemQualityLoweringPlanner
 
         return new(true, true, "Required inventory is available at normal quality.", null, 0);
     }
+
+    /// <summary>
+    /// Merges requirements per item exactly as the automation does before execution.
+    /// </summary>
+    public static IReadOnlyList<ItemQualityLoweringRequirement> Normalize(
+        IReadOnlyList<ItemQualityLoweringRequirement> requested)
+    {
+        ArgumentNullException.ThrowIfNull(requested);
+        return requested
+            .Where(requirement => requirement.RequiredNormalQualityQuantity > 0)
+            .GroupBy(requirement => requirement.ItemId)
+            .Select(group => new ItemQualityLoweringRequirement(
+                group.Key,
+                group.First().ItemName,
+                checked(group.Sum(requirement => requirement.RequiredNormalQualityQuantity))))
+            .ToArray();
+    }
+
+    /// <summary>
+    /// Dry-runs <see cref="ResolveNext"/> against a copy of the given stacks and returns every
+    /// HQ stack the automation would lower, in order. The game lowers whole stacks, so a step
+    /// can convert more units than the requirement needs; that excess is reported explicitly.
+    /// </summary>
+    public static ItemQualityLoweringPreview Preview(
+        IReadOnlyList<ItemQualityLoweringRequirement> requested,
+        IReadOnlyList<DalamudInventoryStack> stacks)
+    {
+        ArgumentNullException.ThrowIfNull(stacks);
+        var requirements = Normalize(requested);
+        var simulated = stacks.ToList();
+        var steps = new List<ItemQualityLoweringPreviewStep>();
+
+        // Each step flips one HQ stack to NQ, so the plan converges within stacks.Count steps.
+        for (var guard = 0; guard <= stacks.Count; guard++)
+        {
+            var step = ResolveNext(requirements, simulated);
+            if (!step.Success)
+                return new(false, step.Message, steps);
+            if (step.Completed)
+            {
+                return new(
+                    true,
+                    steps.Count == 0
+                        ? "No HQ items need to be lowered."
+                        : $"{steps.Sum(s => s.ConvertedUnits):N0} HQ units across {steps.Count:N0} stack(s) will be lowered to NQ.",
+                    steps);
+            }
+
+            var stack = step.Stack!;
+            var name = requirements.First(requirement => requirement.ItemId == stack.ItemId).ItemName;
+            steps.Add(new(
+                stack.ItemId,
+                name,
+                stack.Container,
+                stack.SlotIndex,
+                stack.Quantity,
+                Math.Min(stack.Quantity, step.RemainingHighQualityUnits)));
+            simulated[simulated.IndexOf(stack)] = stack with { IsHighQuality = false };
+        }
+
+        return new(false, "The quality-lowering preview did not converge.", steps);
+    }
+}
+
+public sealed record ItemQualityLoweringPreviewStep(
+    uint ItemId,
+    string ItemName,
+    InventoryType Container,
+    int SlotIndex,
+    int ConvertedUnits,
+    int RequiredUnits)
+{
+    /// <summary>Units converted beyond the requirement because the game lowers whole stacks.</summary>
+    public int ExcessConvertedUnits => ConvertedUnits - RequiredUnits;
+}
+
+public sealed record ItemQualityLoweringPreview(
+    bool Success,
+    string Message,
+    IReadOnlyList<ItemQualityLoweringPreviewStep> Steps)
+{
+    public bool RequiresLowering => Steps.Count > 0;
+    public int ConvertedUnits => Steps.Sum(step => step.ConvertedUnits);
+    public int ExcessConvertedUnits => Steps.Sum(step => step.ExcessConvertedUnits);
 }
 
 /// <summary>
@@ -117,33 +201,47 @@ public static class ItemQualityLoweringPlanner
 /// owns its confirmation dialog, and requires exact aggregate inventory evidence
 /// before advancing to another stack.
 /// </summary>
+/// <remarks>
+/// When a log is supplied, every wait reason, native dispatch, post-dispatch observation, and
+/// terminal outcome is written once per change, so a stalled run shows which gate held it.
+/// </remarks>
 public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringAutomation
 {
     private static readonly TimeSpan OperationTimeout = TimeSpan.FromSeconds(20);
     private const uint LowerItemQualityPermission = 135;
     private const int LowerQualityDialogType = 2;
     private const string SelectYesNoAddon = "SelectYesno";
+    private const string LogPrefix = "[QualityLowering]";
 
     private readonly IGameGui gameGui;
     private readonly IReadOnlyList<InventoryType> inventoryTypes;
     private readonly Func<DateTimeOffset> clock;
+    private readonly IPluginLog? log;
+    private readonly ICondition? condition;
     private IReadOnlyList<ItemQualityLoweringRequirement> requirements = [];
     private DalamudInventoryStack? activeStack;
+    private string activeItemName = string.Empty;
     private int highQualityBefore;
     private int normalQualityBefore;
     private DateTimeOffset deadline;
+    private DateTimeOffset dispatchedAt;
+    private string? lastObservation;
 
     public DalamudItemQualityLoweringAutomation(
         IGameGui gameGui,
-        IReadOnlyList<InventoryType> inventoryTypes)
-        : this(gameGui, inventoryTypes, () => DateTimeOffset.UtcNow)
+        IReadOnlyList<InventoryType> inventoryTypes,
+        IPluginLog? log = null,
+        ICondition? condition = null)
+        : this(gameGui, inventoryTypes, () => DateTimeOffset.UtcNow, log, condition)
     {
     }
 
     internal DalamudItemQualityLoweringAutomation(
         IGameGui gameGui,
         IReadOnlyList<InventoryType> inventoryTypes,
-        Func<DateTimeOffset> clock)
+        Func<DateTimeOffset> clock,
+        IPluginLog? log = null,
+        ICondition? condition = null)
     {
         this.gameGui = gameGui ?? throw new ArgumentNullException(nameof(gameGui));
         this.inventoryTypes = inventoryTypes?.Distinct().ToArray() ??
@@ -151,6 +249,8 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
         if (this.inventoryTypes.Count == 0)
             throw new ArgumentException("At least one inventory container is required.", nameof(inventoryTypes));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+        this.log = log;
+        this.condition = condition;
     }
 
     public ItemQualityLoweringAutomationSnapshot Snapshot { get; private set; } =
@@ -163,16 +263,15 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
         if (Snapshot.IsActive)
             return Fail("Quality lowering is already active.");
 
-        requirements = requested
-            .Where(requirement => requirement.RequiredNormalQualityQuantity > 0)
-            .GroupBy(requirement => requirement.ItemId)
-            .Select(group => new ItemQualityLoweringRequirement(
-                group.Key,
-                group.First().ItemName,
-                checked(group.Sum(requirement => requirement.RequiredNormalQualityQuantity))))
-            .ToArray();
+        requirements = ItemQualityLoweringPlanner.Normalize(requested);
         activeStack = null;
+        activeItemName = string.Empty;
+        lastObservation = null;
         deadline = clock() + OperationTimeout;
+        Event(
+            "Begin: requirements=[" +
+            string.Join(", ", requirements.Select(r => $"{r.ItemId} {r.ItemName} x{r.RequiredNormalQualityQuantity}")) +
+            $"] containers=[{string.Join(", ", inventoryTypes)}]");
         Snapshot = new(
             ItemQualityLoweringAutomationState.Preparing,
             "Checking live HQ and NQ inventory.",
@@ -190,7 +289,7 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
         if (!mutationStillAuthorized())
             return Fail("Quality-lowering authorization changed before the inventory mutation completed.");
         if (clock() > deadline)
-            return Fail($"Timed out while {DescribeState(Snapshot.State)}.");
+            return Fail($"Timed out while {DescribeState(Snapshot.State)}. Last observation: {Snapshot.Message}");
 
         try
         {
@@ -204,6 +303,7 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
         }
         catch (Exception exception)
         {
+            log?.Error(exception, $"{LogPrefix} Advance threw in state {Snapshot.State}.");
             return Fail($"Quality lowering failed: {exception.Message}");
         }
     }
@@ -222,8 +322,10 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
             yesNo->NoButton->IsEnabled)
         {
             yesNo->NoButton->ClickAddonButton(&yesNo->AtkUnitBase);
+            Event("Stop declined the owned quality-lowering confirmation.");
         }
 
+        Event($"Stopped in state {Snapshot.State}: {message} Last observation: {Snapshot.Message}");
         activeStack = null;
         deadline = default;
         Snapshot = new(ItemQualityLoweringAutomationState.Stopped, message, null, 0, false);
@@ -232,7 +334,12 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
     private unsafe ItemQualityLoweringAutomationSnapshot PrepareNext()
     {
         if (IsVisible(SelectYesNoAddon))
-            return Pending(ItemQualityLoweringAutomationState.Preparing, "Waiting for an unrelated confirmation to close.");
+        {
+            var prompt = DescribeYesNoPrompt(gameGui.GetAddonByName<AddonSelectYesno>(SelectYesNoAddon, 1));
+            return Pending(
+                ItemQualityLoweringAutomationState.Preparing,
+                $"Waiting for an unrelated confirmation to close: \"{prompt}\".");
+        }
 
         var stacks = Scan();
         var step = ItemQualityLoweringPlanner.ResolveNext(requirements, stacks);
@@ -242,6 +349,7 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
         {
             activeStack = null;
             deadline = default;
+            Event($"Completed: {step.Message}");
             Snapshot = new(ItemQualityLoweringAutomationState.Completed, step.Message, null, 0, false);
             return Snapshot;
         }
@@ -250,24 +358,49 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
         var conditions = Conditions.Instance();
         var agent = AgentInventoryContext.Instance();
         if (rapture == null || conditions == null || agent == null)
-            return Pending(ItemQualityLoweringAutomationState.Preparing, "Waiting for inventory automation services.");
+        {
+            return Pending(
+                ItemQualityLoweringAutomationState.Preparing,
+                "Waiting for inventory automation services.",
+                $"rapture={rapture != null} conditions={conditions != null} agent={agent != null}");
+        }
         if (rapture->AgentUpdateFlag.HasFlag(RaptureAtkModule.AgentUpdateFlags.InventoryUpdate))
             return Pending(ItemQualityLoweringAutomationState.Preparing, "Waiting for the current inventory update.");
         if (!conditions->HasPermission(LowerItemQualityPermission))
-            return Pending(ItemQualityLoweringAutomationState.Preparing, "Waiting until item quality can be lowered.");
+        {
+            return Pending(
+                ItemQualityLoweringAutomationState.Preparing,
+                "Waiting until the game allows lowering item quality.",
+                $"permission {LowerItemQualityPermission} denied; active conditions=[{DescribeActiveConditions()}]");
+        }
 
-        activeStack = step.Stack ?? throw new InvalidOperationException("The lowering plan did not select an HQ stack.");
-        var slot = ResolveExactSlot(activeStack);
+        var candidate = step.Stack ?? throw new InvalidOperationException("The lowering plan did not select an HQ stack.");
+        var slot = ResolveExactSlot(candidate);
         if (slot == null)
-            return Pending(ItemQualityLoweringAutomationState.Preparing, "The selected HQ stack changed; replanning.");
+        {
+            return Pending(
+                ItemQualityLoweringAutomationState.Preparing,
+                "The selected HQ stack changed; replanning.",
+                $"expected {Describe(candidate)}; live {DescribeLiveSlot(candidate)}");
+        }
 
-        (normalQualityBefore, highQualityBefore) = CountQuality(activeStack.ItemId, stacks);
-        agent->LowerItemQuality(slot, activeStack.Container, activeStack.SlotIndex, 0);
-        deadline = clock() + OperationTimeout;
+        activeStack = candidate;
+        activeItemName = requirements.FirstOrDefault(r => r.ItemId == candidate.ItemId)?.ItemName ?? $"item {candidate.ItemId}";
+        (normalQualityBefore, highQualityBefore) = CountQuality(candidate.ItemId, stacks);
+        Event(
+            $"Dispatching LowerItemQuality for {activeItemName} {Describe(candidate)}; " +
+            $"before NQ={normalQualityBefore} HQ={highQualityBefore}; still needed={step.RemainingHighQualityUnits}; " +
+            $"agent before: {DescribeAgent(agent)}");
+        agent->LowerItemQuality(slot, candidate.Container, candidate.SlotIndex, 0);
+        dispatchedAt = clock();
+        Event(
+            $"Dispatched. agent after: {DescribeAgent(agent)}; " +
+            DescribeYesNo(gameGui.GetAddonByName<AddonSelectYesno>(SelectYesNoAddon, 1)));
+        deadline = dispatchedAt + OperationTimeout;
         Snapshot = new(
             ItemQualityLoweringAutomationState.WaitingForConfirmation,
             step.Message,
-            activeStack.ItemId,
+            candidate.ItemId,
             step.RemainingHighQualityUnits,
             true);
         return Snapshot;
@@ -277,23 +410,44 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
     {
         var target = activeStack ?? throw new InvalidOperationException("The active HQ stack is unavailable.");
         var yesNo = gameGui.GetAddonByName<AddonSelectYesno>(SelectYesNoAddon, 1);
-        if (yesNo == null || !yesNo->AtkUnitBase.IsReady || !yesNo->AtkUnitBase.IsVisible)
-            return Snapshot;
-
         var agent = AgentInventoryContext.Instance();
-        if (!IsExpectedConfirmation(yesNo, agent, target))
-            return Fail("An unexpected confirmation appeared while lowering item quality.");
-        if (ResolveExactSlot(target) == null)
-            return Fail("The approved HQ stack changed before quality lowering was confirmed.");
-        if (yesNo->YesButton == null || !yesNo->YesButton->IsEnabled)
-            return Snapshot;
+        var elapsed = (clock() - dispatchedAt).TotalSeconds;
+        if (yesNo == null || !yesNo->AtkUnitBase.IsReady || !yesNo->AtkUnitBase.IsVisible)
+        {
+            // Elapsed time is deliberately left out of the deduplicated detail so one line covers the wait.
+            return Pending(
+                ItemQualityLoweringAutomationState.WaitingForConfirmation,
+                $"Asked the game to lower {target.Quantity:N0} {activeItemName}; waiting for its confirmation dialog.",
+                $"{DescribeYesNo(yesNo)}; agent: {DescribeAgent(agent)}");
+        }
 
+        if (!IsExpectedConfirmation(yesNo, agent, target))
+        {
+            return Fail(
+                "An unexpected confirmation appeared while lowering item quality " +
+                $"(\"{DescribeYesNoPrompt(yesNo)}\"; agent: {DescribeAgent(agent)}; expected {Describe(target)}).");
+        }
+        if (ResolveExactSlot(target) == null)
+        {
+            return Fail(
+                "The approved HQ stack changed before quality lowering was confirmed " +
+                $"(expected {Describe(target)}; live {DescribeLiveSlot(target)}).");
+        }
+        if (yesNo->YesButton == null || !yesNo->YesButton->IsEnabled)
+        {
+            return Pending(
+                ItemQualityLoweringAutomationState.WaitingForConfirmation,
+                $"Waiting for the quality-lowering confirmation for {activeItemName} to become clickable.",
+                $"yes button {(yesNo->YesButton == null ? "missing" : "disabled")}");
+        }
+
+        Event($"Confirming \"{DescribeYesNoPrompt(yesNo)}\" for {activeItemName} {Describe(target)} {elapsed:0.0}s after dispatch.");
         yesNo->YesButton->ClickAddonButton(&yesNo->AtkUnitBase);
         deadline = clock() + OperationTimeout;
         Snapshot = Snapshot with
         {
             State = ItemQualityLoweringAutomationState.WaitingForInventory,
-            Message = $"Confirmed HQ-to-NQ conversion for item {target.ItemId}; verifying inventory evidence.",
+            Message = $"Confirmed HQ-to-NQ conversion for {activeItemName}; verifying inventory evidence.",
         };
         return Snapshot;
     }
@@ -303,20 +457,28 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
         var target = activeStack ?? throw new InvalidOperationException("The active HQ stack is unavailable.");
         var stacks = Scan();
         var (normalAfter, highAfter) = CountQuality(target.ItemId, stacks);
-        if (normalAfter == normalQualityBefore + target.Quantity &&
-            highAfter == highQualityBefore - target.Quantity)
+        var expectedNormal = normalQualityBefore + target.Quantity;
+        var expectedHigh = highQualityBefore - target.Quantity;
+        if (normalAfter == expectedNormal && highAfter == expectedHigh)
         {
+            Event(
+                $"Verified {target.Quantity:N0} {activeItemName} lowered: " +
+                $"NQ {normalQualityBefore}->{normalAfter}, HQ {highQualityBefore}->{highAfter}.");
             activeStack = null;
             Snapshot = new(
                 ItemQualityLoweringAutomationState.Preparing,
-                $"Verified {target.Quantity:N0} units lowered from HQ to NQ.",
+                $"Verified {target.Quantity:N0} {activeItemName} lowered from HQ to NQ.",
                 null,
                 0,
                 true);
             deadline = clock() + OperationTimeout;
+            return Snapshot;
         }
 
-        return Snapshot;
+        return Pending(
+            ItemQualityLoweringAutomationState.WaitingForInventory,
+            $"Waiting for inventory to show {activeItemName} lowered to NQ.",
+            $"NQ {normalAfter}/{expectedNormal}, HQ {highAfter}/{expectedHigh}");
     }
 
     private IReadOnlyList<DalamudInventoryStack> Scan() =>
@@ -334,6 +496,17 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
 
     private static unsafe InventoryItem* ResolveExactSlot(DalamudInventoryStack expected)
     {
+        var slot = ResolveSlot(expected);
+        return slot != null &&
+               slot->ItemId == expected.ItemId &&
+               slot->Quantity == expected.Quantity &&
+               slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality)
+            ? slot
+            : null;
+    }
+
+    private static unsafe InventoryItem* ResolveSlot(DalamudInventoryStack expected)
+    {
         var inventoryManager = InventoryManager.Instance();
         var container = inventoryManager == null
             ? null
@@ -346,13 +519,7 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
             return null;
         }
 
-        var slot = container->GetInventorySlot(expected.SlotIndex);
-        return slot != null &&
-               slot->ItemId == expected.ItemId &&
-               slot->Quantity == expected.Quantity &&
-               slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality)
-            ? slot
-            : null;
+        return container->GetInventorySlot(expected.SlotIndex);
     }
 
     private static unsafe bool IsExpectedConfirmation(
@@ -375,8 +542,10 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
 
     private ItemQualityLoweringAutomationSnapshot Pending(
         ItemQualityLoweringAutomationState state,
-        string message)
+        string message,
+        string? detail = null)
     {
+        Observe(detail is null ? $"{state}: {message}" : $"{state}: {message} [{detail}]");
         Snapshot = Snapshot with { State = state, Message = message };
         return Snapshot;
     }
@@ -392,12 +561,69 @@ public sealed class DalamudItemQualityLoweringAutomation : IItemQualityLoweringA
             yesNo->NoButton->IsEnabled)
         {
             yesNo->NoButton->ClickAddonButton(&yesNo->AtkUnitBase);
+            Event("Failure declined the owned quality-lowering confirmation.");
         }
 
+        log?.Warning($"{LogPrefix} Failed in state {Snapshot.State}: {message}");
         activeStack = null;
         deadline = default;
         Snapshot = new(ItemQualityLoweringAutomationState.Failed, message, null, 0, false);
         return Snapshot;
+    }
+
+    /// <summary>Logs a per-frame observation only when it differs from the previous one.</summary>
+    private void Observe(string observation)
+    {
+        if (observation == lastObservation)
+            return;
+        lastObservation = observation;
+        log?.Information($"{LogPrefix} {observation}");
+    }
+
+    private void Event(string message)
+    {
+        lastObservation = null;
+        log?.Information($"{LogPrefix} {message}");
+    }
+
+    private string DescribeActiveConditions()
+    {
+        if (condition is null)
+            return "unavailable";
+        var active = condition.AsReadOnlySet();
+        return active.Count == 0 ? "none" : string.Join(", ", active);
+    }
+
+    private static string Describe(DalamudInventoryStack stack) =>
+        $"{stack.Container}[{stack.SlotIndex}] item={stack.ItemId} qty={stack.Quantity} hq={stack.IsHighQuality}";
+
+    private static unsafe string DescribeLiveSlot(DalamudInventoryStack expected)
+    {
+        var slot = ResolveSlot(expected);
+        return slot == null
+            ? "slot unavailable"
+            : $"item={slot->ItemId} qty={slot->Quantity} hq={slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality)}";
+    }
+
+    private static unsafe string DescribeAgent(AgentInventoryContext* agent) =>
+        agent == null
+            ? "agent unavailable"
+            : $"dialogType={agent->DialogType} target={agent->TargetInventoryId}[{agent->TargetInventorySlotId}] owner={agent->OwnerAddonId}";
+
+    private static unsafe string DescribeYesNo(AddonSelectYesno* yesNo)
+    {
+        if (yesNo == null)
+            return "SelectYesno absent";
+        return $"SelectYesno ready={yesNo->AtkUnitBase.IsReady} visible={yesNo->AtkUnitBase.IsVisible} " +
+               $"prompt=\"{DescribeYesNoPrompt(yesNo)}\"";
+    }
+
+    private static unsafe string DescribeYesNoPrompt(AddonSelectYesno* yesNo)
+    {
+        if (yesNo == null || yesNo->PromptText == null)
+            return string.Empty;
+        var text = yesNo->PromptText->NodeText.ToString().ReplaceLineEndings(" ").Trim();
+        return text.Length <= 160 ? text : text[..160] + "...";
     }
 
     private static string DescribeState(ItemQualityLoweringAutomationState state) => state switch
