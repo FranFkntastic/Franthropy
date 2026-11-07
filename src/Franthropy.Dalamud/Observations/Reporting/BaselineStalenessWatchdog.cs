@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Franthropy.Observations.Storage;
+using Franthropy.Observations.V1;
 
 namespace Franthropy.Dalamud.Observations.Reporting;
 
@@ -94,7 +95,10 @@ public sealed class BaselineStalenessWatchdog : IDisposable
         var ownerPrefix = $"{contentId:X16}:{homeWorldId}:";
 
         // 1. Player inventory baseline: must exist, not be stale, and be recent.
-        var player = await ReadScopeAsync(connection, $"{ownerPrefix}{contentId:X16}:{ContainerPlayerInventory}", token).ConfigureAwait(false);
+        var owner = new ObservationOwner(contentId, homeWorldId);
+        var playerKey = SqliteObservationStore.CreateScopeKey(new ObservationScope(
+            owner, ObservationSubject.Character(owner), ObservationContainerKind.PlayerInventory));
+        var player = await ReadScopeAsync(connection, playerKey, token).ConfigureAwait(false);
         if (player is null)
         {
             report(
@@ -192,7 +196,8 @@ public sealed class BaselineStalenessWatchdog : IDisposable
         command.CommandText = """
             SELECT scope_key, is_stale, stale_reason, last_confirmed_at_utc
             FROM current_projection
-            WHERE scope_key LIKE $prefix || '%' AND is_stale = 1;
+            WHERE scope_key LIKE $prefix || '%' AND is_stale = 1
+                AND container_kind IN (2, 3, 5);
             """;
         command.Parameters.AddWithValue("$prefix", ownerPrefix);
         await using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
@@ -209,15 +214,16 @@ public sealed class BaselineStalenessWatchdog : IDisposable
 
     public void Dispose()
     {
-        lifetime.Cancel();
+        _ = lifetime.CancelAsync();
         try
         {
-            loop?.GetAwaiter().GetResult();
+            loop?.Wait(TimeSpan.FromSeconds(2));
         }
         catch
         {
             // loop faults are already reported through `report`.
         }
-        lifetime.Dispose();
+        if (loop is null) lifetime.Dispose();
+        else _ = loop.ContinueWith(_ => lifetime.Dispose(), TaskScheduler.Default);
     }
 }

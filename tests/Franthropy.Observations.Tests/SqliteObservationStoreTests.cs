@@ -7,6 +7,43 @@ namespace Franthropy.Observations.Tests;
 public sealed class SqliteObservationStoreTests
 {
     [Fact]
+    public async Task Blocked_notification_reports_actual_store_stage_without_blocking_shutdown()
+    {
+        await using var fixture = await StoreFixture.CreateAsync();
+        using var release = new ManualResetEventSlim();
+        var returned = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var faulted = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Store.Changed += (_, _) => release.Wait();
+        var queue = new Franthropy.Observations.Hosting.ObservationWriterQueue(new()
+        {
+            StallTimeout = TimeSpan.FromMilliseconds(200),
+            WriteTimeout = TimeSpan.FromSeconds(10),
+            CheckInterval = TimeSpan.FromMilliseconds(10),
+            ShutdownTimeout = TimeSpan.FromMilliseconds(50),
+        }, message => faulted.TrySetResult(message), null);
+        try
+        {
+            var baseline = fixture.CreatePlayerInventoryObservation(1, []);
+            queue.TryWrite(SqliteObservationStore.CreateScopeKey(baseline.Scope), "snapshot", async token =>
+            {
+                try { return await fixture.Store.WriteAsync(baseline, token); }
+                finally { returned.TrySetResult(); }
+            });
+            var warning = await faulted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Contains("stage=publish/signal", warning);
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            queue.Dispose();
+            Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(1));
+        }
+        finally
+        {
+            release.Set();
+            await returned.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            queue.Dispose();
+        }
+    }
+
+    [Fact]
     public void Default_native_sqlite_floor_matches_store_features()
     {
         var options = new ObservationStoreOptions { DatabasePath = "unused.db" };

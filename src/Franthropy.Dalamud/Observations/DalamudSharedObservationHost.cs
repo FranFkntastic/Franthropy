@@ -1,4 +1,3 @@
-using System.Threading.Channels;
 using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.Inventory;
@@ -23,6 +22,7 @@ public sealed record DalamudSharedObservationHostOptions
     public required IPlayerState PlayerState { get; init; }
     public required IAddonLifecycle AddonLifecycle { get; init; }
     public Action<string, Exception?>? Diagnostic { get; init; }
+    public ObservationWriterQueueOptions WriterQueue { get; init; } = new();
     public int WriterCapability { get; init; } = DalamudSharedObservationHost.SellingSurfaceWriterCapability;
 }
 
@@ -39,6 +39,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
     private Reporting.BaselineStalenessWatchdog? stalenessWatchdog;
     private bool started;
     private bool disposed;
+    private string? reportedCollectorFault;
 
     public DalamudSharedObservationHost(DalamudSharedObservationHostOptions options)
     {
@@ -114,7 +115,8 @@ public sealed class DalamudSharedObservationHost : IDisposable
             provenance,
             CaptureSessions,
             ReportFault,
-            options.Diagnostic);
+            options.Diagnostic,
+            options.WriterQueue);
         try
         {
             next.Start();
@@ -149,13 +151,14 @@ public sealed class DalamudSharedObservationHost : IDisposable
 
     private void ReportFault(string message)
     {
-        options.Diagnostic?.Invoke(message, null);
+        Volatile.Write(ref reportedCollectorFault, message);
         coordinator.ReportCollectorFault(message);
     }
 
     private void OnLeadershipChanged(object? sender, ObservationLeadershipSnapshot snapshot)
     {
-        if (snapshot.State is ObservationLeadershipState.Faulted or ObservationLeadershipState.Incompatible)
+        if ((snapshot.State is ObservationLeadershipState.Faulted or ObservationLeadershipState.Incompatible) &&
+            !string.Equals(snapshot.Message, Volatile.Read(ref reportedCollectorFault), StringComparison.Ordinal))
             options.Diagnostic?.Invoke(snapshot.Message, null);
         var subscribers = LeadershipChanged;
         if (subscribers is null)
@@ -225,15 +228,9 @@ public sealed class DalamudSharedObservationHost : IDisposable
         private readonly SqliteObservationStore store;
         private readonly ObservationProvenance provenance;
         private readonly ObservationCaptureSessionRegistry? captureSessions;
-        private readonly Action<string> fault;
         private readonly Action<string, Exception?>? diagnostic;
-        private readonly Channel<PendingObservation> queue = Channel.CreateUnbounded<PendingObservation>(new UnboundedChannelOptions
-        {
-            SingleReader = true,
-            SingleWriter = false,
-        });
+        private readonly ObservationWriterQueue queue;
         private readonly LatestByKeyBuffer<ObservationEnvelope> pendingListings = new();
-        private Task worker = Task.CompletedTask;
         private long sourceRevision;
         private bool started;
         private bool disposed;
@@ -246,7 +243,8 @@ public sealed class DalamudSharedObservationHost : IDisposable
             ObservationProvenance provenance,
             ObservationCaptureSessionRegistry? captureSessions,
             Action<string> fault,
-            Action<string, Exception?>? diagnostic)
+            Action<string, Exception?>? diagnostic,
+            ObservationWriterQueueOptions writerOptions)
         {
             this.gameInventory = gameInventory;
             this.playerState = playerState;
@@ -254,8 +252,8 @@ public sealed class DalamudSharedObservationHost : IDisposable
             this.store = store;
             this.provenance = provenance;
             this.captureSessions = captureSessions;
-            this.fault = fault;
             this.diagnostic = diagnostic;
+            queue = new ObservationWriterQueue(writerOptions, fault, diagnostic);
         }
 
         public void Start()
@@ -265,7 +263,6 @@ public sealed class DalamudSharedObservationHost : IDisposable
             started = true;
             try
             {
-                worker = Task.Run(ProcessAsync);
                 gameInventory.InventoryChanged += OnInventoryChanged;
                 addonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerList", OnRetainerListOpened);
                 addonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerSellList", OnRetainerSellingListChanged);
@@ -295,8 +292,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
                 addonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "InventoryRetainerLarge", OnRetainerInventoryClosing);
                 addonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "InventoryRetainer", OnRetainerInventoryClosing);
             }
-            queue.Writer.TryComplete();
-            worker.GetAwaiter().GetResult();
+            queue.Dispose();
             store.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
 
@@ -644,13 +640,15 @@ public sealed class DalamudSharedObservationHost : IDisposable
 
         private void Enqueue(ObservationEnvelope observation)
         {
-            if (!queue.Writer.TryWrite(new PendingObservation(observation, null)))
+            if (!queue.TryWrite(SqliteObservationStore.CreateScopeKey(observation.Scope), "snapshot",
+                    token => store.WriteAsync(observation, token)))
                 diagnostic?.Invoke("The shared-observation queue was already closed; a snapshot was not collected.", null);
         }
 
         private void Enqueue(InventoryObservationDelta observation)
         {
-            if (!queue.Writer.TryWrite(new PendingObservation(null, observation)))
+            if (!queue.TryWrite(SqliteObservationStore.CreateScopeKey(observation.Scope), "delta",
+                    token => store.WriteInventoryDeltaAsync(observation, token)))
                 diagnostic?.Invoke("The shared-observation queue was already closed; an inventory change was not collected.", null);
         }
 
@@ -659,43 +657,12 @@ public sealed class DalamudSharedObservationHost : IDisposable
             var key = $"{observation.Scope.Owner.LocalContentId:X16}:{observation.Scope.Owner.HomeWorldId}:{observation.Scope.Subject.Id:X16}";
             if (!pendingListings.Offer(key, observation))
                 return;
-            if (!queue.Writer.TryWrite(new PendingObservation(null, null, key)))
+            if (!queue.TryWrite(SqliteObservationStore.CreateScopeKey(observation.Scope), "listing",
+                    token => pendingListings.TryTake(key, out var snapshot)
+                        ? store.WriteAsync(snapshot!, token)
+                        : ValueTask.FromResult(new ObservationWriteResult(ObservationWriteStatus.IgnoredRepeatedRevision, "Listing already drained."))))
                 diagnostic?.Invoke("The shared-observation queue was already closed; a listing snapshot was not collected.", null);
         }
 
-        private async Task ProcessAsync()
-        {
-            try
-            {
-                await foreach (var observation in queue.Reader.ReadAllAsync().ConfigureAwait(false))
-                {
-                    ObservationEnvelope? snapshot = observation.Snapshot;
-                    if (observation.ListingKey is { } listingKey)
-                    {
-                        if (!pendingListings.TryTake(listingKey, out snapshot))
-                            continue;
-                    }
-                    var result = snapshot is not null
-                        ? await store.WriteAsync(snapshot).ConfigureAwait(false)
-                        : await store.WriteInventoryDeltaAsync(observation.Delta!).ConfigureAwait(false);
-                    if (result.Status is ObservationWriteStatus.Busy or ObservationWriteStatus.Unavailable or ObservationWriteStatus.UnsupportedDatabaseVersion)
-                    {
-                        fault($"Shared observation writer failed: {result.Message}");
-                        return;
-                    }
-                    if (result.Status == ObservationWriteStatus.Rejected)
-                        diagnostic?.Invoke($"Shared observation evidence was rejected: {result.Message}", null);
-                }
-            }
-            catch (Exception ex)
-            {
-                fault($"The shared observation writer stopped unexpectedly: {ex.Message}");
-            }
-        }
-
-        private sealed record PendingObservation(
-            ObservationEnvelope? Snapshot,
-            InventoryObservationDelta? Delta,
-            string? ListingKey = null);
     }
 }
