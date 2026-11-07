@@ -139,9 +139,11 @@ public sealed class ObservationWriterQueue : IDisposable
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         timer.Dispose();
         queue.Writer.TryComplete();
-        _ = lifetime.CancelAsync();
+        // Accepted work gets a bounded graceful drain so a healthy store keeps closing snapshots
+        // and retainer deltas on unload or handoff; only then is the worker cancelled and abandoned.
         if (!worker.Wait(options.ShutdownTimeout))
         {
+            _ = lifetime.CancelAsync();
             var message = CurrentFailure("OBS_WORKER_ABANDONED");
             _ = Task.Run(() => { try { diagnostic?.Invoke(message, null); } catch { } });
         }
