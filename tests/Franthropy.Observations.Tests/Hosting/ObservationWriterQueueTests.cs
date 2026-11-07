@@ -103,6 +103,33 @@ public sealed class ObservationWriterQueueTests
     }
 
     [Fact]
+    public async Task Failure_during_shutdown_drain_is_diagnosed_but_not_reported_as_fault()
+    {
+        var faults = new ConcurrentQueue<string>();
+        var diagnostics = new ConcurrentQueue<string>();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<ObservationWriteResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var queue = new ObservationWriterQueue(Options with { StallTimeout = TimeSpan.FromSeconds(5), ShutdownTimeout = TimeSpan.FromSeconds(5) },
+            faults.Enqueue, (message, _) => diagnostics.Enqueue(message));
+        Assert.True(queue.TryWrite("scope", "snapshot", _ =>
+        {
+            entered.SetResult();
+            return new ValueTask<ObservationWriteResult>(release.Task);
+        }));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(queue.TryWrite("retainer", "delta", _ =>
+            ValueTask.FromResult(new ObservationWriteResult(ObservationWriteStatus.Busy, "Locked"))));
+        var disposing = Task.Run(queue.Dispose);
+        await Task.Delay(50);
+        release.SetResult(new(ObservationWriteStatus.AcceptedChanged, "Written"));
+        await disposing.WaitAsync(TimeSpan.FromSeconds(5));
+        var deadline = Stopwatch.StartNew();
+        while (diagnostics.IsEmpty && deadline.Elapsed < TimeSpan.FromSeconds(5)) await Task.Delay(10);
+        Assert.Contains(diagnostics, message => message.Contains("Locked"));
+        Assert.Empty(faults);
+    }
+
+    [Fact]
     public async Task Cooperative_write_timeout_has_code_and_stage()
     {
         var faulted = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);

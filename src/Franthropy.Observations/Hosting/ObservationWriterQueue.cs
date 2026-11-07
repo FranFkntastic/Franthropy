@@ -84,6 +84,12 @@ public sealed class ObservationWriterQueue : IDisposable
     {
         if (Interlocked.CompareExchange(ref failed, 1, 0) != 0) return;
         queue.Writer.TryComplete();
+        if (Volatile.Read(ref disposed) != 0)
+        {
+            // A check that raced shutdown must not fault a collector that is already being disposed.
+            _ = Task.Run(() => { try { diagnostic?.Invoke(message, null); } catch { } });
+            return;
+        }
         // Cancellation callbacks and consumer fault reporting must never pin the timer or Dispose.
         _ = lifetime.CancelAsync();
         _ = Task.Run(() => { try { diagnostic?.Invoke(message, null); } catch { } });
@@ -137,7 +143,9 @@ public sealed class ObservationWriterQueue : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
-        timer.Dispose();
+        // Timer.Dispose does not wait for a running callback; DisposeAsync completes only after it,
+        // so lifetime stays alive for any check that already selected a failure.
+        var checksDone = timer.DisposeAsync().AsTask();
         queue.Writer.TryComplete();
         // Accepted work gets a bounded graceful drain so a healthy store keeps closing snapshots
         // and retainer deltas on unload or handoff; only then is the worker cancelled and abandoned.
@@ -148,6 +156,6 @@ public sealed class ObservationWriterQueue : IDisposable
             _ = Task.Run(() => { try { diagnostic?.Invoke(message, null); } catch { } });
         }
         // The worker owns its active transaction until it eventually returns; never dispose it underneath a write.
-        _ = worker.ContinueWith(_ => lifetime.Dispose(), TaskScheduler.Default);
+        _ = Task.WhenAll(worker, checksDone).ContinueWith(_ => lifetime.Dispose(), TaskScheduler.Default);
     }
 }
