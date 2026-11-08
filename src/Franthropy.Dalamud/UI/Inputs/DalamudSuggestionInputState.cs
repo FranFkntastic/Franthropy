@@ -9,6 +9,8 @@ public sealed class DalamudSuggestionInputState
     public int HighlightedIndex { get; private set; }
     public bool Active { get; set; }
     internal bool Dismissed { get; set; }
+    // A completed pick ends the edit session, including ImGui's private active buffer.
+    internal int InputGeneration { get; private set; }
 
     public void ResetSelection() => HighlightedIndex = 0;
     public void Clamp(int count) => HighlightedIndex = Math.Clamp(HighlightedIndex, 0, Math.Max(0, count - 1));
@@ -28,6 +30,7 @@ public sealed class DalamudSuggestionInputState
         picked = default;
         if (suggestions.Count == 0) return false;
         picked = suggestions[HighlightedIndex].Value;
+        InputGeneration = unchecked(InputGeneration + 1);
         Text = string.Empty;
         HighlightedIndex = 0;
         Active = false;

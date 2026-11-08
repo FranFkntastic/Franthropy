@@ -29,7 +29,9 @@ public static class DalamudSuggestionInputRenderer
 
         var text = state.Text;
         ImGui.SetNextItemWidth(width);
-        if (ImGui.InputTextWithHint($"##{id}", hint, ref text, 160))
+        // Keyboard picks above replace the widget immediately; mouse picks replace it next
+        // frame. Neither path reuses the active input that still owns the previous query.
+        if (ImGui.InputTextWithHint($"##{id}:{state.InputGeneration}", hint, ref text, 160))
         {
             state.Text = text;
             state.Dismissed = false;
