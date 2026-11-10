@@ -148,6 +148,10 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
                 return;
 
             pending.LastFrame = frame;
+            // The platform backend supplies the physical pointer every frame. Hold
+            // the leased pointer through waits/press/release, not just the move step.
+            if (pending.Pointer is { } pointer)
+                sink.Move(ToAbsolute(frame, pointer.X, pointer.Y), frame.ViewportId);
             if (pending.Commands.Count == 0)
             {
                 Complete(pending);
@@ -246,6 +250,7 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
             case FrameCommandKind.Wait:
                 return;
             case FrameCommandKind.Move:
+                pending.Pointer = new(command.X, command.Y);
                 sink.Move(ToAbsolute(frame, command.X, command.Y), frame.ViewportId);
                 return;
             case FrameCommandKind.MouseDown:
@@ -445,6 +450,7 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
         public bool CancelRequested { get; set; }
         public int ExecutedFrames { get; set; }
         public ReflectedPluginWindowFrame? LastFrame { get; set; }
+        public Vector2? Pointer { get; set; }
     }
 }
 

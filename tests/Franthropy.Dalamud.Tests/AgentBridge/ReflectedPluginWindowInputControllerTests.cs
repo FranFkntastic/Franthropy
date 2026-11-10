@@ -7,6 +7,73 @@ namespace Franthropy.Dalamud.Tests.AgentBridge;
 public sealed class ReflectedPluginWindowInputControllerTests
 {
     [Fact]
+    public async Task RenderFrame_ReassertsLeasedPointerAfterEveryPhysicalBackendUpdate()
+    {
+        var window = new FakeWindow("Test") { IsOpen = true };
+        var sink = new FakeSink(new("Test", new(100, 50), new(800, 600), 7));
+        using var controller = new ReflectedPluginWindowInputController(
+            _ => new(Descriptor("runtime") with { WindowName = "Test" }, window), sink);
+        var task = controller.SubmitAsync("lease", new(1,
+        [new(ReflectedPluginWindowInputKind.Click, X: .25f, Y: .5f, Frames: 3)]));
+
+        for (var frame = 0; frame < 12 && !task.IsCompleted; frame++)
+        {
+            // Model platform collection before the NewFramePre injection boundary.
+            sink.Move(new(-1000, -1000), 99);
+            controller.RenderFrame();
+            Assert.Equal(new Vector2(300, 350), sink.Pointer);
+            Assert.Equal(7u, sink.Viewport);
+        }
+        await task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(new Vector2(300, 350), Assert.Single(sink.ClickPositions));
+    }
+
+    [Fact]
+    public async Task RenderFrame_ReleasesHeldInputOnCancellation()
+    {
+        var window = new FakeWindow("Test") { IsOpen = true };
+        var sink = new FakeSink(new("Test", Vector2.Zero, new(100, 100), 1));
+        using var controller = new ReflectedPluginWindowInputController(
+            _ => new(Descriptor("runtime") with { WindowName = "Test" }, window), sink);
+        using var cancellation = new CancellationTokenSource();
+        var task = controller.SubmitAsync("lease", new(1,
+        [new(ReflectedPluginWindowInputKind.Click, X: .5f, Y: .5f)]), cancellation.Token);
+        controller.RenderFrame();
+        controller.RenderFrame();
+        controller.RenderFrame();
+        cancellation.Cancel();
+        controller.RenderFrame();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
+        Assert.Equal("mouse:0:False", sink.Events.Last());
+    }
+
+    [Fact]
+    public async Task RenderFrame_KeepsPointerForTextKeyAndScrollSequence()
+    {
+        var window = new FakeWindow("Test") { IsOpen = true };
+        var sink = new FakeSink(new("Test", new(100, 50), new(800, 600), 7));
+        using var controller = new ReflectedPluginWindowInputController(
+            _ => new(Descriptor("runtime") with { WindowName = "Test" }, window), sink);
+        var task = controller.SubmitAsync("lease", new(1,
+        [
+            new(ReflectedPluginWindowInputKind.Click, X: .25f, Y: .5f),
+            new(ReflectedPluginWindowInputKind.Text, Text: "Iron Ore"),
+            new(ReflectedPluginWindowInputKind.Key, Key: "Enter"),
+            new(ReflectedPluginWindowInputKind.Scroll, X: .25f, Y: .5f, DeltaY: -1),
+        ]));
+        for (var frame = 0; frame < 40 && !task.IsCompleted; frame++)
+        {
+            sink.Move(new(-1000, -1000), 99);
+            controller.RenderFrame();
+            Assert.Equal(new Vector2(300, 350), sink.Pointer);
+        }
+        await task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Contains("text:Iron Ore", sink.Events);
+        Assert.Contains("key:Enter:False", sink.Events);
+        Assert.Contains("scroll:0:-1", sink.Events);
+    }
+
+    [Fact]
     public async Task SubmitAsync_ClicksInsideRuntimeBoundWindowAcrossFrames()
     {
         var window = new FakeWindow("Encore###EncoreMain") { IsOpen = true };
@@ -96,6 +163,9 @@ public sealed class ReflectedPluginWindowInputControllerTests
     private sealed class FakeSink(ReflectedPluginWindowFrame frame) : IReflectedPluginWindowInputSink
     {
         public List<string> Events { get; } = [];
+        public Vector2 Pointer { get; private set; }
+        public uint Viewport { get; private set; }
+        public List<Vector2> ClickPositions { get; } = [];
 
         public bool TryGetWindow(string windowName, out ReflectedPluginWindowFrame value)
         {
@@ -103,8 +173,17 @@ public sealed class ReflectedPluginWindowInputControllerTests
             return string.Equals(windowName, frame.WindowName, StringComparison.Ordinal);
         }
 
-        public void Move(Vector2 position, uint viewportId) => Events.Add($"move:{position.X:0},{position.Y:0}:{viewportId}");
-        public void SetMouseButton(int button, bool down) => Events.Add($"mouse:{button}:{down}");
+        public void Move(Vector2 position, uint viewportId)
+        {
+            Pointer = position;
+            Viewport = viewportId;
+            Events.Add($"move:{position.X:0},{position.Y:0}:{viewportId}");
+        }
+        public void SetMouseButton(int button, bool down)
+        {
+            if (down) ClickPositions.Add(Pointer);
+            Events.Add($"mouse:{button}:{down}");
+        }
         public void Scroll(float deltaX, float deltaY) => Events.Add($"scroll:{deltaX}:{deltaY}");
         public void TypeText(string text) => Events.Add($"text:{text}");
         public bool SetKey(string key, bool down)
