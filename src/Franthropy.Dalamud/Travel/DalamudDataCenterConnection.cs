@@ -62,12 +62,14 @@ public sealed unsafe class DalamudDataCenterConnection(IDataManager data, IClien
             var headerDataCenters = data.GetExcelSheet<WorldDCGroupType>()
                 .Where(value => value.Region.RowId != 0 && AddonMaster.TitleDCWorldMap.PublicDC.Contains((int)value.RowId)
                     && value.Name.ToString() == headerName).ToArray();
-            var worlds = data.GetExcelSheet<World>().ToArray();
+            var worlds = data.GetExcelSheet<World>().Where(world => world.IsPublic).ToArray();
             var currentWorldNames = rootText.Where(text => worlds.Any(world => world.Name.ToString() == text)).ToArray();
             if (headerDataCenters.Length != 1 || headerDataCenters[0].RowId != dc.RowId || currentWorldNames.Length != 1)
                 return new("Blocked", "RenderedLobbyMismatch", canonical);
             var currentWorlds = worlds.Where(world => world.Name.ToString() == currentWorldNames[0]).ToArray();
-            if (currentWorlds.Length != 1 || currentWorlds[0].DataCenter.RowId != dc.RowId)
+            // The rendered header owns the current lobby connection. Static World.DataCenter
+            // membership is not connection evidence; only validate the visible public world identity.
+            if (currentWorlds.Length != 1)
                 return new("Blocked", "RenderedLobbyMismatch", canonical);
             return new("CharacterSelectionReady", sent.Contains("SelectDataCenter") ? "RenderedLobbyMatches" : "AlreadyReady", canonical);
         }
