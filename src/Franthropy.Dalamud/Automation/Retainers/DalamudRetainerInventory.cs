@@ -25,6 +25,17 @@ public static class DalamudRetainerInventory
     public static IReadOnlyList<DalamudInventoryStack> ScanLoadedStacks(IReadOnlySet<uint> itemIds) =>
         DalamudInventoryStackScanner.ScanLoadedStacks(ItemContainers, itemIds);
 
+    /// <summary>Complete ordinary-page coverage is required before retained values authorize stock use.</summary>
+    public static bool HasOrdinaryCoverage(IEnumerable<string> observedSources) => OrdinaryItemContainers
+        .All(type => observedSources.Contains(type.ToString(), StringComparer.Ordinal));
+
+    public static bool HasCrystalCoverage(IEnumerable<string> observedSources) =>
+        observedSources.Contains(nameof(InventoryType.RetainerCrystals), StringComparer.Ordinal);
+
+    public static bool HasCoverageForItem(IEnumerable<string> observedSources, uint itemId) =>
+        ElementalCurrencyCatalog.IsElementalCurrency(itemId)
+            ? HasCrystalCoverage(observedSources) : HasOrdinaryCoverage(observedSources);
+
     public static unsafe int CountAvailableRetainers()
     {
         var manager = RetainerManager.Instance();
