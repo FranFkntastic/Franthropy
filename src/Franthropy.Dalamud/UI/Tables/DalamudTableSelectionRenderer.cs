@@ -30,13 +30,17 @@ public static class DalamudTableSelectionRenderer
 
         if (!enabled)
             ImGui.BeginDisabled();
-        ImGui.InvisibleButton(id, targetSize, ImGuiButtonFlags.MouseButtonLeft);
+        // Use native activation (including keyboard/gamepad nav), not only a
+        // mouse query. PressedOnClick preserves mouse-down selection/drag and
+        // prevents a second activation when the mouse is released.
+        var pressed = ImGui.InvisibleButton(id, targetSize,
+            ImGuiButtonFlags.MouseButtonLeft | (ImGuiButtonFlags)ImGuiButtonFlagsPrivate.PressedOnClick);
         if (!enabled)
             ImGui.EndDisabled();
 
         var hovered = enabled && ImGui.IsItemHovered();
         var active = enabled && ImGui.IsItemActive();
-        var activated = enabled && ImGui.IsItemClicked(ImGuiMouseButton.Left);
+        var activated = enabled && pressed;
         ApplyRowBackground(ResolveBackground(selected, hovered, active));
         return new DalamudTableRowInteraction(activated, hovered, active);
     }

@@ -38,6 +38,19 @@ public sealed class DalamudTableSelection<TRow>
 
     public static DalamudTableSelection<TRow> None { get; } = new(DalamudTableSelectionMode.None);
 
+    /// <summary>Uses caller-owned selection without mirroring it in a second selection model.</summary>
+    public static DalamudTableSelection<TRow> Single(Func<TRow, bool> isSelected, Action<TRow> activate)
+    {
+        ArgumentNullException.ThrowIfNull(isSelected);
+        ArgumentNullException.ThrowIfNull(activate);
+        return new(DalamudTableSelectionMode.Single, isSelected,
+            applyClick: (rows, index, _, _, _) =>
+            {
+                activate(rows[index]);
+                return true;
+            });
+    }
+
     public static DalamudTableSelection<TRow> Single<TKey>(
         TableSelectionModel<TKey> selection,
         Func<TRow, TKey> keySelector)
