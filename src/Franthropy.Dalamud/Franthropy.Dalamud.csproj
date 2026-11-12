@@ -130,6 +130,7 @@
     <Compile Remove="Travel\DalamudLifestreamAetheryteTravel.cs" />
     <Compile Remove="Travel\DalamudLifestreamAethernetTravel.cs" />
     <Compile Remove="Travel\DalamudLifestreamLogin.cs" />
+    <Compile Remove="Travel\DalamudDataCenterConnection.cs" />
     <Compile Remove="Travel\DalamudTravelReadiness.cs" />
     <Compile Remove="Travel\DalamudVNavmeshTravel.cs" />
     <Compile Remove="Travel\DalamudLocalTravelRunner.cs" />
