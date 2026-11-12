@@ -2,6 +2,7 @@ using Dalamud.Plugin.Services;
 using ECommons;
 using ECommons.UIHelpers.AddonMasterImplementations;
 using FFXIVClientStructs.FFXIV.Component.GUI;
+using Franthropy.Dalamud.AgentBridge;
 using Lumina.Excel.Sheets;
 
 namespace Franthropy.Dalamud.Travel;
@@ -14,8 +15,10 @@ public sealed record DataCenterConnectionObservation(string Phase, string Code, 
 public sealed class DataCenterPreInputRefusal(string message) : InvalidOperationException(message);
 
 /// <summary>Framework-thread-only, character-free lobby steps. The owner journals each input before dispatch.</summary>
-public sealed unsafe class DalamudDataCenterConnection(IDataManager data, IClientState client, IObjectTable objects)
+public sealed unsafe class DalamudDataCenterConnection(IDataManager data, IClientState client, IObjectTable objects, IGameGui gameGui)
 {
+    private readonly DalamudRenderedUiTextActionDispatcher renderedUi = new(gameGui);
+
     public string[] AvailableDataCenters() => data.GetExcelSheet<WorldDCGroupType>()
         .Where(dc => dc.Region.RowId != 0 && AddonMaster.TitleDCWorldMap.PublicDC.Contains((int)dc.RowId))
         .Select(dc => dc.Name.ToString()).Where(name => !string.IsNullOrWhiteSpace(name)).ToArray();
@@ -47,18 +50,26 @@ public sealed unsafe class DalamudDataCenterConnection(IDataManager data, IClien
             return new("SelectingDataCenter", "SelectorReady", canonical, sent.Contains("SelectDataCenter") ? null : "SelectDataCenter", dc.RowId);
         if (Ready("_CharaSelectListMenu", out _))
         {
-            if (Ready("_CharaSelectWorldServer", out var server))
-            {
-                var names = new AddonMaster._CharaSelectWorldServer(server).Worlds.Select(world => world.Name).ToArray();
-                var worlds = data.GetExcelSheet<World>().ToArray();
-                // Every rendered name must map uniquely to the requested DC; unknown or mixed lists are not evidence.
-                if (names.Length > 0 && names.Distinct(StringComparer.Ordinal).Count() == names.Length &&
-                    names.All(name => worlds.Count(world => world.Name.ToString() == name) == 1 &&
-                        worlds.Single(world => world.Name.ToString() == name).DataCenter.RowId == dc.RowId))
-                    return new("CharacterSelectionReady", sent.Contains("SelectDataCenter") ? "RenderedWorldsMatch" : "AlreadyReady", canonical);
-                return new("Blocked", "RenderedWorldsMismatch", canonical);
-            }
-            return new("Connecting", "VerifyingRenderedWorlds", canonical, sent.Contains("OpenWorlds") ? null : "OpenWorlds");
+            const string addonName = "_CharaSelectListMenu";
+            var capture = renderedUi.CaptureVisibleText(addonName);
+            if (!capture.Available) return new("Blocked", "RenderedLobbyUnavailable", canonical);
+            // Only addon-direct text is current-lobby evidence. Nested roster names must never
+            // masquerade as the DC header or current world, even when they match sheet names.
+            var rootText = capture.TextNodes.Where(node => node.ParentPath == addonName).Select(node => node.Text).ToArray();
+            var headers = rootText.Where(text => text.StartsWith('[') && text.EndsWith(']')).ToArray();
+            if (headers.Length != 1) return new("Blocked", "RenderedLobbyHeaderAmbiguous", canonical);
+            var headerName = headers[0][1..^1].Trim();
+            var headerDataCenters = data.GetExcelSheet<WorldDCGroupType>()
+                .Where(value => value.Region.RowId != 0 && AddonMaster.TitleDCWorldMap.PublicDC.Contains((int)value.RowId)
+                    && value.Name.ToString() == headerName).ToArray();
+            var worlds = data.GetExcelSheet<World>().ToArray();
+            var currentWorldNames = rootText.Where(text => worlds.Any(world => world.Name.ToString() == text)).ToArray();
+            if (headerDataCenters.Length != 1 || headerDataCenters[0].RowId != dc.RowId || currentWorldNames.Length != 1)
+                return new("Blocked", "RenderedLobbyMismatch", canonical);
+            var currentWorlds = worlds.Where(world => world.Name.ToString() == currentWorldNames[0]).ToArray();
+            if (currentWorlds.Length != 1 || currentWorlds[0].DataCenter.RowId != dc.RowId)
+                return new("Blocked", "RenderedLobbyMismatch", canonical);
+            return new("CharacterSelectionReady", sent.Contains("SelectDataCenter") ? "RenderedLobbyMatches" : "AlreadyReady", canonical);
         }
         if (Ready("_TitleMenu", out var title) && new AddonMaster._TitleMenu(title).IsReady && !sent.Contains("OpenSelector"))
             return new("WaitingForTitle", "TitleReady", canonical, "OpenSelector");
@@ -89,10 +100,6 @@ public sealed unsafe class DalamudDataCenterConnection(IDataManager data, IClien
                 var entries = new AddonMaster.SelectString(menu).Entries.Where(entry => entry.Text == account!.EntryText).ToArray();
                 if (entries.Length != 1) throw new DataCenterPreInputRefusal("Account entry changed before input.");
                 entries[0].Select();
-                break;
-            case "OpenWorlds":
-                if (!Ready("_CharaSelectListMenu", out var list)) throw new DataCenterPreInputRefusal("Character selection unavailable.");
-                new AddonMaster._CharaSelectListMenu(list).World();
                 break;
             default: throw new DataCenterPreInputRefusal("Unsupported typed lobby input.");
         }
