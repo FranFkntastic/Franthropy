@@ -336,24 +336,84 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (!reconciled.Result.Success)
             return (reconciled.Result, null);
 
+        var unobstructed = await framework.RunOnTick(
+            () => !IsReady("ContextMenu") && !IsReady(SellingListingEditor) && !IsReady(YesNo),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (!unobstructed)
+            return (RetainerAutomationResult.Failed("RetainerSellingListingSelectionFailed",
+                "An unowned menu, editor or confirmation was already open before listing selection."), null);
+
+        try
+        {
         var selected = await framework.RunOnTick(
-            () => SelectMarketListing(reconciled.SlotIndex),
+            () => SelectMarketListing(listing with { SlotIndex = reconciled.SlotIndex }),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!selected.Success)
             return (selected, null);
+
+        if (!await WaitUntilAsync(() => IsReady("ContextMenu") || IsReady(SellingListingEditor), cancellationToken).ConfigureAwait(false))
+            return (RetainerAutomationResult.Failed("RetainerSellingListingSelectionIndeterminate",
+                "The verified listing did not open its context menu or editor."), null);
+
+        string? previousLabels = null;
+        RetainerAutomationResult adjusted;
+        do
+        {
+            adjusted = await framework.RunOnTick(
+                () => SelectListingAdjustPrice(listing with { SlotIndex = reconciled.SlotIndex }, ref previousLabels),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (adjusted.Code == "RetainerAdjustPriceStabilizing")
+                await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
+        } while (adjusted.Code == "RetainerAdjustPriceStabilizing");
+        if (!adjusted.Success)
+        {
+            if (adjusted.Code != "RetainerSellingListingSelectionIndeterminate")
+                await framework.RunOnTick(() => CloseOwnedListingMenu(reconciled.SlotIndex), cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            return (SelectionIndeterminate(adjusted), null);
+        }
 
         if (!await WaitUntilAsync(() => IsReady(SellingListingEditor), cancellationToken).ConfigureAwait(false))
         {
             return (
                 RetainerAutomationResult.Failed(
-                    "RetainerSellingListingTimeout",
+                    "RetainerSellingListingSelectionIndeterminate",
                     "The verified listing was selected, but its editor did not become ready."),
                 null);
         }
 
-        return (
-            RetainerAutomationResult.Succeeded("RetainerSellingListingReady", "Opened the verified retainer listing."),
-            listing with { SlotIndex = reconciled.SlotIndex });
+        var exact = listing with { SlotIndex = reconciled.SlotIndex };
+        var editor = await framework.RunOnTick(() => VerifySellingEditor(exact), cancellationToken: cancellationToken).ConfigureAwait(false);
+        return (editor.Success ? editor : SelectionIndeterminate(editor), editor.Success ? exact : null);
+        }
+        catch (Exception exception)
+        {
+            return (RetainerAutomationResult.Failed("RetainerSellingListingSelectionIndeterminate",
+                $"Listing selection began; do not retry automatically. {exception.Message}"), null);
+        }
+    }
+
+    private static RetainerAutomationResult SelectionIndeterminate(RetainerAutomationResult result) =>
+        RetainerAutomationResult.Failed("RetainerSellingListingSelectionIndeterminate", $"{result.Code}: {result.Message}");
+
+    private unsafe void CloseOwnedListingMenu(int slot)
+    {
+        var agent = AgentInventoryContext.Instance();
+        if (agent != null && agent->TargetInventoryId == InventoryType.RetainerMarket &&
+            agent->TargetInventorySlotId == slot && !IsReady(SellingListingEditor) && !IsReady(YesNo))
+            CloseSurface("ContextMenu");
+    }
+
+    private unsafe RetainerAutomationResult VerifySellingEditor(RetainerMarketListingTarget listing)
+    {
+        try
+        {
+            _ = RequireSellingEditor(listing, listing.UnitPrice!.Value);
+            return RetainerAutomationResult.Succeeded("RetainerSellingListingReady", "Opened the exact verified retainer listing editor.");
+        }
+        catch (NativeCapabilityUnavailableException exception)
+        {
+            return RetainerAutomationResult.Failed("RetainerSellingListingSelectionFailed", exception.Message);
+        }
     }
 
     public Task<RetainerMarketListingScanResult> ScanMarketListingsAsync(CancellationToken cancellationToken = default) =>
@@ -606,7 +666,26 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     }
 
     public Task<IReadOnlyList<DalamudInventoryStack>> ScanRetainerAsync(IReadOnlySet<uint> itemIds, CancellationToken cancellationToken = default) =>
-        framework.RunOnTick(() => DalamudRetainerInventory.ScanLoadedStacks(itemIds), cancellationToken: cancellationToken);
+        framework.RunOnTick(() => ScanVerifiedRetainer(itemIds), cancellationToken: cancellationToken);
+
+    private unsafe IReadOnlyList<DalamudInventoryStack> ScanVerifiedRetainer(IReadOnlySet<uint> itemIds)
+    {
+        var verified = VerifyActive(active?.RetainerId ?? 0);
+        if (!verified.Success)
+            throw new InvalidOperationException(verified.Message);
+        var manager = InventoryManager.Instance();
+        var required = itemIds.Count == 0 ? DalamudRetainerInventory.ItemContainers :
+            itemIds.All(ElementalCurrencyCatalog.IsElementalCurrency) ? [InventoryType.RetainerCrystals] :
+            itemIds.Any(ElementalCurrencyCatalog.IsElementalCurrency) ? DalamudRetainerInventory.ItemContainers :
+            DalamudRetainerInventory.OrdinaryItemContainers;
+        foreach (var type in required)
+        {
+            var container = manager == null ? null : manager->GetInventoryContainer(type);
+            if (container == null || !container->IsLoaded)
+                throw new InvalidOperationException($"Retainer inventory {type} is not loaded; no empty observation was published.");
+        }
+        return DalamudRetainerInventory.ScanLoadedStacks(itemIds);
+    }
 
     public async Task<RetainerRetrievalResult> RetrieveAsync(
         DalamudInventoryStack stack,
@@ -1587,12 +1666,67 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             manager->GetRetainerMarketPrice(checked((short)slotIndex)));
     }
 
-    private unsafe RetainerAutomationResult SelectMarketListing(int slotIndex)
+    private unsafe RetainerAutomationResult SelectMarketListing(RetainerMarketListingTarget listing)
     {
-        var activated = renderedUi.TryActivateListRowIndex(SellingList, slotIndex);
+        var verified = VerifyActive(active?.RetainerId ?? 0);
+        if (!verified.Success) return verified;
+        var resolved = ResolveMarketListing(listing);
+        if (!resolved.Result.Success || resolved.SlotIndex != listing.SlotIndex)
+            return RetainerAutomationResult.Failed("RetainerMarketListingChanged", "The exact listing moved before row activation.");
+        var activated = renderedUi.TryActivateListRowIndex(SellingList, listing.SlotIndex);
         return activated.Success
             ? RetainerAutomationResult.Succeeded("RetainerMarketListingSelected", "Selected the verified retainer listing.")
-            : RetainerAutomationResult.Failed(activated.Code, activated.Message);
+            : RetainerAutomationResult.Failed("RetainerSellingListingSelectionIndeterminate", $"{activated.Code}: {activated.Message}");
+    }
+
+    private unsafe RetainerAutomationResult SelectListingAdjustPrice(RetainerMarketListingTarget listing, ref string? previousLabels)
+    {
+        var verified = VerifyActive(active?.RetainerId ?? 0);
+        if (!verified.Success) return verified;
+        if (IsReady(SellingListingEditor) && !IsReady("ContextMenu"))
+            return RetainerAutomationResult.Succeeded("RetainerSellingEditorOpened", "Listing activation opened the editor directly.");
+        var agent = AgentInventoryContext.Instance();
+        var resolved = ResolveMarketListing(listing);
+        if (!IsReady(SellingList) || !IsReady("ContextMenu") || IsReady(YesNo) || agent == null ||
+            agent->TargetInventoryId != InventoryType.RetainerMarket || agent->TargetInventorySlotId != listing.SlotIndex ||
+            !resolved.Result.Success || resolved.SlotIndex != listing.SlotIndex)
+            return RetainerAutomationResult.Failed("RetainerSellingListingSelectionFailed", "The context menu no longer owns the exact live market listing.");
+
+        // Addon 959 is the localized market-list context action, not a guessed menu position.
+        var label = ResolveAddonText(959);
+        if (string.IsNullOrWhiteSpace(label))
+            return RetainerAutomationResult.Failed("RetainerSellingListingSelectionFailed", "The localized Adjust Price action is unavailable.");
+        var labels = new List<string>();
+        var start = checked((int)agent->ContexItemStartIndex);
+        var count = checked((int)agent->ContextItemCount);
+        if (start < 0 || count <= 0 || start > agent->EventParams.Length - count)
+            return RetainerAutomationResult.Failed("RetainerSellingListingSelectionFailed", "The active menu label slice is invalid.");
+        for (var index = start; index < start + count; index++)
+        {
+            var value = agent->EventParams[index];
+            if (value.Type is AtkValueType.String or AtkValueType.ManagedString or AtkValueType.WideString or AtkValueType.ConstString)
+                labels.Add(value.GetValueAsString());
+        }
+        var match = DalamudContextMenuOptionParser.Find(labels,
+            new("Adjust Price", new HashSet<string>(StringComparer.Ordinal) { label }));
+        if (labels.Count != agent->ContextItemCount || !match.Success || match.Index >= agent->ContextItemCount || agent->IsContextItemDisabled(match.Index))
+            return RetainerAutomationResult.Failed("RetainerSellingListingSelectionFailed", "The owned menu does not offer one enabled Adjust Price action.");
+        var fingerprint = string.Join("\u001f", labels);
+        if (previousLabels != fingerprint)
+        {
+            if (previousLabels is not null)
+                return RetainerAutomationResult.Failed("RetainerSellingListingSelectionFailed", "Context labels changed during selection.");
+            previousLabels = fingerprint;
+            return RetainerAutomationResult.Failed("RetainerAdjustPriceStabilizing", "Waiting for stable context labels.");
+        }
+        // EventParams indexes belong to the agent callback, not rendered rows:
+        // injected context entries can reorder the latter independently.
+        var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
+        var values = stackalloc AtkValue[5];
+        for (var i = 0; i < 5; i++) values[i] = new() { Type = AtkValueType.Int, Int = i == 1 ? match.Index : 0 };
+        return menu->FireCallback(5, values, true)
+            ? RetainerAutomationResult.Succeeded("RetainerAdjustPriceSelected", "Selected the owned Adjust Price action; awaiting its editor.")
+            : RetainerAutomationResult.Failed("RetainerSellingListingSelectionIndeterminate", "ContextMenu callback was dispatched but did not acknowledge selection.");
     }
 
     private static unsafe ulong ReadActiveRetainerId()
