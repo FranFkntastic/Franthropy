@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <None Include="$(AppData)\XIVLauncher\addon\Hooks\dev\cimgui.dll" Link="cimgui.dll" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

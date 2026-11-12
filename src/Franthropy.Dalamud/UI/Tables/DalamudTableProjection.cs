@@ -204,14 +204,15 @@ public sealed class DalamudTableProjection<TRow>
 
         var activated = false;
         var usesSelection = selectable && selection.IsSelectable(row) && selection.Mode != DalamudTableSelectionMode.None;
-        var interactionDrawn = false;
         for (var index = 0; index < columns.Count; index++)
         {
             if (!ImGui.TableNextColumn())
                 continue;
-            if (usesSelection && !interactionDrawn)
+            // Only column zero owns the implicit full-cell target. Secondary
+            // columns opt in through their configured selection fraction, so
+            // hiding column zero never covers an unrelated button or input.
+            if (usesSelection && index == 0)
             {
-                interactionDrawn = true;
                 var cellCursor = ImGui.GetCursorPos();
                 var interaction = DalamudTableSelectionRenderer.DrawRow(
                     id,
@@ -252,7 +253,9 @@ public sealed class DalamudTableProjection<TRow>
     /// <summary>
     /// Draws a variable-height detail row spanning the visible table viewport.
     /// Call after its summary, outside fixed-height row clipping. The caller owns
-    /// expansion and supplies a stable object ID; content must balance its own scopes.
+    /// expansion and supplies a stable object ID. Content must balance its own
+    /// ImGui scopes even when throwing; unmatched callback scopes are left to the
+    /// host's recovery rather than popped against a different table or window.
     /// </summary>
     public void DrawDetailRow(string id, Action draw) => DalamudTableDetailRow.Draw(id, draw);
 

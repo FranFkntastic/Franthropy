@@ -5,6 +5,16 @@ namespace Franthropy.Dalamud.Tests.UI.Tables;
 public sealed class DalamudTableDetailTests
 {
     [Theory]
+    [InlineData(1u, 1u, 2u, 2u, true)]
+    [InlineData(1u, 3u, 2u, 2u, false)]
+    [InlineData(1u, 0u, 2u, 2u, false)]
+    [InlineData(1u, 1u, 2u, 3u, false)]
+    [InlineData(0u, 0u, 2u, 2u, false)]
+    public void Restore_only_the_same_table_and_window(uint expectedTable, uint currentTable,
+        uint expectedWindow, uint currentWindow, bool expected) =>
+        Assert.Equal(expected, DalamudTableDetailRow.CanRestoreScope(expectedTable, currentTable, expectedWindow, currentWindow));
+
+    [Theory]
     [InlineData(100, 640, 4, 104, 636)]
     [InlineData(100, 102, 4, 101, 101)]
     [InlineData(100, 100, 4, 100, 100)]

@@ -26,6 +26,15 @@ internal static class DalamudTableDetailRow
         }
 
         var window = ImGuiP.GetCurrentWindow();
+        var tableId = table.ID;
+        var windowId = window.ID;
+        bool OwnsCurrentScope()
+        {
+            var currentTable = ImGuiP.GetCurrentTable();
+            var currentWindow = ImGuiP.GetCurrentWindow();
+            return CanRestoreScope(tableId, currentTable.IsNull ? 0 : currentTable.ID,
+                windowId, currentWindow.IsNull ? 0 : currentWindow.ID);
+        }
         var work = window.WorkRect;
         var parentWork = window.ParentWorkRect;
         var clip = window.ClipRect;
@@ -57,22 +66,31 @@ internal static class DalamudTableDetailRow
             }
             finally
             {
-                ImGui.PopClipRect();
+                if (OwnsCurrentScope()) ImGui.PopClipRect();
             }
         }
         finally
         {
-            ImGui.PopID();
-            ImGuiP.TablePopBackgroundChannel();
-            window.WorkRect = work;
-            window.ParentWorkRect = parentWork;
-            window.ClipRect = clip;
-            window.SkipItems = skip;
-            window.DC.ColumnsOffset = columnsOffset;
-            // Detail width is not evidence for this individual column's auto width.
-            window.DC.CursorMaxPos.X = cursorMaxX;
+            // An unbalanced callback may leave a different table/window current.
+            // Never pop that scope's channel/clip/ID stacks. Propagate the original
+            // exception and leave recovery of callback-owned scopes to its host.
+            if (OwnsCurrentScope())
+            {
+                ImGui.PopID();
+                ImGuiP.TablePopBackgroundChannel();
+                window.WorkRect = work;
+                window.ParentWorkRect = parentWork;
+                window.ClipRect = clip;
+                window.SkipItems = skip;
+                window.DC.ColumnsOffset = columnsOffset;
+                // Detail width is not evidence for this individual column's auto width.
+                window.DC.CursorMaxPos.X = cursorMaxX;
+            }
         }
     }
+
+    internal static bool CanRestoreScope(uint expectedTable, uint currentTable, uint expectedWindow, uint currentWindow) =>
+        expectedTable != 0 && expectedWindow != 0 && expectedTable == currentTable && expectedWindow == currentWindow;
 
     internal static (float Min, float Max) ContentBounds(float left, float right, float padding)
     {
