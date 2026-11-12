@@ -119,6 +119,7 @@
     <Compile Remove="UI\Plots\DalamudPlotRenderer.cs" />
     <Compile Remove="UI\Tables\DalamudVirtualizedRows.cs" />
     <Compile Remove="UI\Tables\DalamudTableProjection.cs" />
+    <Compile Remove="UI\Tables\DalamudTableDetailRow.cs" />
     <Compile Remove="UI\Tables\DalamudTableSelectionRenderer.cs" />
     <Compile Remove="Diagnostics\DalamudConditionTrustProbe.cs" />
     <Compile Remove="Diagnostics\DalamudRenderControl.cs" />

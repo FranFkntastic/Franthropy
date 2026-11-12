@@ -204,10 +204,14 @@ public sealed class DalamudTableProjection<TRow>
 
         var activated = false;
         var usesSelection = selectable && selection.IsSelectable(row) && selection.Mode != DalamudTableSelectionMode.None;
-        if (ImGui.TableNextColumn())
+        var interactionDrawn = false;
+        for (var index = 0; index < columns.Count; index++)
         {
-            if (usesSelection)
+            if (!ImGui.TableNextColumn())
+                continue;
+            if (usesSelection && !interactionDrawn)
             {
+                interactionDrawn = true;
                 var cellCursor = ImGui.GetCursorPos();
                 var interaction = DalamudTableSelectionRenderer.DrawRow(
                     id,
@@ -230,27 +234,29 @@ public sealed class DalamudTableProjection<TRow>
                 ImGui.SetCursorPos(cellCursor);
             }
 
-            DrawCell(columns[0], row, $"{id}:cell:0");
-        }
-
-        for (var index = 1; index < columns.Count; index++)
-        {
-            if (ImGui.TableNextColumn())
+            else
             {
-                DrawSelectionTarget(
+                activated |= DrawSelectionTarget(
                     columns[index],
                     orderedRows,
                     rowIndex,
                     $"{id}:cell:{index}:selection",
                     usesSelection,
                     enabled);
-                DrawCell(columns[index], row, $"{id}:cell:{index}");
             }
+            DrawCell(columns[index], row, $"{id}:cell:{index}");
         }
         return activated;
     }
 
-    private void DrawSelectionTarget(
+    /// <summary>
+    /// Draws a variable-height detail row spanning the visible table viewport.
+    /// Call after its summary, outside fixed-height row clipping. The caller owns
+    /// expansion and supplies a stable object ID; content must balance its own scopes.
+    /// </summary>
+    public void DrawDetailRow(string id, Action draw) => DalamudTableDetailRow.Draw(id, draw);
+
+    private bool DrawSelectionTarget(
         DalamudTableColumn<TRow> column,
         IReadOnlyList<TRow> orderedRows,
         int rowIndex,
@@ -259,7 +265,7 @@ public sealed class DalamudTableProjection<TRow>
         bool enabled)
     {
         if (!usesSelection || column.SelectionTargetFraction <= 0f)
-            return;
+            return false;
 
         var row = orderedRows[rowIndex];
         var cellCursor = ImGui.GetCursorPos();
@@ -284,6 +290,7 @@ public sealed class DalamudTableProjection<TRow>
             selection.ApplyDrag(orderedRows, rowIndex);
         }
         ImGui.SetCursorPos(cellCursor);
+        return interaction.Activated;
     }
 
     internal static float ResolveSelectionTargetWidth(float availableWidth, float fraction)
