@@ -1,17 +1,17 @@
-name: Table primitives
+name: Critical Dalamud regressions
 
 on:
   pull_request:
     branches: [main]
     paths:
-      - 'src/Franthropy.Dalamud/UI/Tables/**'
+      - 'src/Franthropy.Dalamud/**'
       - 'tests/Franthropy.Dalamud.Tests/**'
       - 'src/Franthropy.Dalamud/Franthropy.Dalamud.csproj'
       - '.github/workflows/table-primitives.yml'
   push:
     branches: [main]
     paths:
-      - 'src/Franthropy.Dalamud/UI/Tables/**'
+      - 'src/Franthropy.Dalamud/**'
       - 'tests/Franthropy.Dalamud.Tests/**'
       - '.github/workflows/table-primitives.yml'
 
@@ -33,10 +33,10 @@ jobs:
         run: |
           Invoke-WebRequest https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile "$env:RUNNER_TEMP/dalamud.zip"
           Expand-Archive "$env:RUNNER_TEMP/dalamud.zip" "$env:APPDATA/XIVLauncher/addon/Hooks/dev"
-      - name: Test table primitives and native renderer
+      - name: Test retained consequential regressions
         shell: pwsh
         run: |
-          dotnet test tests/Franthropy.Dalamud.Tests/Franthropy.Dalamud.Tests.csproj -c Release --filter "FullyQualifiedName~UI.Tables"
+          dotnet test tests/Franthropy.Dalamud.Tests/Franthropy.Dalamud.Tests.csproj -c Release
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           dotnet build src/Franthropy.Dalamud/Franthropy.Dalamud.csproj -c Release -f net8.0-windows --no-restore
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

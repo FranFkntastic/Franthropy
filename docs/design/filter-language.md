@@ -476,8 +476,6 @@ src/
     UI/Filtering/
       DalamudFilterEditor.cs
 tests/
-  Franthropy.Filtering.Tests/
-  Franthropy.FFXIV.Tests/
   Franthropy.Dalamud.Tests/
 ```
 

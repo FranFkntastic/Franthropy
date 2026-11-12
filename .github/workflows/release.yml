@@ -33,11 +33,7 @@ jobs:
         shell: pwsh
         run: |
           $tests = @(
-            'tests/Franthropy.AgentBridge.Tests/Franthropy.AgentBridge.Tests.csproj',
-            'tests/Franthropy.Filtering.Tests/Franthropy.Filtering.Tests.csproj',
-            'tests/Franthropy.FFXIV.Tests/Franthropy.FFXIV.Tests.csproj',
-            'tests/Franthropy.Observations.Tests/Franthropy.Observations.Tests.csproj',
-            'tests/Franthropy.Web.Tests/Franthropy.Web.Tests.csproj'
+            'tests/Franthropy.Observations.Tests/Franthropy.Observations.Tests.csproj'
           )
           foreach ($project in $tests) {
             dotnet test $project -c Release

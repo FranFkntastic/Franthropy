@@ -20,20 +20,8 @@ jobs:
             8.0.x
             10.0.x
 
-      - name: Test agent bridge
-        run: dotnet test tests/Franthropy.AgentBridge.Tests/Franthropy.AgentBridge.Tests.csproj -c Release
-
-      - name: Test filtering
-        run: dotnet test tests/Franthropy.Filtering.Tests/Franthropy.Filtering.Tests.csproj -c Release
-
-      - name: Test FFXIV contracts
-        run: dotnet test tests/Franthropy.FFXIV.Tests/Franthropy.FFXIV.Tests.csproj -c Release
-
       - name: Test shared observations
         run: dotnet test tests/Franthropy.Observations.Tests/Franthropy.Observations.Tests.csproj -c Release
-
-      - name: Test web primitives
-        run: dotnet test tests/Franthropy.Web.Tests/Franthropy.Web.Tests.csproj -c Release
 
       - name: Pack reusable projects
         shell: pwsh

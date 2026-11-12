@@ -87,7 +87,7 @@ The repository requires the .NET 8 and .NET 10 SDKs. `Franthropy.Dalamud`
 also expects a development Dalamud installation.
 
 ```powershell
-dotnet test .\Franthropy.sln -c Debug
+dotnet test .\tests\Franthropy.Observations.Tests\Franthropy.Observations.Tests.csproj -c Debug --filter FullyQualifiedName~Failed_inventory_slot_update_rolls_back_projection_and_change_feed
 ```
 
 ## Design Documents

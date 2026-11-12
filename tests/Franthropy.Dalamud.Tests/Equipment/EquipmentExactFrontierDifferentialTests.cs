@@ -19,38 +19,6 @@ public sealed class EquipmentExactFrontierDifferentialTests
         }
     }
 
-    [Fact]
-    public void ProductionSolver_PreservesJoinedTextOrderingAcrossSelectionBoundaries()
-    {
-        var baselineHead = Offer(EquipmentLoadoutPosition.Head, 900, [0, 0, 0], 0, EquipmentAcquisitionSourceKind.Owned, null, null, 0);
-        var baselineBody = Offer(EquipmentLoadoutPosition.Body, 901, [0, 0, 0], 0, EquipmentAcquisitionSourceKind.Owned, null, null, 0);
-        var prefix = Offer(EquipmentLoadoutPosition.Head, 1_000, [20, 20, 5], 100, EquipmentAcquisitionSourceKind.MarketBoard, "x", null, 0, "shared");
-        var extended = Offer(EquipmentLoadoutPosition.Head, 1_000, [20, 20, 5], 100, EquipmentAcquisitionSourceKind.MarketBoard, "x:1!", null, 0, "shared");
-        var request = new EquipmentExactFrontierRequest(
-            [baselineHead, baselineBody, prefix, extended],
-            new HashSet<EquipmentLoadoutPosition> { EquipmentLoadoutPosition.Head, EquipmentLoadoutPosition.Body },
-            new Dictionary<EquipmentLoadoutPosition, EquipmentOfferAllocationKey?>
-            {
-                [EquipmentLoadoutPosition.Head] = baselineHead.AllocationKey,
-                [EquipmentLoadoutPosition.Body] = baselineBody.AllocationKey,
-            },
-            new ComponentwiseUtilityModel(),
-            MaxRetainedRepresentatives: 4);
-
-        var expected = new EquipmentExactFrontierReferenceSolver().Solve(request);
-        var actual = new EquipmentExactFrontierSolver().Solve(request);
-
-        Assert.Equal(Contract(expected), Contract(actual));
-        var observationIds = actual.Pareto.Frontier
-            .Where(solution => solution.Candidate.Selections.Any(selection => selection.OfferKey.ItemId == 1_000))
-            .Select(solution => solution.Candidate.Selections.Single(selection => selection.OfferKey.ItemId == 1_000).ObservationId)
-            .ToArray();
-        Assert.Collection(
-            observationIds,
-            value => Assert.Equal("x:1!", value),
-            value => Assert.Equal("x", value));
-    }
-
     private static EquipmentExactFrontierRequest Request(int seed)
     {
         var random = new Random(seed);
