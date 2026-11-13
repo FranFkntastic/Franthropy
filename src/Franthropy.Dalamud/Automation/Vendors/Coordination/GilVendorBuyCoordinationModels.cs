@@ -151,6 +151,15 @@ public sealed class GilVendorBuyRouteSnapshot
 [Serializable]
 public sealed class GilVendorBuyArmedIntentSnapshot
 {
+    // Persist uncertainty with the original baselines; never re-arm it for a retry.
+    public string VerificationCode { get; set; } = string.Empty;
+    public DateTime? VerificationFailedAtUtc { get; set; }
+    public int VerificationPolls { get; set; }
+    public DateTime? SettleStartedAtUtc { get; set; }
+    public int SettlePolls { get; set; }
+    public int? FailureItemCount { get; set; }
+    public ulong? FailureGil { get; set; }
+    public bool LateMovementLogged { get; set; }
     public uint ItemId { get; set; }
     public int Quantity { get; set; }
     public ulong ExpectedGil { get; set; }
