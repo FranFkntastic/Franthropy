@@ -84,8 +84,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         this.dataManager = dataManager;
         this.log = log;
         bell = new(objects, targets, dataManager);
-        crystals = new(sigScanner, gameGui, framework, log);
-        items = new(sigScanner, gameGui, framework, log);
+        crystals = new(sigScanner, gameGui, framework, log, gameInventory);
+        items = new(sigScanner, gameGui, framework, log, gameInventory);
         retrievals = new(sigScanner, gameGui, framework, log, gameInventory);
         renderedUi = new(gameGui);
     }
