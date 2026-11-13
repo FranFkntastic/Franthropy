@@ -625,12 +625,20 @@ public sealed class GilVendorBuyCoordinator : IDisposable
                 Persist();
                 return;
             }
+            // An exact late receipt is accepted (nothing is resent); anything short of exact stays for a human check.
+            var lateBy = utcNow().UtcDateTime - failedAt;
+            var code = intent.VerificationCode;
+            if (TryReconcileIndeterminate(out _))
+            {
+                Warn($"VendorPurchaseLateConfirmation lateBy={lateBy.TotalMilliseconds:F0}ms; item={intent.ItemId} quantity={intent.Quantity}; verdict={code}; exact receipt arrived late and was accepted, not retried.");
+                return;
+            }
             var snapshot = runtime.CaptureInventory([intent.ItemId]);
             if (snapshot.IsComplete && snapshot.Gil is { } gil && !intent.LateMovementLogged &&
                 (gil != intent.FailureGil || snapshot.ItemCounts.GetValueOrDefault(intent.ItemId) != intent.FailureItemCount))
             {
                 intent.LateMovementLogged = true;
-                Warn($"VendorPurchaseLateConfirmation lateBy={(utcNow().UtcDateTime - failedAt).TotalMilliseconds:F0}ms; {ReceiptEvidence(intent, snapshot)}; verdict={intent.VerificationCode}; movement observed, not automatically accepted.");
+                Warn($"VendorPurchaseLateConfirmation lateBy={(utcNow().UtcDateTime - failedAt).TotalMilliseconds:F0}ms; {ReceiptEvidence(intent, snapshot)}; verdict={intent.VerificationCode}; movement observed but not an exact receipt; not accepted.");
                 Persist();
             }
             return;

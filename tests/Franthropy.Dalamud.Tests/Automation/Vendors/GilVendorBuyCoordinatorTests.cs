@@ -42,8 +42,12 @@ public sealed class GilVendorBuyCoordinatorTests
         var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime, () => now);
         Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
         TickUntilPhase(coordinator, GilVendorBuyPhase.VerifyReceipt);
-        now += TimeSpan.FromSeconds(4);
-        coordinator.Tick(Context);
+        // Exhaust the wall-clock verification budget, settle window and minimum polls.
+        for (var index = 0; index < 40 && coordinator.ActiveRun!.Phase == GilVendorBuyPhase.VerifyReceipt; index++)
+        {
+            now += TimeSpan.FromSeconds(1);
+            coordinator.Tick(Context);
+        }
         Assert.Equal(GilVendorBuyPhase.ReconcileReceipt, coordinator.ActiveRun!.Phase);
 
         runtime.Gil -= 20;
@@ -135,8 +139,14 @@ public sealed class GilVendorBuyCoordinatorTests
         var runtime = new ScriptedRuntime { Gil = makeEvidenceIndeterminate ? 979UL : 980UL };
         runtime.Counts[1] = 2;
 
-        var coordinator = new GilVendorBuyCoordinator(store, runtime);
-        coordinator.Tick(Context);
+        var now = DateTimeOffset.UtcNow;
+        var coordinator = new GilVendorBuyCoordinator(store, runtime, () => now);
+        // Uncertain evidence must ride out the verification and late-observation windows, never resubmit.
+        for (var index = 0; index < 40 && coordinator.ActiveRun!.Phase is GilVendorBuyPhase.VerifyReceipt or GilVendorBuyPhase.ReconcileReceipt; index++)
+        {
+            coordinator.Tick(Context);
+            now += TimeSpan.FromSeconds(1);
+        }
 
         Assert.Equal(expectedPhase, coordinator.ActiveRun!.Phase);
         Assert.Equal(expectedReceipts, coordinator.ActiveRun.Receipts.Count);
