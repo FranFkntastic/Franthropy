@@ -4,7 +4,13 @@ namespace Franthropy.Dalamud.Automation.Vendors.Coordination;
 
 public sealed class GilVendorBuyCoordinator : IDisposable
 {
-    private static readonly TimeSpan ReceiptTimeout = TimeSpan.FromSeconds(4);
+    // Server/UI latency must not turn an unchanged observation into a second purchase.
+    private static readonly TimeSpan ReceiptVerificationBudget = TimeSpan.FromSeconds(8);
+    // One final read-only window lets independently arriving item/gil updates settle.
+    private static readonly TimeSpan ReceiptSettleWindow = TimeSpan.FromSeconds(1);
+    // Keep callers ticking a bounded diagnostic tail without retaining automation ownership.
+    private static readonly TimeSpan LateObservationBudget = TimeSpan.FromSeconds(2);
+    private const int MinimumReceiptPolls = 10;
     private readonly IGilVendorBuyRunStore store;
     private readonly IGilVendorBuyRuntime runtime;
     private readonly Func<DateTimeOffset> utcNow;
@@ -46,9 +52,9 @@ public sealed class GilVendorBuyCoordinator : IDisposable
     public bool TryStart(GilVendorBuyPlan plan, string contextSignature, out string error)
     {
         ArgumentNullException.ThrowIfNull(plan);
-        if (IsRunning || activeRun?.Phase == GilVendorBuyPhase.Paused)
+        if (IsRunning || activeRun?.Phase == GilVendorBuyPhase.Paused || activeRun?.ArmedPurchase is not null)
         {
-            error = "A vendor buy run is already active.";
+            error = "A vendor buy run is active or has an unresolved purchase needing a check; no new purchase was started.";
             return false;
         }
         if (string.IsNullOrWhiteSpace(contextSignature))
@@ -239,6 +245,12 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             new(snapshot.ItemCounts.GetValueOrDefault(line.ItemId), snapshot.Gil.Value));
         if (evidence.Evidence == GilVendorPurchaseEvidence.Indeterminate)
         {
+            if (!string.IsNullOrEmpty(intent.VerificationCode))
+            {
+                // Preserve the threshold-bearing failure receipt during consumer-driven re-reads.
+                message = run.Message;
+                return false;
+            }
             Fail(GilVendorBuyPhase.Indeterminate, $"{line.ItemName}: {evidence.Message}");
             message = run.Message;
             return false;
@@ -509,8 +521,12 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             }
             catch (Exception ex)
             {
-                run.ArmedPurchase = null;
-                Fail(GilVendorBuyPhase.Failed, $"Vendor purchase submission failed before a receipt could be observed: {ex.Message}");
+                // The throw can come from the native callback itself, so the purchase may
+                // already be in flight. Keep the armed intent and let receipt verification
+                // decide; an unconfirmed outcome ends in ReconcileReceipt, never a resend.
+                run.Message = $"VendorDispatchIndeterminate: submission threw ({ex.GetType().Name}: {ex.Message}); verifying receipt, not retried.";
+                Warn(run.Message);
+                Persist();
             }
             return;
         }
@@ -531,11 +547,28 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             Fail(GilVendorBuyPhase.Indeterminate, "Purchase verification lost its persisted armed intent.");
             return;
         }
-        runtime.TryConfirmPurchasePrompt();
+        // Confirmation belongs only to the active dispatch window, not settle or late reads.
+        var elapsed = utcNow().UtcDateTime - intent.ArmedAtUtc;
+        if (elapsed >= ReceiptVerificationBudget)
+        {
+            intent.SettleStartedAtUtc ??= utcNow().UtcDateTime;
+            intent.SettlePolls++;
+        }
+        var windowExpired = intent.SettleStartedAtUtc is { } settleStarted &&
+                            utcNow().UtcDateTime - settleStarted >= ReceiptSettleWindow &&
+                            intent.SettlePolls >= MinimumReceiptPolls;
+        if (elapsed < ReceiptVerificationBudget)
+            runtime.TryConfirmPurchasePrompt();
+        intent.VerificationPolls++;
         var line = run.Lines.First(candidate => candidate.ItemId == intent.ItemId);
         var snapshot = runtime.CaptureInventory([line.ItemId]);
         if (!snapshot.IsComplete || snapshot.Gil is null)
         {
+            if (windowExpired)
+            {
+                FinishReceiptUncertain(run, intent, snapshot, "VendorVerificationPreconditionsLost", snapshot.Message);
+                return;
+            }
             run.Message = snapshot.Message;
             return;
         }
@@ -572,52 +605,89 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             Persist();
             return;
         }
-        if (evidence.Evidence == GilVendorPurchaseEvidence.Indeterminate)
+        if (!windowExpired)
         {
-            Fail(GilVendorBuyPhase.Indeterminate, $"{line.ItemName}: {evidence.Message}");
+            run.Message = $"{line.ItemName}: {(elapsed >= ReceiptVerificationBudget ? "Settling receipt. " : string.Empty)}{evidence.Message} Not retried.";
             return;
         }
-        if (evidence.Evidence == GilVendorPurchaseEvidence.Reconciling)
-        {
-            if (utcNow().UtcDateTime - intent.ArmedAtUtc < ReceiptTimeout)
-            {
-                run.Message = $"{line.ItemName}: {evidence.Message}";
-                return;
-            }
-            run.Phase = GilVendorBuyPhase.ReconcileReceipt;
-            run.Message = $"Reconciling {line.ItemName} without resubmitting the armed purchase. {evidence.Message}";
-            Persist();
-            CleanupAutomation();
-            return;
-        }
-        if (utcNow().UtcDateTime - intent.ArmedAtUtc < ReceiptTimeout)
-            return;
-        if (run.StopRequested)
-        {
-            run.ArmedPurchase = null;
-            FinishStopped(run, "No mutation was observed from the submitted purchase; vendor buy is now stopped.");
-            return;
-        }
-        if (intent.RetryCount == 0)
-        {
-            line.PurchaseRetryCount = 1;
-            run.ArmedPurchase = null;
-            run.Phase = GilVendorBuyPhase.PurchaseLine;
-            run.Message = $"No {line.ItemName} mutation was observed; retrying the unchanged batch once.";
-            Persist();
-            return;
-        }
-        Fail(GilVendorBuyPhase.Failed, $"No {line.ItemName} mutation was observed after the single safe retry.");
+        FinishReceiptUncertain(run, intent, snapshot,
+            evidence.Evidence == GilVendorPurchaseEvidence.Pending ? "VendorVerificationWindowExpired" : "VendorReceiptDeltaMismatch",
+            evidence.Message);
     }
 
     private void TickReconcileReceipt(GilVendorBuyRunSnapshot run)
     {
+        if (run.ArmedPurchase is { VerificationFailedAtUtc: { } failedAt } intent)
+        {
+            if (utcNow().UtcDateTime - failedAt >= LateObservationBudget)
+            {
+                run.Phase = GilVendorBuyPhase.Indeterminate;
+                Persist();
+                return;
+            }
+            // An exact late receipt is accepted (nothing is resent); anything short of exact stays for a human check.
+            var lateBy = utcNow().UtcDateTime - failedAt;
+            var code = intent.VerificationCode;
+            if (TryReconcileIndeterminate(out _))
+            {
+                Warn($"VendorPurchaseLateConfirmation lateBy={lateBy.TotalMilliseconds:F0}ms; item={intent.ItemId} quantity={intent.Quantity}; verdict={code}; exact receipt arrived late and was accepted, not retried.");
+                return;
+            }
+            var snapshot = runtime.CaptureInventory([intent.ItemId]);
+            if (snapshot.IsComplete && snapshot.Gil is { } gil && !intent.LateMovementLogged &&
+                (gil != intent.FailureGil || snapshot.ItemCounts.GetValueOrDefault(intent.ItemId) != intent.FailureItemCount))
+            {
+                intent.LateMovementLogged = true;
+                Warn($"VendorPurchaseLateConfirmation lateBy={(utcNow().UtcDateTime - failedAt).TotalMilliseconds:F0}ms; {ReceiptEvidence(intent, snapshot)}; verdict={intent.VerificationCode}; movement observed but not an exact receipt; not accepted.");
+                Persist();
+            }
+            return;
+        }
         if (TryReconcileIndeterminate(out var message))
             return;
         if (run.Phase != GilVendorBuyPhase.ReconcileReceipt)
             return;
         run.Message = $"Reconciling the armed vendor purchase without resubmitting it. {message}";
         Persist();
+    }
+
+    private string ReceiptEvidence(GilVendorBuyArmedIntentSnapshot intent, GilVendorInventorySnapshot snapshot) =>
+        $"item={intent.ItemId} expectedQuantity={intent.Quantity} expectedGil={intent.ExpectedGil}; " +
+        $"budget={ReceiptVerificationBudget.TotalMilliseconds:F0}ms settle={ReceiptSettleWindow.TotalMilliseconds:F0}ms " +
+        $"elapsed={(utcNow().UtcDateTime - intent.ArmedAtUtc).TotalMilliseconds:F0}ms polls={intent.VerificationPolls}; " +
+        $"gil={intent.BeforeGil}->{snapshot.Gil?.ToString() ?? "unavailable"} " +
+        $"items={intent.BeforeItemCount}->{(snapshot.IsComplete ? snapshot.ItemCounts.GetValueOrDefault(intent.ItemId).ToString() : "unavailable")}; " +
+        $"complete={snapshot.IsComplete}; not retried";
+
+    private void FinishReceiptUncertain(GilVendorBuyRunSnapshot run, GilVendorBuyArmedIntentSnapshot intent,
+        GilVendorInventorySnapshot snapshot, string code, string detail)
+    {
+        intent.VerificationCode = code;
+        intent.VerificationFailedAtUtc = utcNow().UtcDateTime;
+        intent.FailureGil = snapshot.Gil;
+        intent.FailureItemCount = snapshot.IsComplete ? snapshot.ItemCounts.GetValueOrDefault(intent.ItemId) : null;
+        run.Phase = GilVendorBuyPhase.ReconcileReceipt;
+        run.Message = $"{code}: {ReceiptEvidence(intent, snapshot)}. Needs check. {detail}";
+        Warn(run.Message);
+        Persist();
+        CleanupAutomation();
+    }
+
+    private static void Warn(string message)
+    {
+#if NET10_0_OR_GREATER
+        try
+        {
+            ECommons.Logging.PluginLog.Warning(message);
+            return;
+        }
+        catch
+        {
+            // Same fallback as table diagnostics for hosts without ECommons initialization.
+        }
+#endif
+        System.Diagnostics.Trace.TraceWarning(message);
+        Console.Error.WriteLine(message);
     }
 
     private void ReplanOrSkipCurrentStop(
@@ -822,6 +892,14 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             BeforeGil = intent.BeforeGil,
             RetryCount = intent.RetryCount,
             ArmedAtUtc = intent.ArmedAtUtc,
+            VerificationCode = intent.VerificationCode,
+            VerificationFailedAtUtc = intent.VerificationFailedAtUtc,
+            VerificationPolls = intent.VerificationPolls,
+            SettleStartedAtUtc = intent.SettleStartedAtUtc,
+            SettlePolls = intent.SettlePolls,
+            FailureItemCount = intent.FailureItemCount,
+            FailureGil = intent.FailureGil,
+            LateMovementLogged = intent.LateMovementLogged,
         } : null,
         Receipts = run.Receipts.Select(receipt => new GilVendorBuyReceiptSnapshot
         {
