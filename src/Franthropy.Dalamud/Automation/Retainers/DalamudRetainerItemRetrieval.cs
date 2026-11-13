@@ -55,6 +55,11 @@ public sealed class DalamudRetainerItemRetrieval
     private const int SettleBudgetMs = 1_000;
     private const int LateObservationBudgetMs = 1_000;
     private const int AggregatePollIntervalTicks = 3;
+    // A single long hitch must not consume a whole phase in one or two polls.
+    private const int MinimumPollsPerPhase = 10;
+    // Agent/container reads can flicker for a frame around dispatch and popups;
+    // only a loss that persists this long ends verification early.
+    private const int PreconditionLossToleranceMs = 500;
     private static readonly IReadOnlyList<InventoryType> PlayerOrdinaryItemContainers =
     [
         InventoryType.Inventory1,
@@ -150,21 +155,24 @@ public sealed class DalamudRetainerItemRetrieval
             return new(false, 0, pending.Code, pending.Message);
 
         var phase = Stopwatch.StartNew();
-        while (phase.ElapsedMilliseconds < VerificationBudgetMs)
+        var phasePolls = 0;
+        long? lostSinceMs = null;
+        while (phase.ElapsedMilliseconds < VerificationBudgetMs || phasePolls < MinimumPollsPerPhase)
         {
             var immediate = await framework.RunOnTick(
                 () => VerifyCompleted(stack, pending, diagnostics),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             diagnostics.Polls++;
+            phasePolls++;
             if (immediate.Success)
                 return immediate;
 
             if (mutation?.Matches(pending.Requested) == true)
                 return MutationVerified(stack.ItemId, pending.Requested, mutation);
-            if (immediate.Code == "VerificationPreconditionsLost")
+            if (PreconditionLossPersisted(immediate, phase, ref lostSinceMs))
                 return await FinishFailureAsync(stack, pending, mutation, diagnostics, phase, immediate, cancellationToken).ConfigureAwait(false);
 
-            if (pending.NeedsQuantityInput)
+            if (pending.NeedsQuantityInput && lostSinceMs is null)
             {
                 var submitted = await framework.RunOnTick(
                     () => SubmitQuantity(stack.ItemId, pending.Requested, diagnostics),
@@ -195,24 +203,42 @@ public sealed class DalamudRetainerItemRetrieval
     {
         RetainerRetrievalResult last = new(false, 0, "TransferPending", $"Retrieval did not complete for item {stack.ItemId}.");
         var phase = Stopwatch.StartNew();
-        while (phase.ElapsedMilliseconds < VerificationBudgetMs)
+        var phasePolls = 0;
+        long? lostSinceMs = null;
+        while (phase.ElapsedMilliseconds < VerificationBudgetMs || phasePolls < MinimumPollsPerPhase)
         {
             last = await framework.RunOnTick(
                 () => VerifyCompleted(stack, pending, diagnostics),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             diagnostics.Polls++;
+            phasePolls++;
             if (last.Success)
                 return last;
 
             if (mutation?.Matches(pending.Requested) == true)
                 return MutationVerified(stack.ItemId, pending.Requested, mutation);
-            if (last.Code == "VerificationPreconditionsLost")
+            if (PreconditionLossPersisted(last, phase, ref lostSinceMs))
                 return await FinishFailureAsync(stack, pending, mutation, diagnostics, phase, last, cancellationToken).ConfigureAwait(false);
 
             await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
         }
 
         return await ReconcileAfterTimeoutAsync(stack, pending, mutation, diagnostics, phase, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Tolerates single-frame agent/container flicker: verification ends early only
+    /// when preconditions stay lost for <see cref="PreconditionLossToleranceMs"/>.
+    /// </summary>
+    private static bool PreconditionLossPersisted(RetainerRetrievalResult observation, Stopwatch phase, ref long? lostSinceMs)
+    {
+        if (observation.Code != "VerificationPreconditionsLost")
+        {
+            lostSinceMs = null;
+            return false;
+        }
+        lostSinceMs ??= phase.ElapsedMilliseconds;
+        return phase.ElapsedMilliseconds - lostSinceMs.Value >= PreconditionLossToleranceMs;
     }
 
     /// <summary>
@@ -497,8 +523,9 @@ public sealed class DalamudRetainerItemRetrieval
                 break;
             }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (OperationCanceledException) when (lateCancellation.IsCancellationRequested) { }
+        // The late watch is diagnostic only: caller cancellation must not discard the
+        // already-classified failure.
+        catch (OperationCanceledException) { }
         catch (Exception exception) { log.Warning(exception, "Retrieval late diagnostic unavailable; preserving {Code}.", result.Code); }
         return result;
     }
