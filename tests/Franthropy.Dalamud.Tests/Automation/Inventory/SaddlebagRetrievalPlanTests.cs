@@ -22,6 +22,10 @@ public sealed class SaddlebagRetrievalPlanTests
         Assert.Equal((Plan.Move, empty), (plan.Operation, plan.Destination));
         Assert.Equal(InventoryMoveOutcome.NoBagCapacity,
             DalamudInventoryMover.PlanSaddlebagRetrieval([fullSource, partialBag], fullSource, Capacity, Capacity).Refusal);
+        // A part of a full source is staged, then the incomplete piece merges.
+        var stagingSlot = Stack(InventoryType.SaddleBag2, 2, 0);
+        plan = DalamudInventoryMover.PlanSaddlebagRetrieval([fullSource, partialBag, stagingSlot], fullSource, 120, Capacity);
+        Assert.Equal((InventoryMoveOutcome.None, Plan.Split), (plan.Refusal, plan.Operation));
 
         // Whole stack: best-fit compatible incomplete stack that takes all of it.
         var source = Stack(InventoryType.SaddleBag2, 4, 300);

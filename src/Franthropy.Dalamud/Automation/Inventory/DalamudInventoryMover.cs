@@ -470,7 +470,10 @@ public sealed unsafe class DalamudInventoryMover : IDisposable
         // Capacity-limited merge transfers min(S, C-D): exact only when C-D equals the request.
         var exact = mergeable.FirstOrDefault(x => capacity - x.Quantity == quantity);
         if (exact != null) return new(InventoryMoveOutcome.None, "Capacity-limited exact merge.", NativeOperation.Merge, exact, quantity);
-        if (fits == null && empties.Length == 0) return new(InventoryMoveOutcome.NoBagCapacity, capacityEvidence);
+        // The staged piece (quantity < source <= capacity) is itself incomplete, so its
+        // later whole-stack retrieval may merge even when the full source could not.
+        var pieceFits = bags.Any(x => x.CompatibleWith(source) && x.Quantity < capacity && capacity - x.Quantity >= quantity);
+        if (!pieceFits && empties.Length == 0) return new(InventoryMoveOutcome.NoBagCapacity, capacityEvidence);
         // Native SplitItem from a saddlebag searches only saddlebag containers for the new slot.
         if (!stacks.Any(x => Saddlebags.Contains(x.Container) && x.ItemId == 0 && x.Quantity == 0 && !x.IsSymbolic))
             return new(InventoryMoveOutcome.NoSaddlebagSplitSpace, "Partial retrieval needs an empty saddlebag slot for the native split.");
