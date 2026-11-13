@@ -521,8 +521,12 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             }
             catch (Exception ex)
             {
-                run.ArmedPurchase = null;
-                Fail(GilVendorBuyPhase.Failed, $"Vendor purchase submission failed before a receipt could be observed: {ex.Message}");
+                // The throw can come from the native callback itself, so the purchase may
+                // already be in flight. Keep the armed intent and let receipt verification
+                // decide; an unconfirmed outcome ends in ReconcileReceipt, never a resend.
+                run.Message = $"VendorDispatchIndeterminate: submission threw ({ex.GetType().Name}: {ex.Message}); verifying receipt, not retried.";
+                Warn(run.Message);
+                Persist();
             }
             return;
         }
