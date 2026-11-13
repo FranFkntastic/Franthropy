@@ -53,6 +53,19 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     // Consecutive quiet frames (sell list ready, no menu/editor/confirmation) required before activation.
     private const int RepriceStableFrames = 3;
     private const int RepriceSurfaceWaitFrames = 180;
+    // Wall-clock bounds. Pre-send recovery (all attempts plus the final cleanup) never exceeds
+    // RepriceRecoveryBudget: an attempt starts only if its worst case still fits. Every stage
+    // below is capped in both frames and time, so low frame rates cannot stretch it.
+    private static readonly TimeSpan RepriceRecoveryBudget = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan RepriceStageLimit = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan RepriceReopenLimit = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan RepriceSettleLimit = TimeSpan.FromSeconds(1);
+    // backoff (<=0.5) + release 2 + reopen 3 + quiet 2 + menu 2 + settle 1 + direct-editor release 2, rounded up.
+    private static readonly TimeSpan RepriceAttemptWorstCase = TimeSpan.FromSeconds(13);
+    // Post-callback stages: editor appearance, unsent-editor abandonment, and commit observation.
+    private static readonly TimeSpan RepriceEditorAppearLimit = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan RepriceAbandonLimit = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan RepriceCommitObserveLimit = TimeSpan.FromSeconds(6);
     // Spacing between attempts so instantly failing attempts still span several seconds.
     private const int RepriceRetryBackoffFrames = 10;
 
@@ -98,6 +111,11 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private sealed class RepriceSelectionState(RetainerMarketListingTarget listing)
     {
         private string? marketFingerprint;
+
+        public System.Diagnostics.Stopwatch Clock { get; } = System.Diagnostics.Stopwatch.StartNew();
+
+        /// <summary>The listing exactly as requested (old price); used to prove an abandoned editor sent nothing.</summary>
+        public RetainerMarketListingTarget Requested { get; } = listing;
 
         public RetainerMarketListingTarget Current { get; set; } = listing;
 
@@ -354,7 +372,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             : RetainerAutomationResult.Failed("RetainerInventoryTimeout", "Timed out waiting for retainer inventory.");
     }
 
-    public async Task<RetainerAutomationResult> OpenSellingListAsync(CancellationToken cancellationToken = default)
+    public Task<RetainerAutomationResult> OpenSellingListAsync(CancellationToken cancellationToken = default) =>
+        OpenSellingListAsync(null, cancellationToken);
+
+    private async Task<RetainerAutomationResult> OpenSellingListAsync(TimeSpan? limit, CancellationToken cancellationToken)
     {
         var compatibility = EvaluateUiCapability();
         if (!compatibility.IsAvailable)
@@ -378,7 +399,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (!selected.Success)
             return selected;
 
-        if (await WaitUntilAsync(() => IsReady(SellingList), cancellationToken).ConfigureAwait(false))
+        if (await WaitUntilAsync(() => IsReady(SellingList), cancellationToken, limit).ConfigureAwait(false))
             return RetainerAutomationResult.Succeeded("RetainerSellingListReady", "Retainer selling list opened.");
 
         var observed = await ObserveSellingUiAsync(cancellationToken).ConfigureAwait(false);
@@ -413,8 +434,13 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         }
 
         var state = new RepriceSelectionState(listing);
+        var attempted = 0;
         for (var attempt = 1; attempt <= RepriceSelectionAttemptBudget; attempt++)
         {
+            // Never start an attempt (plus the final cleanup) that could overrun the wall-clock budget.
+            if (state.Clock.Elapsed + RepriceAttemptWorstCase + RepriceStageLimit > RepriceRecoveryBudget)
+                break;
+            attempted = attempt;
             RepriceAttemptOutcome outcome;
             try
             {
@@ -455,8 +481,11 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         }
 
         await ReleaseOwnedRepriceSurfacesAsync(state, CancellationToken.None).ConfigureAwait(false);
-        var exhausted = $"Adjust Price was never dispatched; nothing was sent. {RepriceSelectionAttemptBudget} selection attempts " +
-            $"for item {listing.ItemId} failed before dispatch: {string.Join(" | ", state.Attempts)}";
+        var limit = attempted >= RepriceSelectionAttemptBudget
+            ? $"the {RepriceSelectionAttemptBudget}-attempt budget"
+            : $"the {RepriceRecoveryBudget.TotalSeconds:0}s wall-clock budget (no further attempt could finish inside it)";
+        var exhausted = $"Adjust Price was never dispatched; nothing was sent. Recovery stopped at {limit} after {attempted} attempts " +
+            $"in {state.Clock.Elapsed.TotalSeconds:0.0}s for item {listing.ItemId}: {string.Join(" | ", state.Attempts)}";
         log.Warning("RetainerRepriceRecoveryExhausted slot={Slot} item={Item}: {Message}", state.Current.SlotIndex, listing.ItemId, exhausted);
         return (RetainerAutomationResult.Failed("RetainerRepriceRecoveryExhausted", exhausted), null);
     }
@@ -468,7 +497,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         await ReleaseOwnedRepriceSurfacesAsync(state, cancellationToken).ConfigureAwait(false);
         if (!await framework.RunOnTick(() => IsReady(SellingList), cancellationToken: cancellationToken).ConfigureAwait(false))
         {
-            var reopened = await OpenSellingListAsync(cancellationToken).ConfigureAwait(false);
+            var reopened = await OpenSellingListAsync(RepriceReopenLimit, cancellationToken).ConfigureAwait(false);
             if (!reopened.Success)
                 return reopened.Code == "RetainerIdentityMismatch"
                     ? RepriceAttemptOutcome.Final(reopened)
@@ -477,7 +506,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
         var stableFrames = 0;
         var surfaces = string.Empty;
-        for (var frame = 0; frame < RepriceSurfaceWaitFrames && stableFrames < RepriceStableFrames; frame++)
+        var quietClock = System.Diagnostics.Stopwatch.StartNew();
+        for (var frame = 0; frame < RepriceSurfaceWaitFrames && stableFrames < RepriceStableFrames && quietClock.Elapsed < RepriceStageLimit; frame++)
         {
             var observed = await framework.RunOnTick(ObserveRepriceSurfaces, cancellationToken: cancellationToken).ConfigureAwait(false);
             surfaces = observed.Description;
@@ -487,21 +517,22 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         }
         if (stableFrames < RepriceStableFrames)
             return RepriceAttemptOutcome.Retry(-1,
-                $"sell list did not become quiet within {RepriceSurfaceWaitFrames} frames ({surfaces})");
+                $"sell list did not become quiet within {quietClock.Elapsed.TotalSeconds:0.0}s ({surfaces})");
 
         var activation = await framework.RunOnTick(() => ActivateRepriceRow(state), cancellationToken: cancellationToken).ConfigureAwait(false);
         if (activation.Result is not null || activation.Condition is not null)
             return activation;
         var row = activation.Row;
 
-        if (!await WaitUntilAsync(() => IsReady("ContextMenu") || IsReady(SellingListingEditor), cancellationToken).ConfigureAwait(false))
+        if (!await WaitUntilAsync(() => IsReady("ContextMenu") || IsReady(SellingListingEditor), cancellationToken, RepriceStageLimit).ConfigureAwait(false))
         {
             state.RecordRowFailure(row);
             var after = await framework.RunOnTick(ObserveRepriceSurfaces, cancellationToken: cancellationToken).ConfigureAwait(false);
-            return RepriceAttemptOutcome.Retry(row, $"row activation opened neither ContextMenu nor RetainerSell within 180 frames ({after.Description})");
+            return RepriceAttemptOutcome.Retry(row, $"row activation opened neither ContextMenu nor RetainerSell within {RepriceStageLimit.TotalSeconds:0}s ({after.Description})");
         }
 
         string? previousLabels = null;
+        var settleClock = System.Diagnostics.Stopwatch.StartNew();
         for (var settle = 0; ; settle++)
         {
             var gate = await framework.RunOnTick(
@@ -514,7 +545,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 case AdjustPriceGateKind.Failed:
                     state.RecordRowFailure(row);
                     return RepriceAttemptOutcome.Retry(row, gate.Condition);
-                case AdjustPriceGateKind.Waiting or AdjustPriceGateKind.WrongListing when settle < RepriceReadinessSettleFrames:
+                case AdjustPriceGateKind.Waiting or AdjustPriceGateKind.WrongListing
+                    when settle < RepriceReadinessSettleFrames && settleClock.Elapsed < RepriceSettleLimit:
                     await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
                     continue;
                 case AdjustPriceGateKind.WrongListing:
@@ -522,19 +554,24 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                     return RepriceAttemptOutcome.Retry(row, gate.Condition);
                 case AdjustPriceGateKind.Waiting:
                     state.RecordRowFailure(row);
-                    return RepriceAttemptOutcome.Retry(row, $"still not ready after {RepriceReadinessSettleFrames} frames: {gate.Condition}");
+                    return RepriceAttemptOutcome.Retry(row, $"still not ready after {settle + 1} frames / {settleClock.Elapsed.TotalSeconds:0.0}s: {gate.Condition}");
                 case AdjustPriceGateKind.EditorOpened:
                 {
                     // No callback was fired; the editor alone sends nothing, so a mismatch is
                     // recoverable by closing our editor without confirming it.
                     var direct = await framework.RunOnTick(() => VerifySellingEditor(state.Current), cancellationToken: cancellationToken).ConfigureAwait(false);
-                    return direct.Success
-                        ? RepriceAttemptOutcome.Final(direct, state.Current)
-                        : RepriceAttemptOutcome.Retry(row, $"row opened the editor directly, but it does not show the exact listing: {direct.Message}");
+                    if (direct.Success)
+                        return RepriceAttemptOutcome.Final(direct, state.Current);
+                    // The editor exposes no slot, so no row-to-slot mapping can be learned; the
+                    // failure count moves probing on to the next candidate row instead.
+                    state.RecordRowFailure(row);
+                    await ReleaseOwnedRepriceSurfacesAsync(state, cancellationToken).ConfigureAwait(false);
+                    return RepriceAttemptOutcome.Retry(row, $"row opened the editor directly, but it does not show the exact listing " +
+                        $"(closed without confirming): {direct.Message}");
                 }
                 case AdjustPriceGateKind.DispatchUnacknowledged:
-                    return RepriceAttemptOutcome.Final(RetainerAutomationResult.Failed("RetainerSellingListingSelectionIndeterminate",
-                        "ContextMenu callback was dispatched but did not acknowledge selection."));
+                    return await AbandonUnsentEditorAsync(state,
+                        "the ContextMenu did not acknowledge the Adjust Price callback", cancellationToken).ConfigureAwait(false);
                 case AdjustPriceGateKind.Dispatched:
                     state.RowSlots[row] = gate.Slot;
                     return await CompleteAdjustPriceDispatchAsync(state, cancellationToken).ConfigureAwait(false);
@@ -547,28 +584,88 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private async Task<RepriceAttemptOutcome> CompleteAdjustPriceDispatchAsync(
         RepriceSelectionState state, CancellationToken cancellationToken)
     {
-        if (!await WaitUntilAsync(() => IsReady(SellingListingEditor), cancellationToken).ConfigureAwait(false))
-        {
-            return RepriceAttemptOutcome.Final(RetainerAutomationResult.Failed(
-                "RetainerSellingListingSelectionIndeterminate",
-                "The verified listing was selected, but its editor did not become ready."));
-        }
+        if (!await WaitUntilAsync(() => IsReady(SellingListingEditor), cancellationToken, RepriceEditorAppearLimit).ConfigureAwait(false))
+            return await AbandonUnsentEditorAsync(state,
+                $"its editor did not become ready within {RepriceEditorAppearLimit.TotalSeconds:0}s", cancellationToken).ConfigureAwait(false);
 
         var exact = state.Current;
         var editor = await framework.RunOnTick(() => VerifySellingEditor(exact), cancellationToken: cancellationToken).ConfigureAwait(false);
         return editor.Success
             ? RepriceAttemptOutcome.Final(editor, exact)
-            : RepriceAttemptOutcome.Final(SelectionIndeterminate(editor));
+            : await AbandonUnsentEditorAsync(state, $"its editor failed verification ({editor.Message})", cancellationToken).ConfigureAwait(false);
     }
 
-    private static RetainerAutomationResult SelectionIndeterminate(RetainerAutomationResult result) =>
-        RetainerAutomationResult.Failed("RetainerSellingListingSelectionIndeterminate", $"{result.Code}: {result.Message}");
+    // After the Adjust Price callback only the editor's confirm can send a price, and this
+    // session has not clicked it. Close the editor/menu without confirming, then prove the
+    // listing still holds its exact requested identity and old price. Only then is the result
+    // failed-before-send; anything unproven (a confirmation appeared, a surface would not
+    // close, the listing changed) stays Indeterminate. Adjust Price is never fired again.
+    private async Task<RepriceAttemptOutcome> AbandonUnsentEditorAsync(
+        RepriceSelectionState state, string reason, CancellationToken cancellationToken)
+    {
+        var proofFailure = await CloseUnconfirmedEditorAndProveUnsentAsync(state).ConfigureAwait(false);
+        if (proofFailure is null)
+        {
+            log.Warning("RepriceEditorAbandonedUnsent slot={Slot} item={Item}: {Reason}", state.Current.SlotIndex, state.Current.ItemId, reason);
+            return RepriceAttemptOutcome.Final(RetainerAutomationResult.Failed("RetainerRepriceEditorAbandonedUnsent",
+                $"Adjust Price was dispatched once, but {reason}. The editor was closed without confirming and " +
+                $"{DescribeListing(state.Requested with { SlotIndex = state.Current.SlotIndex })} is unchanged; nothing was sent."));
+        }
+        return RepriceAttemptOutcome.Final(RetainerAutomationResult.Failed("RetainerSellingListingSelectionIndeterminate",
+            $"Adjust Price was dispatched once, but {reason}; it could not be proven unsent: {proofFailure}"));
+    }
+
+    // Returns null when proven unsent, otherwise why the proof failed. Runs to completion even
+    // if the caller cancels, because leaving an open editor unproven is worse than finishing.
+    private async Task<string?> CloseUnconfirmedEditorAndProveUnsentAsync(RepriceSelectionState state)
+    {
+        try
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var quiet = 0;
+            for (var frame = 0; clock.Elapsed < RepriceAbandonLimit; frame++)
+            {
+                var closingFrame = frame;
+                var step = await framework.RunOnTick(() =>
+                {
+                    if (IsReady(YesNo))
+                        return "a SelectYesno confirmation is open";
+                    return CloseOwnedRepriceSurface(closingFrame) ? string.Empty : "closing";
+                }, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                if (step.Length > 0 && step != "closing")
+                    return step;
+                quiet = step.Length == 0 ? quiet + 1 : 0;
+                if (quiet >= RepriceStableFrames)
+                {
+                    var requested = state.Requested with { SlotIndex = state.Current.SlotIndex };
+                    var unchanged = await framework.RunOnTick(() => ListingStillMatches(requested), cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                    return unchanged ? null : $"the live listing no longer matches {DescribeListing(requested)}";
+                }
+                await framework.DelayTicks(1, CancellationToken.None).ConfigureAwait(false);
+            }
+            return $"the editor or menu did not close within {RepriceAbandonLimit.TotalSeconds:0}s";
+        }
+        catch (Exception exception)
+        {
+            return $"{exception.GetType().Name}: {exception.Message}";
+        }
+    }
+
+    private static unsafe bool ListingStillMatches(RetainerMarketListingTarget expected)
+    {
+        var manager = InventoryManager.Instance();
+        var container = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
+        return manager != null && container != null && container->IsLoaded &&
+            expected.SlotIndex >= 0 && expected.SlotIndex < container->Size &&
+            MatchesMarketListing(manager, container, expected.SlotIndex, expected);
+    }
 
     private async Task ReleaseOwnedRepriceSurfacesAsync(RepriceSelectionState state, CancellationToken cancellationToken)
     {
         if (!state.OwnsSurface || state.AdjustDispatched)
             return;
-        for (var frame = 0; frame < RepriceSurfaceWaitFrames; frame++)
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        for (var frame = 0; frame < RepriceSurfaceWaitFrames && clock.Elapsed < RepriceStageLimit; frame++)
         {
             var released = await framework.RunOnTick(() => CloseOwnedRepriceSurface(frame), cancellationToken: cancellationToken).ConfigureAwait(false);
             if (released)
@@ -578,7 +675,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             }
             await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
         }
-        log.Warning("RepriceOwnedSurfaceNotClosed: the menu or editor this reprice opened did not close within {Frames} frames.", RepriceSurfaceWaitFrames);
+        log.Warning("RepriceOwnedSurfaceNotClosed: the menu or editor this reprice opened did not close within {Seconds}s.", RepriceStageLimit.TotalSeconds);
     }
 
     // Returns true once neither surface this reprice may have opened is still visible. A
@@ -745,7 +842,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
         var target = ResolveMenuTargetSlot(agent, container, out var targetEvidence);
         if (target < 0)
-            return AdjustPriceGate.Wait($"menu target is not one RetainerMarket slot ({targetEvidence})");
+            return AdjustPriceGate.Wait($"menu target {targetEvidence}");
         if (!MatchesMarketListing(manager, container, target, state.Current))
             return new(AdjustPriceGateKind.WrongListing, target,
                 $"menu targets slot {target} holding {DescribeMarketSlot(manager, container, target)}, not {DescribeListing(state.Current)} ({targetEvidence})");
@@ -799,8 +896,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     }
 
     // Binds the open inventory context menu to one physical RetainerMarket slot. The agent's
-    // recorded inventory/slot, the target item pointer's position in the container, and the
-    // item's own container/slot fields must all agree where present.
+    // recorded inventory/slot is mandatory and must name a valid market slot. The target item
+    // pointer's position in the container and the item's own container/slot record are
+    // corroborating evidence: either may be unavailable (null item, or a copy outside the
+    // container), but where present it must agree. Any contradiction refuses the binding.
     private static unsafe int ResolveMenuTargetSlot(AgentInventoryContext* agent, InventoryContainer* container, out string evidence)
     {
         var item = agent->TargetInventorySlot;
@@ -811,16 +910,35 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             if (offset >= 0 && offset % sizeof(InventoryItem) == 0 && offset / sizeof(InventoryItem) < container->Size)
                 pointerSlot = (int)(offset / sizeof(InventoryItem));
         }
-        int? recordSlot = item != null && item->Container == InventoryType.RetainerMarket &&
-            item->Slot >= 0 && item->Slot < container->Size ? item->Slot : null;
-        int? agentSlot = agent->TargetInventoryId == InventoryType.RetainerMarket &&
-            agent->TargetInventorySlotId >= 0 && agent->TargetInventorySlotId < container->Size ? agent->TargetInventorySlotId : null;
-        evidence = $"agent target {agent->TargetInventoryId}/{agent->TargetInventorySlotId}, item pointer " +
+        var observed = $"agent target {agent->TargetInventoryId}/{agent->TargetInventorySlotId}, item pointer " +
             (item == null ? "null" : pointerSlot is { } p ? $"at market slot {p}" : "outside the market container") +
             (item == null ? string.Empty : $", item record {item->Container}/{item->Slot}") +
-            $", owner addon {agent->OwnerAddonId}";
-        var slots = new[] { agentSlot, pointerSlot, recordSlot }.Where(slot => slot.HasValue).Select(slot => slot!.Value).Distinct().ToList();
-        return slots.Count == 1 ? slots[0] : -1;
+            $", market size {container->Size}, owner addon {agent->OwnerAddonId}";
+
+        if (agent->TargetInventoryId != InventoryType.RetainerMarket)
+        {
+            evidence = $"binding refused: the agent names inventory {agent->TargetInventoryId} slot {agent->TargetInventorySlotId}, " +
+                $"not RetainerMarket; this menu's recorded target is a non-market inventory ({observed})";
+            return -1;
+        }
+        var agentSlot = agent->TargetInventorySlotId;
+        if (agentSlot < 0 || agentSlot >= container->Size)
+        {
+            evidence = $"binding refused: the agent names RetainerMarket slot {agentSlot}, outside 0..{container->Size - 1} ({observed})";
+            return -1;
+        }
+        if (item != null && (item->Container != InventoryType.RetainerMarket || item->Slot != agentSlot))
+        {
+            evidence = $"binding refused: the target item record names {item->Container}/{item->Slot}, not RetainerMarket/{agentSlot} ({observed})";
+            return -1;
+        }
+        if (pointerSlot is { } pointed && pointed != agentSlot)
+        {
+            evidence = $"binding refused: the target item pointer sits at market slot {pointed}, not {agentSlot} ({observed})";
+            return -1;
+        }
+        evidence = observed;
+        return agentSlot;
     }
 
     private static unsafe string DescribeMarketSlot(InventoryManager* manager, InventoryContainer* container, int slot)
@@ -883,7 +1001,14 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             () => SetSellingListingPrice(opened.Listing, newUnitPrice),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!updated.Result.Success)
+        {
+            // Confirm was never clicked; close the editor so it cannot block the next reprice.
+            var unsent = await CloseUnconfirmedEditorAndProveUnsentAsync(new RepriceSelectionState(opened.Listing)).ConfigureAwait(false);
+            if (unsent is not null)
+                log.Warning("RepricePriceEntryEditorNotProvenClosed slot={Slot} item={Item}: {Reason}",
+                    opened.Listing.SlotIndex, opened.Listing.ItemId, unsent);
             return updated.Result;
+        }
 
         var preexistingConfirmation = await framework.RunOnTick(
             () => IsReady(YesNo),
@@ -906,7 +1031,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             if (!confirmed.Success)
                 return confirmed;
 
-            for (var attempt = 0; attempt < 180; attempt++)
+            var commitClock = System.Diagnostics.Stopwatch.StartNew();
+            for (var attempt = 0; attempt < 180 && commitClock.Elapsed < RepriceCommitObserveLimit; attempt++)
             {
                 var observed = await framework.RunOnTick(
                     () => ObserveSellingListingPriceCommit(expected),
@@ -1431,12 +1557,16 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             $"Observed {FormatRetainerClosingObservation(observed)}.");
     }
 
-    private async Task<bool> WaitUntilAsync(Func<bool> predicate, CancellationToken cancellationToken)
+    // Waits up to 180 frames, and additionally at most limit of wall-clock time when given.
+    private async Task<bool> WaitUntilAsync(Func<bool> predicate, CancellationToken cancellationToken, TimeSpan? limit = null)
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         for (var attempt = 0; attempt < 180; attempt++)
         {
             if (await framework.RunOnTick(predicate, cancellationToken: cancellationToken).ConfigureAwait(false))
                 return true;
+            if (limit is { } bound && clock.Elapsed >= bound)
+                return false;
             await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
         }
 
