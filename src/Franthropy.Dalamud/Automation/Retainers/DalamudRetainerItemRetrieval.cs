@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Dalamud.Game.Inventory;
 using Dalamud.Game.Inventory.InventoryEventArgTypes;
@@ -43,12 +44,22 @@ internal static class RetainerRetrievalCommandPolicy
 /// <summary>
 /// Retrieves an exact quantity from the currently open retainer using the
 /// game's typed retainer command. The normal verifier watches the addressed
-/// slot; a single aggregate reconciliation handles slot reordering only when
+/// slot; a bounded aggregate settle window handles slot reordering only when
 /// that cheap path times out.
 /// </summary>
 public sealed class DalamudRetainerItemRetrieval
 {
     private const string InputNumericAddon = "InputNumeric";
+    // Server round trips and frame hitches require elapsed time, not a frame budget.
+    private const int VerificationBudgetMs = 3_000;
+    private const int SettleBudgetMs = 1_000;
+    private const int LateObservationBudgetMs = 1_000;
+    private const int AggregatePollIntervalTicks = 3;
+    // A single long hitch must not consume a whole phase in one or two polls.
+    private const int MinimumPollsPerPhase = 10;
+    // Agent/container reads can flicker for a frame around dispatch and popups;
+    // only a loss that persists this long ends verification early.
+    private const int PreconditionLossToleranceMs = 500;
     private static readonly IReadOnlyList<InventoryType> PlayerOrdinaryItemContainers =
     [
         InventoryType.Inventory1,
@@ -99,18 +110,25 @@ public sealed class DalamudRetainerItemRetrieval
     {
         var started = System.Diagnostics.Stopwatch.StartNew();
         string outcome = "ExceptionOrCancellation";
+        var diagnostics = new RetrievalDiagnostics();
         try
         {
-            var result = await RetrieveCoreAsync(stack, requestedQuantity, retainerVariantQuantityBefore, cancellationToken).ConfigureAwait(false);
+            var result = await RetrieveCoreAsync(stack, requestedQuantity, retainerVariantQuantityBefore, diagnostics, cancellationToken).ConfigureAwait(false);
+            diagnostics.Failed = !result.Success;
             outcome = $"{result.Code}: {result.Message}";
             return result;
         }
         finally
         {
+            if (outcome == "ExceptionOrCancellation")
+                diagnostics.Failed = true;
+            diagnostics.FlushFailure(log);
+            if (diagnostics.Failed)
+                log.Warning("RetrievalQuantity summary: seen={Seen} submitted={Submitted}", diagnostics.QuantitySeen, diagnostics.QuantitySubmitted);
             // One bounded final read, never a resend. Do not mask the original outcome.
             try
             {
-                await framework.RunOnTick(() => LogFinalObservation(stack, requestedQuantity, started.ElapsedMilliseconds, outcome)).ConfigureAwait(false);
+                await framework.RunOnTick(() => LogFinalObservation(stack, requestedQuantity, started.ElapsedMilliseconds, outcome, diagnostics)).ConfigureAwait(false);
             }
             catch (Exception exception) { log.Warning(exception, "Retrieval final diagnostic unavailable."); }
         }
@@ -120,6 +138,7 @@ public sealed class DalamudRetainerItemRetrieval
         DalamudInventoryStack stack,
         int requestedQuantity,
         int? retainerVariantQuantityBefore,
+        RetrievalDiagnostics diagnostics,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -130,26 +149,33 @@ public sealed class DalamudRetainerItemRetrieval
             ? null
             : new RetainerRetrievalMutationTracker(gameInventory, stack.ItemId, stack.IsHighQuality);
         var pending = await framework.RunOnTick(
-            () => BeginRetrieval(stack, requestedQuantity, retainerVariantQuantityBefore),
+            () => BeginRetrieval(stack, requestedQuantity, retainerVariantQuantityBefore, diagnostics),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!pending.Success)
             return new(false, 0, pending.Code, pending.Message);
 
-        for (var attempt = 0; attempt < 30; attempt++)
+        var phase = Stopwatch.StartNew();
+        var phasePolls = 0;
+        long? lostSinceMs = null;
+        while (phase.ElapsedMilliseconds < VerificationBudgetMs || phasePolls < MinimumPollsPerPhase)
         {
             var immediate = await framework.RunOnTick(
-                () => VerifyCompleted(stack, pending),
+                () => VerifyCompleted(stack, pending, diagnostics),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
+            diagnostics.Polls++;
+            phasePolls++;
             if (immediate.Success)
                 return immediate;
 
             if (mutation?.Matches(pending.Requested) == true)
                 return MutationVerified(stack.ItemId, pending.Requested, mutation);
+            if (PreconditionLossPersisted(immediate, phase, ref lostSinceMs))
+                return await FinishFailureAsync(stack, pending, mutation, diagnostics, phase, immediate, cancellationToken).ConfigureAwait(false);
 
-            if (pending.NeedsQuantityInput)
+            if (pending.NeedsQuantityInput && lostSinceMs is null)
             {
                 var submitted = await framework.RunOnTick(
-                    () => SubmitQuantity(stack.ItemId, pending.Requested),
+                    () => SubmitQuantity(stack.ItemId, pending.Requested, diagnostics),
                     cancellationToken: cancellationToken).ConfigureAwait(false);
                 if (submitted.Success)
                 {
@@ -157,6 +183,7 @@ public sealed class DalamudRetainerItemRetrieval
                         stack,
                         pending with { Requested = submitted.Transferred },
                         mutation,
+                        diagnostics,
                         cancellationToken).ConfigureAwait(false);
                 }
             }
@@ -164,31 +191,54 @@ public sealed class DalamudRetainerItemRetrieval
             await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
         }
 
-        return await ReconcileAfterTimeoutAsync(stack, pending, mutation, cancellationToken).ConfigureAwait(false);
+        return await ReconcileAfterTimeoutAsync(stack, pending, mutation, diagnostics, phase, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<RetainerRetrievalResult> WaitForCompletionAsync(
         DalamudInventoryStack stack,
         PendingRetainerRetrieval pending,
         RetainerRetrievalMutationTracker? mutation,
+        RetrievalDiagnostics diagnostics,
         CancellationToken cancellationToken)
     {
         RetainerRetrievalResult last = new(false, 0, "TransferPending", $"Retrieval did not complete for item {stack.ItemId}.");
-        for (var attempt = 0; attempt < 60; attempt++)
+        var phase = Stopwatch.StartNew();
+        var phasePolls = 0;
+        long? lostSinceMs = null;
+        while (phase.ElapsedMilliseconds < VerificationBudgetMs || phasePolls < MinimumPollsPerPhase)
         {
             last = await framework.RunOnTick(
-                () => VerifyCompleted(stack, pending),
+                () => VerifyCompleted(stack, pending, diagnostics),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
+            diagnostics.Polls++;
+            phasePolls++;
             if (last.Success)
                 return last;
 
             if (mutation?.Matches(pending.Requested) == true)
                 return MutationVerified(stack.ItemId, pending.Requested, mutation);
+            if (PreconditionLossPersisted(last, phase, ref lostSinceMs))
+                return await FinishFailureAsync(stack, pending, mutation, diagnostics, phase, last, cancellationToken).ConfigureAwait(false);
 
             await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
         }
 
-        return await ReconcileAfterTimeoutAsync(stack, pending, mutation, cancellationToken).ConfigureAwait(false);
+        return await ReconcileAfterTimeoutAsync(stack, pending, mutation, diagnostics, phase, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Tolerates single-frame agent/container flicker: verification ends early only
+    /// when preconditions stay lost for <see cref="PreconditionLossToleranceMs"/>.
+    /// </summary>
+    private static bool PreconditionLossPersisted(RetainerRetrievalResult observation, Stopwatch phase, ref long? lostSinceMs)
+    {
+        if (observation.Code != "VerificationPreconditionsLost")
+        {
+            lostSinceMs = null;
+            return false;
+        }
+        lostSinceMs ??= phase.ElapsedMilliseconds;
+        return phase.ElapsedMilliseconds - lostSinceMs.Value >= PreconditionLossToleranceMs;
     }
 
     /// <summary>
@@ -198,7 +248,8 @@ public sealed class DalamudRetainerItemRetrieval
     private unsafe PendingRetainerRetrieval BeginRetrieval(
         DalamudInventoryStack stack,
         int requestedQuantity,
-        int? knownRetainerVariantQuantity)
+        int? knownRetainerVariantQuantity,
+        RetrievalDiagnostics diagnostics)
     {
         try
         {
@@ -286,7 +337,7 @@ public sealed class DalamudRetainerItemRetrieval
         var existingNumeric = gameGui.GetAddonByName<AtkUnitBase>(InputNumericAddon, 1);
         if (existingNumeric != null && existingNumeric->IsVisible)
             return PendingRetainerRetrieval.Fail("QuantityPopupAlreadyOpen", "An unowned quantity popup exists before dispatch.");
-        log.Information("RetrievalDispatch utc={Utc} source={Container}/{Slot} item={Item} hq={Hq} sourceQuantity={SourceQuantity} requested={Requested} transfer={Transfer} command={Command} agent={Agent:X} context={Context:X} target={Target:X} active={Active} loaded={Loaded} playerBefore={Player} retainerBefore={Retainer} quantityExpected={QuantityExpected}",
+        diagnostics.Write(log, "RetrievalDispatch utc={Utc} source={Container}/{Slot} item={Item} hq={Hq} sourceQuantity={SourceQuantity} requested={Requested} transfer={Transfer} command={Command} agent={Agent:X} context={Context:X} target={Target:X} active={Active} loaded={Loaded} playerBefore={Player} retainerBefore={Retainer} quantityExpected={QuantityExpected}",
             DateTime.UtcNow, stack.Container, stack.SlotIndex, stack.ItemId, stack.IsHighQuality, stack.Quantity,
             requestedQuantity, transfer, (long)selection.Command, (nint)retainerAgent, context,
             Marshal.GetFunctionPointerForDelegate(retainerItemCommand), retainerAgent->IsAgentActive(), container->IsLoaded,
@@ -318,11 +369,19 @@ public sealed class DalamudRetainerItemRetrieval
             $"Submitted retrieval command for item {stack.ItemId}.");
     }
 
-    private unsafe RetainerRetrievalResult SubmitQuantity(uint itemId, int requested)
+    private unsafe RetainerRetrievalResult SubmitQuantity(uint itemId, int requested, RetrievalDiagnostics diagnostics)
     {
         var numeric = gameGui.GetAddonByName<AtkUnitBase>(InputNumericAddon, 1);
+        diagnostics.QuantitySeen |= numeric != null && numeric->IsVisible;
         if (!DalamudNumericDialog.TryGetBounds(numeric, out var minimum, out var maximum))
             return new(false, 0, "QuantityInputPending", $"Numeric quantity popup did not open for item {itemId}.");
+        if (!diagnostics.QuantityBoundsLogged)
+        {
+            diagnostics.QuantityBoundsLogged = true;
+            diagnostics.Write(log, "RetrievalQuantity bounds utc={Utc} item={Item} min={Min} max={Max} requested={Requested}",
+                DateTime.UtcNow, itemId, minimum, maximum, requested);
+        }
+        diagnostics.QuantitySeen = true;
 
         if (maximum <= 0)
             return new(false, 0, "QuantityUnavailable", $"Retainer reported no retrievable quantity for item {itemId}.");
@@ -330,22 +389,23 @@ public sealed class DalamudRetainerItemRetrieval
         var submitted = Math.Clamp(requested, Math.Max(1, minimum), maximum);
         if (DalamudNumericDialog.TrySubmit(numeric, submitted) != NumericDialogSubmission.Submitted)
             return new(false, 0, "QuantityInputPending", $"Numeric quantity popup is not ready for item {itemId}.");
-        log.Information("RetrievalQuantity utc={Utc} item={Item} min={Min} max={Max} requested={Requested} submitted={Submitted}", DateTime.UtcNow, itemId, minimum, maximum, requested, submitted);
+        diagnostics.QuantitySubmitted = true;
+        diagnostics.Write(log, "RetrievalQuantity utc={Utc} item={Item} min={Min} max={Max} requested={Requested} submitted={Submitted}", DateTime.UtcNow, itemId, minimum, maximum, requested, submitted);
         return new(true, submitted, "QuantitySubmitted", $"Submitted {submitted}x item {itemId} for retrieval.");
     }
 
-    private unsafe void LogFinalObservation(DalamudInventoryStack original, int requested, long elapsedMs, string outcome)
+    private unsafe void LogFinalObservation(DalamudInventoryStack original, int requested, long elapsedMs, string outcome, RetrievalDiagnostics diagnostics)
     {
         var manager = InventoryManager.Instance();
         var container = manager == null ? null : manager->GetInventoryContainer(original.Container);
         var slot = container == null || !container->IsLoaded ? null : container->GetInventorySlot(original.SlotIndex);
         var aggregateKnown = TryCountRetainer(original, out var aggregate);
         var numeric = gameGui.GetAddonByName<AtkUnitBase>(InputNumericAddon, 1);
-        log.Information("RetrievalFinal utc={Utc} elapsedMs={Elapsed} source={Container}/{Slot} item={Item} hq={Hq} requested={Requested} exactReadable={Readable} exactItem={ExactItem} exactQuantity={ExactQuantity} exactHq={ExactHq} aggregateKnown={AggregateKnown} aggregate={Aggregate} player={Player} numericPresent={Numeric} numericReady={NumericReady} outcome={Outcome}",
+        diagnostics.Write(log, "RetrievalFinal utc={Utc} elapsedMs={Elapsed} source={Container}/{Slot} item={Item} hq={Hq} requested={Requested} exactReadable={Readable} exactItem={ExactItem} exactQuantity={ExactQuantity} exactHq={ExactHq} aggregateKnown={AggregateKnown} aggregate={Aggregate} player={Player} numericPresent={Numeric} numericReady={NumericReady} outcome={Outcome}",
             DateTime.UtcNow, elapsedMs, original.Container, original.SlotIndex, original.ItemId, original.IsHighQuality,
             requested, slot != null, slot == null ? "unknown" : slot->ItemId.ToString(), slot == null ? "unknown" : slot->Quantity.ToString(),
             slot == null ? "unknown" : slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality).ToString(), aggregateKnown,
-            aggregateKnown ? aggregate.ToString() : "unknown", CountPlayer(original), numeric != null,
+            aggregateKnown ? aggregate.ToString() : "unknown", VerificationUnavailable(original) is null ? CountPlayer(original).ToString() : "unavailable", numeric != null,
             numeric != null && numeric->IsReady && numeric->IsVisible, outcome);
     }
 
@@ -355,21 +415,27 @@ public sealed class DalamudRetainerItemRetrieval
     /// </summary>
     private static unsafe RetainerRetrievalResult VerifyCompleted(
         DalamudInventoryStack original,
-        PendingRetainerRetrieval pending)
+        PendingRetainerRetrieval pending,
+        RetrievalDiagnostics diagnostics)
     {
+        var unavailable = VerificationUnavailable(original);
+        if (unavailable is not null)
+            return new(false, 0, "VerificationPreconditionsLost", unavailable);
         var inventoryManager = InventoryManager.Instance();
         if (inventoryManager == null)
-            return new(false, 0, "ContainerUnavailable", "Inventory manager became unavailable.");
+            return new(false, 0, "VerificationPreconditionsLost", "Inventory manager became unavailable.");
 
         var container = inventoryManager->GetInventoryContainer(original.Container);
         if (container == null || !container->IsLoaded)
-            return new(false, 0, "ContainerUnavailable", "Retainer source container became unavailable.");
+            return new(false, 0, "VerificationPreconditionsLost", "Retainer source container became unavailable.");
 
         var slot = container->GetInventorySlot(original.SlotIndex);
         if (slot == null)
-            return new(false, 0, "SlotUnavailable", "Retainer source slot became unavailable.");
+            return new(false, 0, "VerificationPreconditionsLost", "Retainer source slot became unavailable.");
 
         var playerAfter = CountPlayer(original);
+        diagnostics.ChangeObserved |= playerAfter != pending.PlayerQuantityBefore ||
+            slot->ItemId != original.ItemId || slot->Quantity != original.Quantity;
         if ((slot->ItemId != original.ItemId || slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality) == original.IsHighQuality) &&
             RetainerRetrievalObservation.Matches(
                 original.ItemId,
@@ -391,8 +457,7 @@ public sealed class DalamudRetainerItemRetrieval
     }
 
     /// <summary>
-    /// Performs one bounded recovery read after exact-slot polling has failed. This
-    /// is intentionally outside the polling loop: aggregate retainer scans are
+    /// Polls aggregate evidence through a bounded settle window. These scans are
     /// reserved for the rare case where the game moved the item but changed which
     /// physical slot represents the remaining stack.
     /// </summary>
@@ -400,12 +465,122 @@ public sealed class DalamudRetainerItemRetrieval
         DalamudInventoryStack original,
         PendingRetainerRetrieval pending,
         RetainerRetrievalMutationTracker? mutation,
-        CancellationToken cancellationToken) =>
-        mutation?.Matches(pending.Requested) == true
-            ? MutationVerified(original.ItemId, pending.Requested, mutation)
-            : await framework.RunOnTick(
-                () => VerifyAggregateCompleted(original, pending),
+        RetrievalDiagnostics diagnostics,
+        Stopwatch phase,
+        CancellationToken cancellationToken)
+    {
+        var settle = Stopwatch.StartNew();
+        RetainerRetrievalResult last;
+        do
+        {
+            if (mutation?.Matches(pending.Requested) == true)
+                return MutationVerified(original.ItemId, pending.Requested, mutation);
+            last = await framework.RunOnTick(
+                () => VerifyAggregateCompleted(original, pending, diagnostics),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
+            diagnostics.Polls++;
+            if (last.Success)
+                return last;
+            if (last.Code == "VerificationPreconditionsLost")
+                break;
+            await framework.DelayTicks(AggregatePollIntervalTicks, cancellationToken).ConfigureAwait(false);
+        } while (settle.ElapsedMilliseconds < SettleBudgetMs);
+        return await FinishFailureAsync(original, pending, mutation, diagnostics, phase, last, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<RetainerRetrievalResult> FinishFailureAsync(
+        DalamudInventoryStack original,
+        PendingRetainerRetrieval pending,
+        RetainerRetrievalMutationTracker? mutation,
+        RetrievalDiagnostics diagnostics,
+        Stopwatch phase,
+        RetainerRetrievalResult last,
+        CancellationToken cancellationToken)
+    {
+        // Freeze the failure before observing late arrivals. Keep the subscription scoped
+        // to this call: there is no plugin-disposal lifetime to safely own detached work.
+        var result = await framework.RunOnTick(() => DescribeFailure(original, pending, mutation, diagnostics, phase, last),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (result.Success)
+            return result;
+        var late = Stopwatch.StartNew();
+        using var lateCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        lateCancellation.CancelAfter(LateObservationBudgetMs);
+        try
+        {
+            while (late.ElapsedMilliseconds < LateObservationBudgetMs)
+            {
+                await Task.Delay(50, lateCancellation.Token).ConfigureAwait(false);
+                if (late.ElapsedMilliseconds >= LateObservationBudgetMs)
+                    break;
+                var observed = await framework.RunOnTick(
+                    () => mutation?.Matches(pending.Requested) == true || VerifyAggregateCompleted(original, pending).Success,
+                    cancellationToken: lateCancellation.Token).ConfigureAwait(false);
+                if (!observed)
+                    continue;
+                log.Warning("RetrievalLateConfirmation: item {Item} arrived {LateMs} ms after the verification window closed; outcome remains {Code}; never redispatch.",
+                    original.ItemId, late.ElapsedMilliseconds, result.Code);
+                break;
+            }
+        }
+        // The late watch is diagnostic only: caller cancellation must not discard the
+        // already-classified failure.
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { log.Warning(exception, "Retrieval late diagnostic unavailable; preserving {Code}.", result.Code); }
+        return result;
+    }
+
+    private static RetainerRetrievalResult DescribeFailure(
+        DalamudInventoryStack original, PendingRetainerRetrieval pending,
+        RetainerRetrievalMutationTracker? mutation, RetrievalDiagnostics diagnostics,
+        Stopwatch phase, RetainerRetrievalResult last)
+    {
+        if (mutation?.Matches(pending.Requested) == true)
+            return MutationVerified(original.ItemId, pending.Requested, mutation);
+        diagnostics.Polls++;
+        var final = VerifyAggregateCompleted(original, pending, diagnostics);
+        if (final.Success)
+            return final;
+        var unavailable = VerificationUnavailable(original);
+        var retainerKnown = TryCountRetainer(original, out var retainer);
+        var player = unavailable is null ? CountPlayer(original).ToString() : "unavailable";
+        var evidence = mutation?.Snapshot();
+        var changed = diagnostics.ChangeObserved || (retainerKnown && retainer != pending.RetainerQuantityBefore) ||
+            (unavailable is null && CountPlayer(original) != pending.PlayerQuantityBefore) ||
+            (evidence is { } e && (e.RetainerDelta != 0 || e.PlayerDelta != 0));
+        var lost = unavailable is not null || !retainerKnown || last.Code == "VerificationPreconditionsLost";
+        var code = lost ? "VerificationPreconditionsLost" : changed ? "RetrievalDeltaMismatch" : "VerificationWindowExpired";
+        var reason = lost ? $"Verification preconditions lost: {unavailable ?? last.Message}. " :
+            changed ? "Partial or mismatched inventory movement observed. " : "No matching inventory movement observed. ";
+        return new(false, 0, code,
+            $"{reason}Stopped watching after {diagnostics.Elapsed.ElapsedMilliseconds:N0} ms total " +
+            $"(current phase {phase.ElapsedMilliseconds:N0} ms, verification budget {VerificationBudgetMs:N0} ms, settle budget {SettleBudgetMs:N0} ms, {diagnostics.Polls} total polls; " +
+            $"phase {(diagnostics.QuantitySubmitted ? "after quantity submit" : "after dispatch")}): " +
+            $"retainer {pending.RetainerQuantityBefore}->{(retainerKnown ? retainer.ToString() : "unavailable")}, " +
+            $"player {pending.PlayerQuantityBefore}->{player}, expected retainer -{pending.Requested}/player +{pending.Requested}; " +
+            $"quantity prompt expected={pending.NeedsQuantityInput}, seen={diagnostics.QuantitySeen}, submitted={diagnostics.QuantitySubmitted}; " +
+            (evidence is { } events ? $"inventory events={events.EventCount}, net deltas retainer={events.RetainerDelta}, player={events.PlayerDelta}." : "inventory event tracker unavailable."));
+    }
+
+    private static unsafe string? VerificationUnavailable(DalamudInventoryStack original)
+    {
+        var manager = InventoryManager.Instance();
+        if (manager == null)
+            return "inventory manager unavailable";
+        var module = AgentModule.Instance();
+        var agent = module == null ? null : module->GetAgentByInternalId(AgentId.Retainer);
+        if (agent == null || !agent->IsAgentActive())
+            return "retainer agent unavailable";
+        IReadOnlyList<InventoryType> playerContainers = original.Container == InventoryType.RetainerCrystals
+            ? [InventoryType.Crystals] : PlayerOrdinaryItemContainers;
+        foreach (var type in playerContainers.Append(original.Container))
+        {
+            var container = manager->GetInventoryContainer(type);
+            if (container == null || !container->IsLoaded)
+                return $"container {type} unavailable";
+        }
+        return null;
+    }
 
     private static RetainerRetrievalResult MutationVerified(
         uint itemId,
@@ -426,15 +601,19 @@ public sealed class DalamudRetainerItemRetrieval
     /// </summary>
     private static RetainerRetrievalResult VerifyAggregateCompleted(
         DalamudInventoryStack original,
-        PendingRetainerRetrieval pending)
+        PendingRetainerRetrieval pending,
+        RetrievalDiagnostics? diagnostics = null)
     {
+        var unavailable = VerificationUnavailable(original);
+        if (unavailable is not null)
+            return new(false, 0, "VerificationPreconditionsLost", unavailable);
         var playerAfter = CountPlayer(original);
         if (!TryCountRetainer(original, out var retainerAfter))
         {
             return new(
                 false,
                 0,
-                "RetrievalNotObserved",
+                "VerificationPreconditionsLost",
                 $"Retrieval of item {original.ItemId} could not be reconciled because retainer inventory became unavailable.");
         }
         if (RetainerRetrievalObservation.MatchesAggregate(
@@ -451,11 +630,14 @@ public sealed class DalamudRetainerItemRetrieval
                 $"Retrieved {pending.Requested}x item {original.ItemId}; aggregate inventories confirmed a reordered source slot.");
         }
 
+        if (diagnostics is not null)
+            diagnostics.ChangeObserved |= retainerAfter != pending.RetainerQuantityBefore || playerAfter != pending.PlayerQuantityBefore;
+
         return new(
             false,
             0,
-            "RetrievalNotObserved",
-            $"Retrieval of item {original.ItemId} could not be proven after one aggregate reconciliation: retainer {pending.RetainerQuantityBefore}->{retainerAfter}, player {pending.PlayerQuantityBefore}->{playerAfter}, expected {pending.Requested}.");
+            "TransferPending",
+            $"Waiting for aggregate deltas: retainer {pending.RetainerQuantityBefore}->{retainerAfter}, player {pending.PlayerQuantityBefore}->{playerAfter}, expected {pending.Requested}.");
     }
 
     /// <summary>Counts the affected item variant across the player's loaded bags.</summary>
@@ -468,7 +650,7 @@ public sealed class DalamudRetainerItemRetrieval
     /// <summary>
     /// Counts only the affected item variant across the currently open retainer.
     /// Callers should supply their existing route-scan total for the before value;
-    /// this reader is retained for the single timeout reconciliation and compatible
+    /// this reader is retained for bounded timeout reconciliation and compatible
     /// consumers that do not already own such a snapshot.
     /// </summary>
     private static unsafe bool TryCountRetainer(DalamudInventoryStack stack, out int quantity)
@@ -494,6 +676,36 @@ public sealed class DalamudRetainerItemRetrieval
         }
 
         return true;
+    }
+
+    private sealed class RetrievalDiagnostics
+    {
+        private readonly List<(string Template, object[] Arguments)> buffered = [];
+        public bool Failed { get; set; }
+        public Stopwatch Elapsed { get; } = Stopwatch.StartNew();
+        public bool ChangeObserved { get; set; }
+        public bool QuantitySeen { get; set; }
+        public bool QuantitySubmitted { get; set; }
+        public bool QuantityBoundsLogged { get; set; }
+        public int Polls { get; set; }
+
+        public void Write(IPluginLog log, string template, params object[] arguments)
+        {
+            if (Failed)
+                log.Warning(template, arguments);
+            else
+            {
+                buffered.Add((template, arguments));
+                log.Information(template, arguments);
+            }
+        }
+
+        public void FlushFailure(IPluginLog log)
+        {
+            if (Failed)
+                foreach (var entry in buffered)
+                    log.Warning(entry.Template, entry.Arguments);
+        }
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -527,17 +739,28 @@ internal sealed class RetainerRetrievalMutationAccumulator
 {
     private int playerDelta;
     private int retainerDelta;
+    private int eventCount;
 
-    public void RecordPlayer(int quantityDelta) => playerDelta += quantityDelta;
-    public void RecordRetainer(int quantityDelta) => retainerDelta += quantityDelta;
-    public RetainerRetrievalMutationEvidence Snapshot() => new(retainerDelta, playerDelta);
+    public void RecordPlayer(int quantityDelta)
+    {
+        playerDelta += quantityDelta;
+        eventCount++;
+    }
+
+    public void RecordRetainer(int quantityDelta)
+    {
+        retainerDelta += quantityDelta;
+        eventCount++;
+    }
+    public RetainerRetrievalMutationEvidence Snapshot() => new(retainerDelta, playerDelta, eventCount);
     public bool Matches(int requested) =>
         RetainerRetrievalObservation.MatchesMutation(requested, retainerDelta, playerDelta);
 }
 
 internal readonly record struct RetainerRetrievalMutationEvidence(
     int RetainerDelta,
-    int PlayerDelta);
+    int PlayerDelta,
+    int EventCount);
 
 /// <summary>
 /// Converts Dalamud's per-slot inventory events into one command-scoped net
