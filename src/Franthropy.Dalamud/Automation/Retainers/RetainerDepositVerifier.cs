@@ -121,12 +121,17 @@ internal static class RetainerDepositVerifier
                 if (lostSince is { } lost && elapsed.ElapsedMilliseconds - lost >= PreconditionLossToleranceMs)
                     return await Failure("VerificationPreconditionsLost").ConfigureAwait(false);
 
+                // Popup visibility is recorded in every phase, so a popup that first opens
+                // while settling is reported as pending UI rather than as never opened.
+                if (!seen && !submitted && available)
+                {
+                    seen = await framework.RunOnTick(() => QuantityPopupVisible(gui), cancellationToken: token).ConfigureAwait(false);
+                    if (seen) Trace($"DepositQuantitySeen{(settling ? "WhileSettling" : string.Empty)} {Evidence()}");
+                }
+
                 // Submission is allowed only during the quantity phase, and at most once.
                 if (!settling && !submitted && available)
                 {
-                    var wasSeen = seen;
-                    seen |= await framework.RunOnTick(() => QuantityPopupVisible(gui), cancellationToken: token).ConfigureAwait(false);
-                    if (seen && !wasSeen) Trace($"DepositQuantitySeen {Evidence()}");
                     var result = await framework.RunOnTick(() => submit(expected), cancellationToken: token).ConfigureAwait(false);
                     if (result.Success)
                     {
