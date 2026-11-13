@@ -43,7 +43,11 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private readonly DalamudRetainerItemTransfer items;
     private readonly DalamudRetainerItemRetrieval retrievals;
     private readonly DalamudRenderedUiTextActionDispatcher renderedUi;
+    private readonly IPluginLog log;
     private RetainerAutomationTarget? active;
+    // Context labels normally match on the next frame; a few restarts absorb a menu
+    // still populating without turning a cosmetic change into a failure.
+    private const int AdjustPriceLabelRestarts = 5;
 
     private enum MarketListingPostDispatchOutcome
     {
@@ -78,6 +82,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         this.framework = framework;
         this.gameGui = gameGui;
         this.dataManager = dataManager;
+        this.log = log;
         bell = new(objects, targets, dataManager);
         crystals = new(sigScanner, gameGui, framework, log);
         items = new(sigScanner, gameGui, framework, log);
@@ -356,20 +361,36 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 "The verified listing did not open its context menu or editor."), null);
 
         string? previousLabels = null;
+        var labelRestarts = 0;
         RetainerAutomationResult adjusted;
-        do
+        while (true)
         {
             adjusted = await framework.RunOnTick(
                 () => SelectListingAdjustPrice(listing with { SlotIndex = reconciled.SlotIndex }, ref previousLabels),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (adjusted.Code == "RetainerAdjustPriceStabilizing")
+            if (adjusted.Code == "RetainerAdjustPriceLabelsChanged" && ++labelRestarts <= AdjustPriceLabelRestarts)
+            {
+                previousLabels = null;
                 await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
-        } while (adjusted.Code == "RetainerAdjustPriceStabilizing");
+                continue;
+            }
+            if (adjusted.Code != "RetainerAdjustPriceStabilizing")
+                break;
+            await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
+        }
+        if (adjusted.Code == "RetainerAdjustPriceLabelsChanged")
+            adjusted = RetainerAutomationResult.Failed("RetainerSellingListingSelectionFailed",
+                $"Context labels kept changing across {AdjustPriceLabelRestarts} restarts; Adjust Price was not selected.");
         if (!adjusted.Success)
         {
-            if (adjusted.Code != "RetainerSellingListingSelectionIndeterminate")
-                await framework.RunOnTick(() => CloseOwnedListingMenu(reconciled.SlotIndex), cancellationToken: CancellationToken.None).ConfigureAwait(false);
-            return (SelectionIndeterminate(adjusted), null);
+            if (adjusted.Code == "RetainerSellingListingSelectionIndeterminate")
+                return (adjusted, null);
+            // Nothing was dispatched: close our menu and report a clean pre-send
+            // failure so callers can skip this listing instead of halting the run.
+            await framework.RunOnTick(() => CloseOwnedListingMenu(reconciled.SlotIndex), cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            log.Warning("RepriceAdjustPriceNotSelected slot={Slot} item={Item} code={Code}: {Message}",
+                reconciled.SlotIndex, listing.ItemId, adjusted.Code, adjusted.Message);
+            return (adjusted, null);
         }
 
         if (!await WaitUntilAsync(() => IsReady(SellingListingEditor), cancellationToken).ConfigureAwait(false))
@@ -1715,7 +1736,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (previousLabels != fingerprint)
         {
             if (previousLabels is not null)
-                return RetainerAutomationResult.Failed("RetainerSellingListingSelectionFailed", "Context labels changed during selection.");
+                return RetainerAutomationResult.Failed("RetainerAdjustPriceLabelsChanged", "Context labels changed during selection.");
             previousLabels = fingerprint;
             return RetainerAutomationResult.Failed("RetainerAdjustPriceStabilizing", "Waiting for stable context labels.");
         }
