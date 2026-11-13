@@ -775,6 +775,7 @@ internal sealed class RetainerRetrievalMutationTracker : IDisposable
         GameInventoryType.Inventory2,
         GameInventoryType.Inventory3,
         GameInventoryType.Inventory4,
+        GameInventoryType.Crystals,
     };
     private static readonly IReadOnlySet<GameInventoryType> RetainerContainers = new HashSet<GameInventoryType>
     {

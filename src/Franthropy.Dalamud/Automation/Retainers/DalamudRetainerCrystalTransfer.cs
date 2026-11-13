@@ -41,18 +41,21 @@ public sealed class DalamudRetainerCrystalTransfer
     private readonly IGameGui gameGui;
     private readonly IFramework framework;
     private readonly IPluginLog log;
+    private readonly IGameInventory? gameInventory;
     private RetainerItemCommandDelegate? retainerItemCommand;
 
     public DalamudRetainerCrystalTransfer(
         ISigScanner sigScanner,
         IGameGui gameGui,
         IFramework framework,
-        IPluginLog log)
+        IPluginLog log,
+        IGameInventory? gameInventory = null)
     {
         this.sigScanner = sigScanner;
         this.gameGui = gameGui;
         this.framework = framework;
         this.log = log;
+        this.gameInventory = gameInventory;
     }
 
     public async Task<RetainerCrystalTransferResult> DepositAsync(
@@ -60,66 +63,19 @@ public sealed class DalamudRetainerCrystalTransfer
         int requestedQuantity,
         CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        var pending = await framework.RunOnTick(
-            () => BeginDeposit(stack, requestedQuantity),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (!pending.Success || pending.Requested == 0)
-            return new(pending.Success, 0, pending.Code, pending.Message);
-
-        for (var attempt = 0; attempt < 30; attempt++)
-        {
-            var immediate = await framework.RunOnTick(() => VerifyCompleted(
-                stack.ItemId,
-                pending.Requested,
-                pending.PlayerQuantityBefore,
-                pending.RetainerQuantityBefore),
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (immediate.Success)
-                return immediate;
-
-            var submitted = await framework.RunOnTick(
-                () => SubmitQuantity(stack.ItemId, pending.Requested),
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (submitted.Success)
+        var result = await RetainerDepositVerifier.DepositAsync(
+            stack, framework, gameGui, log, gameInventory,
+            () =>
             {
-                return await WaitForCompletionAsync(
-                    stack.ItemId,
-                    submitted.Transferred,
-                    pending.PlayerQuantityBefore,
-                    pending.RetainerQuantityBefore,
-                    cancellationToken).ConfigureAwait(false);
-            }
-
-            await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
-        }
-
-        return new(false, 0, "DepositNotObserved", $"Deposit neither completed nor opened a numeric quantity popup for item {stack.ItemId}.");
-    }
-
-    private async Task<RetainerCrystalTransferResult> WaitForCompletionAsync(
-        uint itemId,
-        int transferred,
-        int playerQuantityBefore,
-        int retainerQuantityBefore,
-        CancellationToken cancellationToken)
-    {
-        RetainerCrystalTransferResult last = new(false, 0, "TransferPending", $"Deposit did not complete for item {itemId}.");
-        for (var attempt = 0; attempt < 60; attempt++)
-        {
-            last = await framework.RunOnTick(() => VerifyCompleted(
-                itemId,
-                transferred,
-                playerQuantityBefore,
-                retainerQuantityBefore),
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (last.Success)
-                return last;
-
-            await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
-        }
-
-        return last;
+                var pending = BeginDeposit(stack, requestedQuantity);
+                return new RetainerDepositStart(pending.Success, pending.Requested,
+                    pending.PlayerQuantityBefore, pending.RetainerQuantityBefore, pending.Code, pending.Message);
+            },
+            requested => SubmitQuantity(stack.ItemId, requested) is { } submitted
+                ? new RetainerDepositResult(submitted.Success, submitted.Transferred, submitted.Code, submitted.Message)
+                : throw new InvalidOperationException(),
+            cancellationToken).ConfigureAwait(false);
+        return new(result.Success, result.Transferred, result.Code, result.Message);
     }
 
     private unsafe PendingRetainerCrystalTransfer BeginDeposit(
@@ -183,6 +139,11 @@ public sealed class DalamudRetainerCrystalTransfer
         if (retainerAgent == null || !retainerAgent->IsAgentActive())
             return PendingRetainerCrystalTransfer.Fail("RetainerAgentUnavailable", "Retainer agent is unavailable.");
 
+        if (!RetainerDepositVerifier.PreconditionsAvailable(stack))
+            return PendingRetainerCrystalTransfer.Fail("InventoryUnavailable", "All verification containers must be loaded before dispatch.");
+        if (RetainerDepositVerifier.QuantityPopupVisible(gameGui))
+            return PendingRetainerCrystalTransfer.Fail("QuantityPopupAlreadyOpen", "An unowned quantity popup exists before dispatch.");
+
         try
         {
             retainerItemCommand(
@@ -196,8 +157,8 @@ public sealed class DalamudRetainerCrystalTransfer
         {
             log.Error(ex, "Unable to invoke the retainer crystal deposit command.");
             return PendingRetainerCrystalTransfer.Fail(
-                "CommandUnavailable",
-                $"Retainer crystal deposit command is unavailable. {ex.Message}");
+                "DepositDispatchIndeterminate",
+                $"Dispatch began; do not retry. Retainer crystal deposit command is unavailable. {ex.Message}");
         }
 
         return new(
@@ -222,35 +183,6 @@ public sealed class DalamudRetainerCrystalTransfer
         if (DalamudNumericDialog.TrySubmit(numeric, submitted) != NumericDialogSubmission.Submitted)
             return new(false, 0, "QuantityInputPending", $"Numeric quantity popup is not ready for item {itemId}.");
         return new(true, submitted, "QuantitySubmitted", $"Submitted {submitted}x item {itemId} for deposit.");
-    }
-
-    private static RetainerCrystalTransferResult VerifyCompleted(
-        uint itemId,
-        int expected,
-        int playerQuantityBefore,
-        int retainerQuantityBefore)
-    {
-        var playerAfter = DalamudInventoryStackScanner.CountLoadedItem(InventoryType.Crystals, itemId);
-        var retainerAfter = DalamudInventoryStackScanner.CountLoadedItem(InventoryType.RetainerCrystals, itemId);
-        if (RetainerCrystalTransferObservation.Matches(
-                expected,
-                playerQuantityBefore,
-                playerAfter,
-                retainerQuantityBefore,
-                retainerAfter))
-        {
-            return new(
-                true,
-                expected,
-                "TransferVerified",
-                $"Deposited {expected}x item {itemId}; player {playerQuantityBefore}->{playerAfter}, retainer {retainerQuantityBefore}->{retainerAfter}.");
-        }
-
-        return new(
-            false,
-            0,
-            "TransferPending",
-            $"Deposit verification pending for item {itemId}: player {playerQuantityBefore}->{playerAfter}, retainer {retainerQuantityBefore}->{retainerAfter}, expected {expected}.");
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
