@@ -3,11 +3,13 @@ using Dalamud.Bindings.ImGui;
 namespace Franthropy.Dalamud.UI.Tables;
 
 /// <summary>Variable-height detail content in the current table's visible viewport.</summary>
-internal static class DalamudTableDetailRow
+/// <remarks>Use border-safe parent table flags from <see cref="DalamudNestedTableFlags"/>.
+/// The callback must balance any table, window, or other ImGui scopes it opens.</remarks>
+public static class DalamudTableDetailRow
 {
     // The table remains the layout owner: finishing the cell measures the callback's
     // cursor maximum and advances the next row. No child window or height cache.
-    internal static unsafe void Draw(string id, Action draw)
+    public static unsafe void Draw(string id, Action draw)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentNullException.ThrowIfNull(draw);

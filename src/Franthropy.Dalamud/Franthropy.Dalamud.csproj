@@ -122,6 +122,8 @@
     <Compile Remove="UI\Tables\DalamudVirtualizedRows.cs" />
     <Compile Remove="UI\Tables\DalamudTableProjection.cs" />
     <Compile Remove="UI\Tables\DalamudTableDetailRow.cs" />
+    <Compile Remove="UI\Tables\DalamudExpandableRows.cs" />
+    <Compile Remove="UI\Tables\DalamudNestedTableFlags.cs" />
     <Compile Remove="UI\Tables\DalamudTableSelectionRenderer.cs" />
     <Compile Remove="Diagnostics\DalamudConditionTrustProbe.cs" />
     <Compile Remove="Diagnostics\DalamudRenderControl.cs" />
