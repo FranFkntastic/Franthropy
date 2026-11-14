@@ -36,14 +36,15 @@ public sealed class DalamudCrossRowHighlight
 
     public bool IsHighlighted(string key)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(key);
-        return ActiveKey is { } active && comparer.Equals(active, key);
+        return !string.IsNullOrWhiteSpace(key) && ActiveKey is { } active && comparer.Equals(active, key);
     }
 
     /// <summary>Records the key under the mouse for this frame.</summary>
     public void MarkHovered(string key)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(key);
+        if (string.IsNullOrWhiteSpace(key))
+            return;
+
         this.key = key;
         frame = frameSource();
     }
