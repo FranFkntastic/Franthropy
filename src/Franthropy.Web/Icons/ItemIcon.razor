@@ -1,0 +1,33 @@
+@using Microsoft.AspNetCore.Components
+@using Franthropy.FFXIV
+
+<span class="franthropy-item-icon" style="width:@(Size)px;height:@(Size)px" role="@(_loaded ? null : "img")" aria-label="@(_loaded ? null : Name)">
+    @if (!_loaded)
+    {
+        <span class="franthropy-item-icon-placeholder" aria-hidden="true">◇</span>
+    }
+    @if (IconId > 0 && !_failed)
+    {
+        <img @key="Url" src="@Url" alt="@Name" width="@Size" height="@Size"
+             style="@(_loaded ? null : "opacity:0")" @onload="() => _loaded = true" @onerror="() => _failed = true" />
+    }
+</span>
+
+@code {
+    [Parameter] public int IconId { get; set; }
+    [Parameter] public string Name { get; set; } = "";
+    [Parameter] public int Size { get; set; } = 28;
+    [Parameter] public string BaseUrl { get; set; } = ItemIconUrl.DefaultBaseUrl;
+    private string? _previousUrl;
+    private bool _loaded;
+    private bool _failed;
+    private string? Url => IconId > 0 ? ItemIconUrl.Build(IconId, BaseUrl) : null;
+
+    protected override void OnParametersSet()
+    {
+        if (Url == _previousUrl) return;
+        _previousUrl = Url;
+        _loaded = false;
+        _failed = false;
+    }
+}
