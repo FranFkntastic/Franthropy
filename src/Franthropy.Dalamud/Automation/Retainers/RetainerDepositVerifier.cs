@@ -17,7 +17,8 @@ internal static class RetainerDepositVerifier
     // Re-read split inventory updates before classifying any mismatch.
     private const int SettleBudgetMs = 1_000;
     // A bounded diagnostic tail detects thresholds that are too short, never resends.
-    private const int LateObservationBudgetMs = 1_000;
+    // Server latency spikes can land an exact transfer seconds after the window.
+    private const int LateObservationBudgetMs = 5_000;
     private const int MinimumPollsPerPhase = 10;
     // Agent/container visibility can flicker while the dialog opens.
     private const int PreconditionLossToleranceMs = 500;
@@ -181,6 +182,10 @@ internal static class RetainerDepositVerifier
             var message = $"{code}: {Evidence()}. {refusal}";
             foreach (var entry in buffered) log.Warning("{DepositDiagnostic}", entry);
             log.Warning("{DepositFailure}", message);
+            // A full retainer refuses before any quantity is entered: nothing can arrive late,
+            // and callers try the next retainer, so do not stall them on the late tail.
+            if (code == "NoCapacity")
+                return new(false, 0, code, message);
             var verdictAt = elapsed.ElapsedMilliseconds;
             // This bounded tail is awaited so no unowned task outlives the operation or event subscription.
             var late = Stopwatch.StartNew();
@@ -189,12 +194,18 @@ internal static class RetainerDepositVerifier
                 var observation = await framework.RunOnTick(() => Observe(stack), cancellationToken: token).ConfigureAwait(false);
                 if (observation is { } counts && RetainerDepositObservation.Matches(expected, pending.PlayerBefore, counts.Player, pending.RetainerBefore, counts.Retainer))
                 {
-                    log.Warning("DepositLateConfirmation item={Item} lateBy={Late}ms verdict={Code} player={BeforePlayer}->{Player} retainer={BeforeRetainer}->{Retainer}",
-                        stack.ItemId, elapsed.ElapsedMilliseconds - verdictAt, code, pending.PlayerBefore, counts.Player, pending.RetainerBefore, counts.Retainer);
-                    break;
+                    // Exact equal-and-opposite movement after the window is a real, single
+                    // transfer delayed by the server: report success, never redispatch.
+                    var lateBy = elapsed.ElapsedMilliseconds - verdictAt;
+                    log.Warning("DepositLateConfirmation item={Item} lateBy={Late}ms lateBudget={LateBudget}ms promoting {Code} to TransferVerifiedLate player={BeforePlayer}->{Player} retainer={BeforeRetainer}->{Retainer}",
+                        stack.ItemId, lateBy, LateObservationBudgetMs, code, pending.PlayerBefore, counts.Player, pending.RetainerBefore, counts.Retainer);
+                    return new(true, expected, "TransferVerifiedLate",
+                        $"Deposited {expected}x item {stack.ItemId}; arrived {lateBy:N0} ms after the verification window closed (late budget {LateObservationBudgetMs:N0} ms); original classification {message}");
                 }
                 await framework.DelayTicks(1, token).ConfigureAwait(false);
             }
+            log.Warning("Deposit late watch expired: item {Item} showed no exact movement within the {LateBudget} ms late budget; preserving {Code}.",
+                stack.ItemId, LateObservationBudgetMs, code);
             return new(false, 0, code, message);
         }
     }

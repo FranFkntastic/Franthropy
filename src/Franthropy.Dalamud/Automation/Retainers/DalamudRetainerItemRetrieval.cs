@@ -53,7 +53,9 @@ public sealed class DalamudRetainerItemRetrieval
     // Server round trips and frame hitches require elapsed time, not a frame budget.
     private const int VerificationBudgetMs = 3_000;
     private const int SettleBudgetMs = 1_000;
-    private const int LateObservationBudgetMs = 1_000;
+    // Server latency spikes can land an exact transfer seconds after the verification
+    // window. Only failed attempts pay this wait; an exact late match resolves early.
+    private const int LateObservationBudgetMs = 5_000;
     private const int AggregatePollIntervalTicks = 3;
     // A single long hitch must not consume a whole phase in one or two polls.
     private const int MinimumPollsPerPhase = 10;
@@ -497,7 +499,7 @@ public sealed class DalamudRetainerItemRetrieval
         RetainerRetrievalResult last,
         CancellationToken cancellationToken)
     {
-        // Freeze the failure before observing late arrivals. Keep the subscription scoped
+        // Classify the failure before observing late arrivals. Keep the subscription scoped
         // to this call: there is no plugin-disposal lifetime to safely own detached work.
         var result = await framework.RunOnTick(() => DescribeFailure(original, pending, mutation, diagnostics, phase, last),
             cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -513,20 +515,33 @@ public sealed class DalamudRetainerItemRetrieval
                 await Task.Delay(50, lateCancellation.Token).ConfigureAwait(false);
                 if (late.ElapsedMilliseconds >= LateObservationBudgetMs)
                     break;
-                var observed = await framework.RunOnTick(
-                    () => mutation?.Matches(pending.Requested) == true || VerifyAggregateCompleted(original, pending).Success,
+                // Only exact, equal-and-opposite movement of the requested quantity counts;
+                // partial or mismatched movement keeps the classified failure.
+                var verified = await framework.RunOnTick(
+                    () => mutation?.Matches(pending.Requested) == true
+                        ? MutationVerified(original.ItemId, pending.Requested, mutation)
+                        : VerifyAggregateCompleted(original, pending),
                     cancellationToken: lateCancellation.Token).ConfigureAwait(false);
-                if (!observed)
+                if (!verified.Success)
                     continue;
-                log.Warning("RetrievalLateConfirmation: item {Item} arrived {LateMs} ms after the verification window closed; outcome remains {Code}; never redispatch.",
-                    original.ItemId, late.ElapsedMilliseconds, result.Code);
-                break;
+                var lateMs = late.ElapsedMilliseconds;
+                log.Warning("RetrievalLateConfirmation: item {Item} arrived {LateMs} ms after the verification window closed (late budget {LateBudgetMs} ms); promoting {Code} to TransferVerifiedLate; never redispatch.",
+                    original.ItemId, lateMs, LateObservationBudgetMs, result.Code);
+                return new(true, verified.Transferred, "TransferVerifiedLate",
+                    $"{verified.Message} Arrived {lateMs:N0} ms after the verification window closed (late budget {LateObservationBudgetMs:N0} ms); original classification {result.Code}: {result.Message}");
             }
+            log.Warning("Retrieval late watch expired: item {Item} showed no exact movement within the {LateBudgetMs} ms late budget; preserving {Code}.",
+                original.ItemId, LateObservationBudgetMs, result.Code);
         }
-        // The late watch is diagnostic only: caller cancellation must not discard the
-        // already-classified failure.
+        // The late budget elapsing surfaces as cancellation of the linked token.
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            log.Warning("Retrieval late watch expired: item {Item} showed no exact movement within the {LateBudgetMs} ms late budget; preserving {Code}.",
+                original.ItemId, LateObservationBudgetMs, result.Code);
+        }
+        // Caller cancellation must not discard the already-classified failure.
         catch (OperationCanceledException) { }
-        catch (Exception exception) { log.Warning(exception, "Retrieval late diagnostic unavailable; preserving {Code}.", result.Code); }
+        catch (Exception exception) { log.Warning(exception, "Retrieval late observation unavailable; preserving {Code}.", result.Code); }
         return result;
     }
 
