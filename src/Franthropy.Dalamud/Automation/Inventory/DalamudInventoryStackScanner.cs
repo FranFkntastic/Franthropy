@@ -15,10 +15,7 @@ public sealed record DalamudInventoryStack(
     public bool IsOrdinary => ItemId != 0 && Quantity > 0 && !IsSymbolic &&
         Flags is InventoryItem.ItemFlags.None or InventoryItem.ItemFlags.HighQuality;
     public bool CompatibleWith(DalamudInventoryStack other) => IsOrdinary && other.IsOrdinary &&
-        ItemId == other.ItemId && Flags == other.Flags && CompatibilityMetadata == other.CompatibilityMetadata;
-    // The researched ordinary merge compares flag-adjusted ID/HQ, not signature.
-    // Ignore ONLY crafter identity; retain every other captured metadata byte.
-    public string CompatibilityMetadata => Metadata.Length == 0x60 ? Metadata.Remove(16, 16) : Metadata;
+        ItemId == other.ItemId && IsHighQuality == other.IsHighQuality;
 }
 
 public sealed record DalamudInventoryRead(
@@ -87,7 +84,8 @@ public static class DalamudInventoryStackScanner
                     slotIndex,
                     slot->ItemId,
                     checked((int)slot->Quantity),
-                    slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality)));
+                    slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality), slot->IsSymbolic, slot->Flags,
+                    Convert.ToHexString(new ReadOnlySpan<byte>((byte*)slot + 0x18, 0x30))));
             }
         }
 

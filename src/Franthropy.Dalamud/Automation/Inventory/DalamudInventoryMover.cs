@@ -9,15 +9,15 @@ namespace Franthropy.Dalamud.Automation.Inventory;
 
 /// <summary>
 /// One observation of the serialized inventory boundary. <paramref name="Outcome"/> is
-/// <see cref="InventoryMoveOutcome.None"/> on the ordinary bag merge/split path and a
-/// self-describing code on the saddlebag retrieval path; <paramref name="Destination"/>
+/// <see cref="InventoryMoveOutcome.None"/> on successful ordinary bag moves and a
+/// self-describing code on the saddlebag retrieval path or a refused bag merge; <paramref name="Destination"/>
 /// is the verified bag stack that received a retrieval.
 /// </summary>
 public sealed record InventoryMoveObservation(bool Waiting, bool Completed, string Message,
     DalamudInventoryStack? SplitDestination = null, bool Dispatched = false, bool Reconciled = false,
     InventoryMoveOutcome Outcome = InventoryMoveOutcome.None, DalamudInventoryStack? Destination = null);
 
-/// <summary>Distinct outcomes of <see cref="DalamudInventoryMover.BeginSaddlebagRetrieval"/> and its observations.</summary>
+/// <summary>Distinct inventory outcomes, including saddlebag retrieval and refused ordinary merges.</summary>
 public enum InventoryMoveOutcome
 {
     /// <summary>Ordinary bag merge/split path; no code is assigned.</summary>
@@ -63,6 +63,8 @@ public enum InventoryMoveOutcome
     OutsideMutation,
     /// <summary>The outcome could not be proven (lost/rejected acknowledgement, unproven submission, unconverged repair). Never resent.</summary>
     Indeterminate,
+    /// <summary>A merge was refused: the two complete stacks exchanged slots; every other scoped slot is unchanged.</summary>
+    MergeRefusedSwapped,
 }
 
 /// <summary>
@@ -605,6 +607,7 @@ public sealed unsafe class DalamudInventoryMover : IDisposable
             p.SettleStarted ??= DateTime.UtcNow;
             if (++p.SettlePolls < MinimumPolls || DateTime.UtcNow - p.SettleStarted < SettleBudget)
                 return new(true, false, $"Settling inventory deltas for context={p.Context:X}.", Outcome: Code(p, InventoryMoveOutcome.AwaitingReceipt));
+            if (IsRefusedMergeSwap(p, after)) return CompleteRefusedMerge(p, after);
             return ReconcileOutsideMutation(p, after);
         }
         lock (gate) pending = null;
@@ -644,14 +647,53 @@ public sealed unsafe class DalamudInventoryMover : IDisposable
             var a = after.Stacks.SingleOrDefault(x => x.Container == b.Container && x.SlotIndex == b.SlotIndex);
             var expected = b.Quantity;
             var identity = b;
+            var mergeDestination = p.Op == NativeOperation.Merge && b.Container == destination.Container && b.SlotIndex == destination.SlotIndex;
             if (b.Container == p.Source.Container && b.SlotIndex == p.Source.SlotIndex) expected -= p.Amount;
             if (b.Container == destination.Container && b.SlotIndex == destination.SlotIndex)
             { expected += p.Amount; identity = p.Op == NativeOperation.Merge ? b : p.Source; }
             if (a == null || a.Quantity != expected || (expected == 0 ? a.ItemId != 0 || a.IsSymbolic :
-                a.ItemId != identity.ItemId || a.Flags != identity.Flags || a.IsSymbolic != identity.IsSymbolic || a.Metadata != identity.Metadata))
+                mergeDestination ? !a.CompatibleWith(identity) :
+                a.ItemId != identity.ItemId || a.IsHighQuality != identity.IsHighQuality || a.Flags != identity.Flags || a.IsSymbolic != identity.IsSymbolic || a.Metadata != identity.Metadata))
                 return null;
         }
         return destination;
+    }
+
+    private static bool IsRefusedMergeSwap(Pending p, DalamudInventoryRead after)
+    {
+        if (p.Op != NativeOperation.Merge || p.Destination is not { } destination ||
+            after.Stacks.Count != p.Before.Stacks.Count) return false;
+        // Exact record equality includes quantity, HQ, flags, symbolic state and
+        // the full raw metadata. Only the two physical addresses may differ.
+        foreach (var before in p.Before.Stacks)
+        {
+            var expected = before;
+            if (before.Container == p.Source.Container && before.SlotIndex == p.Source.SlotIndex)
+                expected = destination with { Container = before.Container, SlotIndex = before.SlotIndex };
+            else if (before.Container == destination.Container && before.SlotIndex == destination.SlotIndex)
+                expected = p.Source with { Container = before.Container, SlotIndex = before.SlotIndex };
+            if (!after.Stacks.Contains(expected)) return false;
+        }
+        return true;
+    }
+
+    private InventoryMoveObservation CompleteRefusedMerge(Pending p, DalamudInventoryRead after)
+    {
+        var destination = p.Destination!;
+        var sourceAfter = after.Stacks.Single(x => x.Container == p.Source.Container && x.SlotIndex == p.Source.SlotIndex);
+        var destinationAfter = after.Stacks.Single(x => x.Container == destination.Container && x.SlotIndex == destination.SlotIndex);
+        static string Describe(DalamudInventoryStack x) =>
+            $"{x.Container}/{x.SlotIndex} item={x.ItemId} quantity={x.Quantity} HQ={x.IsHighQuality} flags={x.Flags} metadata={x.Metadata}";
+        var message = $"{InventoryMoveOutcome.MergeRefusedSwapped}: merge refused; exact stack exchange, totals conserved and all other scoped slots unchanged. " +
+            $"sourceBefore=[{Describe(p.Source)}] destinationBefore=[{Describe(destination)}] " +
+            $"sourceAfter=[{Describe(sourceAfter)}] destinationAfter=[{Describe(destinationAfter)}]. {p.Evidence()}";
+        lock (gate) pending = null;
+        poison = null;
+        hook?.Disable();
+        containerHook?.Disable();
+        resetHook?.Disable();
+        log?.Warning("{InventoryMoveFailure}", message);
+        return new(false, false, message, Reconciled: true, Outcome: InventoryMoveOutcome.MergeRefusedSwapped);
     }
 
     private InventoryMoveObservation ReconcileOutsideMutation(Pending p, DalamudInventoryRead after)
