@@ -1,0 +1,30 @@
+.franthropy-glass-backdrop {
+    background:
+      radial-gradient(900px 520px at 8% 0%,var(--glass-glow-primary,rgba(143,191,127,.26)),transparent 62%),
+      radial-gradient(760px 560px at 96% 18%,var(--glass-glow-secondary,rgba(113,165,236,.22)),transparent 60%),
+      radial-gradient(700px 420px at 50% 100%,var(--glass-glow-bottom,rgba(143,191,127,.14)),transparent 70%),
+      var(--glass-page-background,#191a1a);
+    background-attachment:local;
+}
+.franthropy-glass-toolbar,.franthropy-glass-table,.franthropy-glass-footer,.franthropy-glass-card {
+    background:var(--glass-surface,rgba(36,38,38,.46)) !important;
+    border-color:var(--glass-border,rgba(255,255,255,.09)) !important;
+}
+.franthropy-glass-card {
+    -webkit-backdrop-filter:blur(var(--glass-blur,18px)) saturate(140%);
+    backdrop-filter:blur(var(--glass-blur,18px)) saturate(140%);
+}
+.franthropy-glass-toolbar { position:relative; z-index:3; box-shadow:inset 0 1px 0 rgba(255,255,255,.06); }
+.franthropy-glass-table { box-shadow:0 18px 40px rgba(0,0,0,.25); }
+.franthropy-glass-footer { background:var(--glass-footer,rgba(28,30,30,.55)) !important; }
+.franthropy-glass-toolbar input,.franthropy-glass-table input {
+    background:var(--glass-input-background,rgba(14,15,15,.6)) !important;
+    border-color:var(--glass-input-border,rgba(255,255,255,.18)) !important;
+}
+.franthropy-glass-table td { border-top-color:var(--glass-row-border,rgba(255,255,255,.07)) !important; }
+.franthropy-glass-table th:first-child,.franthropy-glass-table td:first-child { background:transparent !important; }
+.franthropy-glass-table.is-scrolled th:first-child,.franthropy-glass-table.is-scrolled td:first-child {
+    background:var(--glass-sticky-background,#242726) !important; box-shadow:6px 0 10px -6px rgba(0,0,0,.6);
+}
+.franthropy-glass-table.is-scrolled tbody tr:hover td:first-child { background:var(--glass-sticky-hover,#302d24) !important; }
+.franthropy-glass-dropdown { background:var(--glass-dropdown,rgba(40,42,44,.95)) !important; -webkit-backdrop-filter:blur(16px); backdrop-filter:blur(16px); }

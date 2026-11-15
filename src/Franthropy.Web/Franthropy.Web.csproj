@@ -36,6 +36,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Franthropy.Filtering\Franthropy.Filtering.csproj" />
+    <ProjectReference Include="..\Franthropy.FFXIV\Franthropy.FFXIV.csproj" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
