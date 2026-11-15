@@ -45,6 +45,17 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private readonly DalamudRenderedUiTextActionDispatcher renderedUi;
     private readonly IPluginLog log;
     private RetainerAutomationTarget? active;
+    // Market price freshness proof. InventoryManager's 20-entry retainer market price table is a
+    // client cache that is NOT tied to the RetainerMarket container's load: right after a retainer
+    // switch it can still hold the previous retainer's (non-zero) prices. The game itself replaces
+    // the table wholesale (clear all 20 entries, then write each server price record) when a price
+    // batch arrives, and treats 0 as "no price". This session clears the same table on the tick it
+    // selects a retainer, before the selection callback, so afterwards a non-zero price on an
+    // occupied slot can only come from the game's refresh for that retainer (or from this
+    // retainer's own local listing/reprice writes). Stopwatch timestamp of that clear; 0 = none.
+    private long marketPriceCacheClearedAt;
+    // How long a market scan waits, on framework ticks, for the price refresh to cover every listing.
+    private static readonly TimeSpan MarketPriceRefreshLimit = TimeSpan.FromSeconds(5);
     // Pre-dispatch reprice selection: each attempt is one row activation. The budget covers
     // probing every sell-list row twice; only a persistent hard blocker can exhaust it.
     private const int RepriceSelectionAttemptBudget = 40;
@@ -313,6 +324,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             return RetainerAutomationResult.Failed(NativeCapabilityGuard.FailureCode, compatibility.Message);
 
         active = null;
+        marketPriceCacheClearedAt = 0;
         if (target.RetainerId == 0 || string.IsNullOrWhiteSpace(target.RetainerName))
             return RetainerAutomationResult.Failed("RetainerIdentityRequired", "A stable retainer ID and name are required.");
 
@@ -338,6 +350,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             return RetainerAutomationOpenResult.Failed(NativeCapabilityGuard.FailureCode, compatibility.Message);
 
         active = null;
+        marketPriceCacheClearedAt = 0;
         var selected = await framework.RunOnTick(SelectFirstAvailableRetainer, cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!selected.Result.Success || string.IsNullOrWhiteSpace(selected.RetainerName))
             return RetainerAutomationOpenResult.Failed(selected.Result.Code, selected.Result.Message);
@@ -728,6 +741,18 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         var container = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
         if (manager == null || container == null || !container->IsLoaded)
             return RepriceAttemptOutcome.Retry(-1, "the RetainerMarket container is not loaded");
+        // Binding compares live prices, so it requires the same freshness proof as a scan. Nothing
+        // has been dispatched yet, so failing here sends nothing.
+        var priceGap = marketPriceCacheClearedAt == 0
+            ? "the client price cache was not cleared when this retainer was selected"
+            : DescribeMarketPriceRefreshGap(manager, container);
+        if (priceGap is not null)
+        {
+            var message = $"Reprice refused before any row activation: market prices for {DescribeActiveRetainer()} are not " +
+                $"proven current ({DescribeSinceMarketPriceClear()}): {priceGap}. Nothing was dispatched.";
+            log.Warning("RetainerMarketPricesNotRefreshed: {Message}", message);
+            return RepriceAttemptOutcome.Final(RetainerAutomationResult.Failed("RetainerMarketPricesNotRefreshed", message));
+        }
 
         // Identical listings (item, quantity, quality, price) are interchangeable for a reprice,
         // so the request follows its identity if the exact slot moved or was already served.
@@ -965,8 +990,29 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         }
     }
 
-    public Task<RetainerMarketListingScanResult> ScanMarketListingsAsync(CancellationToken cancellationToken = default) =>
-        framework.RunOnTick(ScanMarketListings, cancellationToken: cancellationToken);
+    /// <remarks>
+    /// Waits on framework ticks, up to <see cref="MarketPriceRefreshLimit"/>, until the game's price
+    /// refresh covers every occupied listing of the active retainer. Never returns unproven prices.
+    /// </remarks>
+    public async Task<RetainerMarketListingScanResult> ScanMarketListingsAsync(CancellationToken cancellationToken = default)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            var attempt = await framework.RunOnTick(ScanMarketListings, cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (attempt.Result is { } result)
+                return result;
+            if (clock.Elapsed >= MarketPriceRefreshLimit)
+            {
+                var message = $"Retainer market prices for {DescribeActiveRetainer()} were not refreshed within the " +
+                    $"{MarketPriceRefreshLimit.TotalSeconds:0}s limit (waited {clock.Elapsed.TotalSeconds:0.0}s; " +
+                    $"{DescribeSinceMarketPriceClear()}): {attempt.MissingEvidence}. No prices were returned.";
+                log.Warning("RetainerMarketPricesNotRefreshed: {Message}", message);
+                return RetainerMarketListingScanResult.Failed("RetainerMarketPricesNotRefreshed", message);
+            }
+            await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
+        }
+    }
 
     public async Task<RetainerAutomationResult> UpdateSellingListingPriceAsync(
         RetainerMarketListingTarget listing,
@@ -1727,7 +1773,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     // The retainer list's own selection callback is (Int 2, UInt rowIndex). Synthetic
     // ListItemClick/DoubleClick dispatch reaches list listeners but does not open the retainer
     // (verified live 2026-11-06: RetainerMenuTimeout with RetainerList still showing).
-    private static unsafe RetainerAutomationResult FireRetainerListRow(
+    private unsafe RetainerAutomationResult FireRetainerListRow(
         AtkUnitBase* addon, IReadOnlyList<RetainerListEntry> entries, int index)
     {
         if (index < 0 || index >= entries.Count || !entries[index].IsActive || string.IsNullOrWhiteSpace(entries[index].Name))
@@ -1737,6 +1783,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         var values = stackalloc AtkValue[4];
         values[0] = new() { Type = AtkValueType.Int, Int = 2 };
         values[1] = new() { Type = AtkValueType.UInt, UInt = (uint)index };
+        // Same tick, before the callback: no price batch for the newly selected retainer can be
+        // applied in between, so every later non-zero price belongs to the selected retainer.
+        InvalidateRetainerMarketPriceCache(entries[index].Name);
         addon->FireCallback(4, values, true);
         return RetainerAutomationResult.Succeeded("RetainerListRowSelected",
             $"Selected retainer row {index} ({entries[index].Name}) through the list's native callback.");
@@ -1760,18 +1809,32 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             : RetainerAutomationResult.Failed("RetainerIdentityMismatch", "Active retainer identity does not match the expected stable ID.");
     }
 
-    private unsafe RetainerMarketListingScanResult ScanMarketListings()
+    private readonly record struct MarketListingScanAttempt(RetainerMarketListingScanResult? Result, string? MissingEvidence);
+
+    // One framework-tick observation. A null Result means the price refresh has not yet covered
+    // every occupied listing; the caller waits and retries within MarketPriceRefreshLimit.
+    private unsafe MarketListingScanAttempt ScanMarketListings()
     {
         var verified = VerifyActive(active?.RetainerId ?? 0);
         if (!verified.Success)
-            return RetainerMarketListingScanResult.Failed(verified.Code, verified.Message);
+            return new(RetainerMarketListingScanResult.Failed(verified.Code, verified.Message), null);
+        if (marketPriceCacheClearedAt == 0)
+            return new(RetainerMarketListingScanResult.Failed(
+                "RetainerMarketPriceFreshnessUnproven",
+                $"Market prices for {DescribeActiveRetainer()} cannot be proven current: this session did not clear the " +
+                "client's retainer market price cache when the retainer was selected, so the cache may still hold another " +
+                "retainer's prices. No prices were returned."), null);
 
         var manager = InventoryManager.Instance();
         var container = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
         if (container == null || !container->IsLoaded)
-            return RetainerMarketListingScanResult.Failed(
+            return new(RetainerMarketListingScanResult.Failed(
                 "RetainerMarketUnavailable",
-                "The live retainer market inventory is unavailable.");
+                "The live retainer market inventory is unavailable."), null);
+
+        var missing = DescribeMarketPriceRefreshGap(manager, container);
+        if (missing is not null)
+            return new(null, missing);
 
         var listings = new List<RetainerMarketListingTarget>();
         for (var slotIndex = 0; slotIndex < container->Size; slotIndex++)
@@ -1782,9 +1845,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
             var unitPrice = manager->GetRetainerMarketPrice(checked((short)slotIndex));
             if (unitPrice is 0 or > RetainerMarketPricePolicy.MaximumUnitPrice)
-                return RetainerMarketListingScanResult.Failed(
+                return new(RetainerMarketListingScanResult.Failed(
                     "RetainerMarketPriceInvalid",
-                    $"The live listing in slot {slotIndex} has an invalid unit price.");
+                    $"The live listing in slot {slotIndex} has an invalid unit price."), null);
 
             listings.Add(new(
                 slotIndex,
@@ -1794,8 +1857,53 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 checked((uint)unitPrice)));
         }
 
-        return RetainerMarketListingScanResult.Succeeded(listings);
+        return new(RetainerMarketListingScanResult.Succeeded(listings), null);
     }
+
+    // Clears only InventoryManager's client-side retainer market price table, exactly as the
+    // game's own price-batch apply and reset paths do. Never use SetRetainerMarketPrice here:
+    // that function also sends a price-change command to the server.
+    private unsafe void InvalidateRetainerMarketPriceCache(string retainerName)
+    {
+        var manager = InventoryManager.Instance();
+        if (manager == null)
+        {
+            log.Warning("RetainerMarketPriceCacheNotCleared: InventoryManager was unavailable when {Retainer} was selected; " +
+                "market scans and reprices for it will fail as unproven.", retainerName);
+            return;
+        }
+        manager->RetainerMarketPrices.Clear();
+        marketPriceCacheClearedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+
+    // Null when every occupied listing has a price written since the selection cleared the cache;
+    // otherwise names the slots still lacking that evidence.
+    private static unsafe string? DescribeMarketPriceRefreshGap(InventoryManager* manager, InventoryContainer* container)
+    {
+        List<int>? unpriced = null;
+        var occupied = 0;
+        for (var slotIndex = 0; slotIndex < container->Size; slotIndex++)
+        {
+            var slot = container->GetInventorySlot(slotIndex);
+            if (slot == null || slot->ItemId == 0 || slot->Quantity == 0)
+                continue;
+            occupied++;
+            if (manager->GetRetainerMarketPrice(checked((short)slotIndex)) == 0)
+                (unpriced ??= []).Add(slotIndex);
+        }
+        return unpriced is null
+            ? null
+            : $"{unpriced.Count} of {occupied} occupied listing slot(s) [{string.Join(", ", unpriced)}] have had no price " +
+              "written by the game since the selection cleared the client price cache";
+    }
+
+    private string DescribeActiveRetainer() =>
+        active is { } target ? $"{target.RetainerName} ({target.RetainerId})" : "no verified active retainer";
+
+    private string DescribeSinceMarketPriceClear() =>
+        marketPriceCacheClearedAt == 0
+            ? "the price cache was never cleared for this retainer"
+            : $"{System.Diagnostics.Stopwatch.GetElapsedTime(marketPriceCacheClearedAt).TotalSeconds:0.0}s since selection cleared the price cache";
 
     private unsafe MarketListingPostDispatchResult StartMarketListingPost(
         DalamudInventoryStack source,
