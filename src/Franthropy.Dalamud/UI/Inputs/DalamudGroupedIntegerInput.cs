@@ -59,10 +59,14 @@ public static class DalamudGroupedIntegerInput
 
         var inputFlags = flags & ~(ImGuiInputTextFlags.CharsDecimal | ImGuiInputTextFlags.CharsHexadecimal |
                                   ImGuiInputTextFlags.CharsScientific | ImGuiInputTextFlags.CharsNoBlank);
-        // Parse the buffer rather than InputText's return, which EnterReturnsTrue changes.
+        // Compare text rather than InputText's return, which EnterReturnsTrue changes. Commit only
+        // on an actual edit so a caller that clamps or resets the value mid-edit is not overwritten
+        // by the retained buffer on later frames.
+        var previousText = text;
         ImGui.InputText(hasButtons ? "" : label, ref text, 1024,
             inputFlags | ImGuiInputTextFlags.AutoSelectAll | ImGuiInputTextFlags.CallbackCharFilter, CharacterFilter);
-        if ((flags & ImGuiInputTextFlags.ReadOnly) == 0 && GroupedIntegerParser.TryParse(text, out long parsed))
+        var edited = !string.Equals(text, previousText, StringComparison.Ordinal);
+        if (edited && (flags & ImGuiInputTextFlags.ReadOnly) == 0 && GroupedIntegerParser.TryParse(text, out long parsed))
             value = Math.Clamp(parsed, minimum, maximum);
         if (ImGui.IsItemActive()) Buffers[keyId] = new EditBuffer(text, frame);
         else Buffers.Remove(keyId);
