@@ -2243,7 +2243,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 throw new NativeCapabilityUnavailableException("An exact observed listing price is required before editing."));
             NativeCapabilityGuard.RequireAddress(AtkComponentNumericInput.Addresses.InnerSetValue.Value,
                 "Retainer price numeric input");
-            LogUnownedEvent("price input", &addon->AtkUnitBase, &addon->AskingPrice->OwnerNode->AtkResNode, AtkEventType.ValueUpdate);
+            _ = FindGameButtonClick(&addon->AtkUnitBase, &addon->AskingPrice->OwnerNode->AtkResNode, out var priceChain);
+            log.Information("RetainerSellPriceInputEvents addon=0x{Addon:X} chain=[{Chain}]", (nint)addon, priceChain);
             addon->AskingPrice->InnerSetValue(checked((int)newUnitPrice), triggerCallback: true, playSoundEffect: false);
             if (addon->AskingPrice->Value != newUnitPrice)
                 throw new NativeCapabilityUnavailableException("The listing price input rejected the requested value.");
@@ -2263,11 +2264,21 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         {
             var addon = RequireSellingEditor(listing, newUnitPrice);
             NativeCapabilityGuard.RequireIdentity((nint)addon, capturedEditor, "Retainer listing editor");
-            LogUnownedEvent("confirm button", &addon->AtkUnitBase, &addon->Confirm->OwnerNode->AtkResNode, AtkEventType.ButtonClick);
+            var confirmNode = &addon->Confirm->OwnerNode->AtkResNode;
             if (!addon->Confirm->IsEnabled)
                 throw new NativeCapabilityUnavailableException("The listing confirmation button is disabled.");
+            var click = FindGameButtonClick(&addon->AtkUnitBase, confirmNode, out var chain);
+            log.Information("RetainerSellConfirmEvents addon=0x{Addon:X} node=0x{Node:X} chain=[{Chain}]",
+                (nint)addon, (nint)confirmNode, chain);
+            if (click == null)
+                throw new NativeCapabilityUnavailableException(
+                    $"RetainerSellConfirmReceiverUnproven: the confirmation button has no single game-owned click receiver; nothing was clicked. Events: [{chain}]");
+            var data = new AtkEventData();
             markDispatchStarted();
-            addon->Confirm->ClickAddonButton(&addon->AtkUnitBase);
+            // The game's own click delivery: the registered ButtonClick receiver, its param, and
+            // a valid (zeroed) event payload. ClickAddonButton sent the node's *first* event with
+            // a null payload to the addon; on the Adjust Price editor that crashed the game.
+            click->Listener->ReceiveEvent(AtkEventType.ButtonClick, (int)click->Param, click, &data);
             return RetainerAutomationResult.Succeeded("RetainerMarketPriceConfirmationSent",
                 "Activated the verified listing's native confirmation button exactly once.");
         }
@@ -2319,32 +2330,47 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             throw new NativeCapabilityUnavailableException("The listing control is not uniquely owned by this addon.");
     }
 
-    // Evidence only. InnerSetValue changes the editor's local value and ClickAddonButton
-    // delivers straight to this addon's ReceiveEvent, so neither depends on which listener the
-    // node registered. Live Primary: the Adjust Price editor's price input was registered to a
-    // different receiver than the addon and this check, when fatal, refused every reprice. The
-    // binding guards are the exact-listing editor verification, the entered-value readback and
-    // the post-commit listing check.
-    private unsafe void LogUnownedEvent(string control, AtkUnitBase* addon, AtkResNode* node, AtkEventType eventType)
+    // Returns the node's ButtonClick event the game would deliver a click to: the single one
+    // owned by the addon, else the single one owned by another game object (vtable in the game
+    // module), else null. On the Adjust Price editor the addon is not assumed to be first or
+    // only. Receivers owned by plugins or Dalamud are never driven. `chain` describes
+    // every registered event so a refusal names what was actually there.
+    private static unsafe AtkEvent* FindGameButtonClick(AtkUnitBase* addon, AtkResNode* node, out string chain)
     {
-        var matches = 0;
-        var foreign = new List<string>();
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        var module = process.MainModule;
+        var moduleBase = module == null ? 0 : (long)module.BaseAddress;
+        var moduleEnd = module == null ? 0 : moduleBase + module.ModuleMemorySize;
+        var entries = new List<string>();
+        AtkEvent* addonClick = null;
+        AtkEvent* gameClick = null;
+        var addonClicks = 0;
+        var gameClicks = 0;
         var registered = (AtkEvent*)node->AtkEventManager.Event;
         var visited = new HashSet<nint>();
         while (registered != null && visited.Count < 128 && visited.Add((nint)registered))
         {
-            if (registered->State.EventType == eventType)
+            var listener = registered->Listener;
+            var vtable = listener == null ? 0 : (long)*(nint*)listener;
+            var inGame = vtable >= moduleBase && vtable < moduleEnd && moduleBase != 0;
+            var who = listener == null ? "null"
+                : (nint)listener == (nint)addon ? "addon"
+                : inGame ? $"game+0x{vtable - moduleBase:X}"
+                : $"external vtable 0x{vtable:X}";
+            entries.Add($"{registered->State.EventType} param {registered->Param} -> {who} 0x{(nint)listener:X}" +
+                        ((nint)registered->Node != (nint)node ? $" node 0x{(nint)registered->Node:X}" : string.Empty));
+            // The addon is recognised by identity: Dalamud swaps addon vtables for its lifecycle
+            // wrapper, so an addon's vtable is not inside the game module.
+            if (registered->State.EventType == AtkEventType.ButtonClick && listener != null &&
+                (nint)registered->Node == (nint)node)
             {
-                if ((nint)registered->Listener != (nint)addon || registered->Node != node)
-                    foreign.Add($"listener 0x{(nint)registered->Listener:X} node 0x{(nint)registered->Node:X} param {registered->Param}");
-                else
-                    matches++;
+                if ((nint)listener == (nint)addon) { addonClicks++; addonClick = registered; }
+                else if (inGame) { gameClicks++; gameClick = registered; }
             }
             registered = registered->NextEvent;
         }
-        if (matches != 1 || foreign.Count > 0)
-            log.Warning("RetainerSellEventOwnershipUnproven control={Control} event={Event} addon=0x{Addon:X} node=0x{Node:X} owned={Owned} foreign=[{Foreign}]",
-                control, eventType, (nint)addon, (nint)node, matches, string.Join("; ", foreign));
+        chain = string.Join("; ", entries);
+        return addonClicks == 1 ? addonClick : addonClicks == 0 && gameClicks == 1 ? gameClick : null;
     }
 
     private readonly record struct MarketSlotState(uint ItemId, int Quantity, bool IsHq, ulong UnitPrice)
