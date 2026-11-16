@@ -838,11 +838,12 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
     // The sell list's row order is not proven to equal container slot order, so rows are
     // probed: the compacted rank and raw slot of the requested listing first, then every
-    // other row. A row whose editor showed a different listing is skipped until the market
-    // contents change.
+    // other row. The list renders one row per listing, so rows at or past the listing count do
+    // not exist and are never probed. A row whose editor showed a different listing is skipped
+    // until the market contents change.
     private static int ChooseRepriceRow(RepriceSelectionState state, IReadOnlyList<int> occupied)
     {
-        var rowLimit = occupied.Count == 0 ? 0 : occupied[^1] + 1;
+        var rowLimit = occupied.Count;
         var candidates = new List<int>();
         var rank = -1;
         for (var index = 0; index < occupied.Count; index++)
@@ -850,7 +851,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 rank = index;
         if (rank >= 0)
             candidates.Add(rank);
-        candidates.Add(state.Current.SlotIndex);
+        if (state.Current.SlotIndex < rowLimit)
+            candidates.Add(state.Current.SlotIndex);
         for (var row = 0; row < rowLimit; row++)
             candidates.Add(row);
 
@@ -964,7 +966,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     // index). ClientStructs documents no start for it: Dalamud reads the item count from
     // value 0, places addon names after an 8-value header, and reads event ids/handlers from
     // index 7. Neither offset is assumed: the slice is accepted only when exactly one of the
-    // two candidate starts holds a run of exactly `count` strings, and the layout is reported.
+    // two candidate starts holds `count` strings after a non-string, and the layout is reported.
+    // Values past the count are not checked: the agent reuses its buffer, so a longer earlier
+    // menu leaves stale labels there (live: "Invite to Cross-world Linkshell" after a 3-item
+    // sell-list menu at 8..10).
     private static unsafe bool TryReadAgentContextLabels(
         FFXIVClientStructs.FFXIV.Client.UI.Agent.ContextMenu* context, out List<string> labels, out string layout)
     {
@@ -1002,7 +1007,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             var run = true;
             for (var index = start; index < start + count && run; index++)
                 run = IsMenuText(values[index]);
-            if (run && (start + count == values.Length || !IsMenuText(values[start + count])))
+            if (run)
                 starts.Add(start);
         }
         if (starts.Count != 1)
