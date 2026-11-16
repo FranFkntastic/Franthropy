@@ -634,16 +634,18 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (addon == null || !addon->AtkUnitBase.IsReady || !addon->AtkUnitBase.IsVisible ||
             addon->AskingPrice == null || addon->Quantity == null || addon->ItemName == null)
             return null;
-        var shownName = addon->ItemName->NodeText.ToString().Replace("\uE03C", string.Empty, StringComparison.Ordinal).Trim();
+        var rawName = addon->ItemName->NodeText.ToString();
+        var shownName = rawName.Replace("\uE03C", string.Empty, StringComparison.Ordinal).Trim();
+        var shownHq = RetainerSellingEditorPolicy.ShowsHighQuality(rawName);
         var shownQuantity = addon->Quantity->Value;
         var shownPrice = addon->AskingPrice->Value;
         var expectedName = dataManager.GetExcelSheet<Item>().GetRow(expected.ItemId).Name.ExtractText().Trim();
         if (string.IsNullOrWhiteSpace(shownName) || shownQuantity <= 0 || shownPrice <= 0)
             return null;
-        if (string.Equals(shownName, expectedName, StringComparison.Ordinal) &&
+        if (string.Equals(shownName, expectedName, StringComparison.Ordinal) && shownHq == expected.IsHq &&
             shownQuantity == expected.Quantity && shownPrice == expected.UnitPrice)
             return null;
-        return $"'{shownName}' x{shownQuantity} @ {shownPrice}";
+        return $"raw name '{rawName}' (hq={shownHq}) x{shownQuantity} @ {shownPrice}";
     }
 
     // After the Adjust Price callback only the editor's confirm can send a price, and this
@@ -1110,6 +1112,15 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         }
 
         var expected = opened.Listing with { UnitPrice = newUnitPrice };
+        // Identical listings (same item, quality, quantity and price) are indistinguishable in
+        // the editor, so the one it opened is not known. Capture them before confirming; the
+        // commit is accepted only when exactly one of them, and nothing else, changes.
+        var before = await framework.RunOnTick(CaptureMarketSlots, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var identical = before is null
+            ? new HashSet<int> { opened.Listing.SlotIndex }
+            : before.Where(entry => entry.Value.Matches(opened.Listing)).Select(entry => entry.Key).ToHashSet();
+        identical.Add(opened.Listing.SlotIndex);
+        var lastChanges = string.Empty;
         var mutationMayHaveBeenSent = false;
         try
         {
@@ -1124,16 +1135,23 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             for (var attempt = 0; attempt < 180 && commitClock.Elapsed < RepriceCommitObserveLimit; attempt++)
             {
                 var observed = await framework.RunOnTick(
-                    () => ObserveSellingListingPriceCommit(expected),
+                    () => ObserveSellingListingPriceCommit(expected, before, identical),
                     cancellationToken: cancellationToken).ConfigureAwait(false);
+                lastChanges = observed.Changes;
                 var action = RetainerMarketPriceUpdatePolicy.Decide(
-                    observed.Committed,
+                    observed.CommittedSlot >= 0,
                     observed.YesNoReady);
                 if (action == RetainerMarketPriceUpdateAction.Complete)
                 {
+                    if (observed.CommittedSlot != opened.Listing.SlotIndex)
+                        log.Information("RepriceCommitAdoptedIdenticalListing item={Item} requestedSlot={Requested} committedSlot={Committed} identicalSlots={Identical}",
+                            opened.Listing.ItemId, opened.Listing.SlotIndex, observed.CommittedSlot, string.Join(",", identical.Order()));
                     return RetainerAutomationResult.Succeeded(
                         "RetainerMarketPriceUpdated",
-                        "The exact live retainer listing committed the requested unit price.");
+                        observed.CommittedSlot == opened.Listing.SlotIndex
+                            ? $"The exact live retainer listing (slot {observed.CommittedSlot}) committed the requested unit price."
+                            : $"Identical listing slot {observed.CommittedSlot} (requested slot {opened.Listing.SlotIndex}; identical slots " +
+                              $"{string.Join(",", identical.Order())}) committed the requested unit price.");
                 }
                 if (action == RetainerMarketPriceUpdateAction.RejectUnexpectedConfirmation)
                 {
@@ -1147,7 +1165,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
             return RetainerAutomationResult.Failed(
                 "RetainerMarketPriceUpdateIndeterminate",
-                "The price request was sent, but its exact live postcondition was not observed. Re-scan before deciding whether to retry.");
+                "The price request was sent, but its exact live postcondition was not observed. Re-scan before deciding whether to retry." +
+                (identical.Count > 1
+                    ? $" Identical slots {string.Join(",", identical.Order())}; last observed: {(lastChanges.Length == 0 ? "no slot changed" : lastChanges)}."
+                    : string.Empty));
         }
         catch (OperationCanceledException exception) when (mutationMayHaveBeenSent)
         {
@@ -2266,7 +2287,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             !MatchesMarketListing(manager, container, listing.SlotIndex, listing))
             throw new NativeCapabilityUnavailableException("The exact retainer listing changed before editing.");
         var itemName = dataManager.GetExcelSheet<Item>().GetRow(listing.ItemId).Name.ExtractText();
-        RetainerSellingEditorPolicy.RequireListing(listing.Quantity, displayedPrice, itemName,
+        RetainerSellingEditorPolicy.RequireListing(listing.Quantity, displayedPrice, itemName, listing.IsHq,
             addon->Quantity->Value, addon->AskingPrice->Value, addon->ItemName->NodeText.ToString());
         return addon;
     }
@@ -2307,33 +2328,80 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             throw new NativeCapabilityUnavailableException("The listing control does not expose one owned native event.");
     }
 
-    private unsafe (bool Committed, bool YesNoReady) ObserveSellingListingPriceCommit(
-        RetainerMarketListingTarget expected)
+    private readonly record struct MarketSlotState(uint ItemId, int Quantity, bool IsHq, ulong UnitPrice)
+    {
+        public bool Matches(RetainerMarketListingTarget listing) =>
+            RetainerMarketListingObservation.Matches(listing, ItemId, Quantity, IsHq, UnitPrice);
+
+        public override string ToString() => $"item {ItemId}{(IsHq ? " HQ" : string.Empty)} x{Quantity} @ {UnitPrice}";
+    }
+
+    private static unsafe Dictionary<int, MarketSlotState>? CaptureMarketSlots()
     {
         var manager = InventoryManager.Instance();
         var container = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
-        var committed = false;
-        if (manager != null &&
-            container != null &&
-            container->IsLoaded &&
-            expected.SlotIndex >= 0 &&
-            expected.SlotIndex < container->Size)
+        if (manager == null || container == null || !container->IsLoaded)
+            return null;
+        var slots = new Dictionary<int, MarketSlotState>();
+        for (var index = 0; index < container->Size; index++)
         {
-            var slot = container->GetInventorySlot(expected.SlotIndex);
-            committed = slot != null &&
-                RetainerMarketPriceCommitObservation.Matches(
-                    expected,
-                    expected.SlotIndex,
-                    slot->ItemId,
-                    slot->Quantity,
-                    slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality),
-                    manager->GetRetainerMarketPrice(checked((short)expected.SlotIndex)),
-                    IsReady(SellingListingEditor));
+            var item = container->GetInventorySlot(index);
+            if (item == null || item->ItemId == 0 || item->Quantity == 0)
+                continue;
+            slots[index] = new(item->ItemId, (int)item->Quantity, item->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality),
+                manager->GetRetainerMarketPrice(checked((short)index)));
+        }
+        return slots;
+    }
+
+    // Returns the slot that committed the new price, or -1. With one identical listing only the
+    // requested slot is watched, as before. With several, exactly one of them must have changed,
+    // to the expected listing at the new price, and every other listing must be unchanged; zero
+    // or several changes are never accepted, so the caller's budget ends Indeterminate.
+    private unsafe (int CommittedSlot, string Changes, bool YesNoReady) ObserveSellingListingPriceCommit(
+        RetainerMarketListingTarget expected, IReadOnlyDictionary<int, MarketSlotState>? before, IReadOnlySet<int> identical)
+    {
+        var yesNo = IsReady(YesNo);
+        var editorReady = IsReady(SellingListingEditor);
+        if (identical.Count <= 1 || before is null)
+        {
+            var manager = InventoryManager.Instance();
+            var container = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
+            var committed = false;
+            if (manager != null &&
+                container != null &&
+                container->IsLoaded &&
+                expected.SlotIndex >= 0 &&
+                expected.SlotIndex < container->Size)
+            {
+                var slot = container->GetInventorySlot(expected.SlotIndex);
+                committed = slot != null &&
+                    RetainerMarketPriceCommitObservation.Matches(
+                        expected,
+                        expected.SlotIndex,
+                        slot->ItemId,
+                        slot->Quantity,
+                        slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality),
+                        manager->GetRetainerMarketPrice(checked((short)expected.SlotIndex)),
+                        editorReady);
+            }
+            return (committed ? expected.SlotIndex : -1, string.Empty, yesNo);
         }
 
-        return (
-            committed,
-            IsReady(YesNo));
+        var now = CaptureMarketSlots();
+        if (now is null || editorReady)
+            return (-1, now is null ? "market container not loaded" : "editor still open", yesNo);
+        var changed = before.Keys.Union(now.Keys)
+            .Where(index => !before.TryGetValue(index, out var old) || !now.TryGetValue(index, out var current) || old != current)
+            .Order()
+            .ToList();
+        var changes = string.Join("; ", changed.Select(index =>
+            $"slot {index}: {(before.TryGetValue(index, out var old) ? old.ToString() : "empty")} -> " +
+            $"{(now.TryGetValue(index, out var current) ? current.ToString() : "empty")}"));
+        if (changed.Count == 1 && identical.Contains(changed[0]) &&
+            now.TryGetValue(changed[0], out var committedSlot) && committedSlot.Matches(expected))
+            return (changed[0], changes, yesNo);
+        return (-1, changes, yesNo);
     }
 
     private static unsafe bool MatchesMarketListing(
@@ -2521,15 +2589,21 @@ internal static class RetainerClosingPolicy
 
 internal static class RetainerSellingEditorPolicy
 {
-    public static void RequireListing(int expectedQuantity, uint expectedPrice, string expectedName,
+    // The editor renders HQ items with the SeIconChar.HighQuality glyph in the item name;
+    // its presence must equal the listing's quality, or the other-quality stack would pass.
+    public static bool ShowsHighQuality(string displayedName) =>
+        displayedName.Contains('\uE03C');
+
+    public static void RequireListing(int expectedQuantity, uint expectedPrice, string expectedName, bool expectedHq,
         int displayedQuantity, int displayedPrice, string displayedName)
     {
+        var displayedHq = ShowsHighQuality(displayedName);
         if (expectedQuantity <= 0 || expectedPrice == 0 || expectedPrice > int.MaxValue ||
-            displayedQuantity != expectedQuantity || displayedPrice != expectedPrice ||
+            displayedQuantity != expectedQuantity || displayedPrice != expectedPrice || displayedHq != expectedHq ||
             string.IsNullOrWhiteSpace(expectedName) || !string.Equals(expectedName.Trim(),
                 displayedName.Replace("\uE03C", string.Empty, StringComparison.Ordinal).Trim(), StringComparison.Ordinal))
             throw new NativeCapabilityUnavailableException(
-                $"The rendered listing '{displayedName.Replace("", string.Empty, StringComparison.Ordinal).Trim()}' x{displayedQuantity} @ {displayedPrice} " +
-                $"does not match the exact observed listing '{expectedName}' x{expectedQuantity} @ {expectedPrice}.");
+                $"The rendered listing raw name '{displayedName}' (hq={displayedHq}) x{displayedQuantity} @ {displayedPrice} " +
+                $"does not match the exact observed listing '{expectedName}' (hq={expectedHq}) x{expectedQuantity} @ {expectedPrice}.");
     }
 }
