@@ -2243,7 +2243,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 throw new NativeCapabilityUnavailableException("An exact observed listing price is required before editing."));
             NativeCapabilityGuard.RequireAddress(AtkComponentNumericInput.Addresses.InnerSetValue.Value,
                 "Retainer price numeric input");
-            RequireOwnedEvent(&addon->AtkUnitBase, &addon->AskingPrice->OwnerNode->AtkResNode, AtkEventType.ValueUpdate);
+            LogUnownedEvent("price input", &addon->AtkUnitBase, &addon->AskingPrice->OwnerNode->AtkResNode, AtkEventType.ValueUpdate);
             addon->AskingPrice->InnerSetValue(checked((int)newUnitPrice), triggerCallback: true, playSoundEffect: false);
             if (addon->AskingPrice->Value != newUnitPrice)
                 throw new NativeCapabilityUnavailableException("The listing price input rejected the requested value.");
@@ -2263,7 +2263,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         {
             var addon = RequireSellingEditor(listing, newUnitPrice);
             NativeCapabilityGuard.RequireIdentity((nint)addon, capturedEditor, "Retainer listing editor");
-            RequireOwnedEvent(&addon->AtkUnitBase, &addon->Confirm->OwnerNode->AtkResNode, AtkEventType.ButtonClick);
+            LogUnownedEvent("confirm button", &addon->AtkUnitBase, &addon->Confirm->OwnerNode->AtkResNode, AtkEventType.ButtonClick);
             if (!addon->Confirm->IsEnabled)
                 throw new NativeCapabilityUnavailableException("The listing confirmation button is disabled.");
             markDispatchStarted();
@@ -2319,25 +2319,32 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             throw new NativeCapabilityUnavailableException("The listing control is not uniquely owned by this addon.");
     }
 
-    private static unsafe void RequireOwnedEvent(AtkUnitBase* addon, AtkResNode* node, AtkEventType eventType)
+    // Evidence only. InnerSetValue changes the editor's local value and ClickAddonButton
+    // delivers straight to this addon's ReceiveEvent, so neither depends on which listener the
+    // node registered. Live Primary: the Adjust Price editor's price input was registered to a
+    // different receiver than the addon and this check, when fatal, refused every reprice. The
+    // binding guards are the exact-listing editor verification, the entered-value readback and
+    // the post-commit listing check.
+    private unsafe void LogUnownedEvent(string control, AtkUnitBase* addon, AtkResNode* node, AtkEventType eventType)
     {
         var matches = 0;
+        var foreign = new List<string>();
         var registered = (AtkEvent*)node->AtkEventManager.Event;
         var visited = new HashSet<nint>();
-        while (registered != null)
+        while (registered != null && visited.Count < 128 && visited.Add((nint)registered))
         {
-            if (visited.Count >= 128 || !visited.Add((nint)registered))
-                throw new NativeCapabilityUnavailableException("The listing control's event chain is unsupported.");
             if (registered->State.EventType == eventType)
             {
                 if ((nint)registered->Listener != (nint)addon || registered->Node != node)
-                    throw new NativeCapabilityUnavailableException("The listing event belongs to another native receiver.");
-                matches++;
+                    foreign.Add($"listener 0x{(nint)registered->Listener:X} node 0x{(nint)registered->Node:X} param {registered->Param}");
+                else
+                    matches++;
             }
             registered = registered->NextEvent;
         }
-        if (matches != 1)
-            throw new NativeCapabilityUnavailableException("The listing control does not expose one owned native event.");
+        if (matches != 1 || foreign.Count > 0)
+            log.Warning("RetainerSellEventOwnershipUnproven control={Control} event={Event} addon=0x{Addon:X} node=0x{Node:X} owned={Owned} foreign=[{Foreign}]",
+                control, eventType, (nint)addon, (nint)node, matches, string.Join("; ", foreign));
     }
 
     private readonly record struct MarketSlotState(uint ItemId, int Quantity, bool IsHq, ulong UnitPrice)
