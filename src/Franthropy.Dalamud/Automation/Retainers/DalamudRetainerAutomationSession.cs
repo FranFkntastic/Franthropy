@@ -1141,7 +1141,18 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                     () => mutationMayHaveBeenSent = true),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             if (!confirmed.Success)
+            {
+                // A refusal before dispatch left the editor open, which blocked every later
+                // reprice in the run (live Primary); close it exactly as the price-entry path does.
+                if (!mutationMayHaveBeenSent)
+                {
+                    var unsent = await CloseUnconfirmedEditorAndProveUnsentAsync(new RepriceSelectionState(opened.Listing)).ConfigureAwait(false);
+                    if (unsent is not null)
+                        log.Warning("RepriceConfirmRefusalEditorNotProvenClosed slot={Slot} item={Item}: {Reason}",
+                            opened.Listing.SlotIndex, opened.Listing.ItemId, unsent);
+                }
                 return confirmed;
+            }
 
             var commitClock = System.Diagnostics.Stopwatch.StartNew();
             for (var attempt = 0; attempt < 180 && commitClock.Elapsed < RepriceCommitObserveLimit; attempt++)
@@ -2276,8 +2287,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             var data = new AtkEventData();
             markDispatchStarted();
             // The game's own click delivery: the registered ButtonClick receiver, its param, and
-            // a valid (zeroed) event payload. ClickAddonButton sent the node's *first* event with
-            // a null payload to the addon; on the Adjust Price editor that crashed the game.
+            // a valid (zeroed) event payload. ClickAddonButton passes a null payload, and
+            // AddonRetainerSell.ReceiveEvent reads a flag byte from it on Confirm (param 21),
+            // which crashed the game. Zeroed, that flag selects the normal commit callback.
             click->Listener->ReceiveEvent(AtkEventType.ButtonClick, (int)click->Param, click, &data);
             return RetainerAutomationResult.Succeeded("RetainerMarketPriceConfirmationSent",
                 "Activated the verified listing's native confirmation button exactly once.");
@@ -2361,8 +2373,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                         ((nint)registered->Node != (nint)node ? $" node 0x{(nint)registered->Node:X}" : string.Empty));
             // The addon is recognised by identity: Dalamud swaps addon vtables for its lifecycle
             // wrapper, so an addon's vtable is not inside the game module.
+            // Live Primary: the editor's Confirm registers ButtonClick (param 21) to the addon with
+            // a null event Node, so a null Node is accepted; a different node is not.
             if (registered->State.EventType == AtkEventType.ButtonClick && listener != null &&
-                (nint)registered->Node == (nint)node)
+                (registered->Node == null || (nint)registered->Node == (nint)node))
             {
                 if ((nint)listener == (nint)addon) { addonClicks++; addonClick = registered; }
                 else if (inGame) { gameClicks++; gameClick = registered; }
