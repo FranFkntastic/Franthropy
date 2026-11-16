@@ -582,7 +582,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                         $"(closed without confirming): {direct.Message}");
                 }
                 case AdjustPriceGateKind.DispatchUnacknowledged:
-                    return await AbandonUnsentEditorAsync(state,
+                    return await AbandonUnsentEditorAsync(state, row,
                         "the ContextMenu did not acknowledge the Adjust Price callback", cancellationToken).ConfigureAwait(false);
                 case AdjustPriceGateKind.Dispatched:
                     return await CompleteAdjustPriceDispatchAsync(state, row, cancellationToken).ConfigureAwait(false);
@@ -598,7 +598,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         RepriceSelectionState state, int row, CancellationToken cancellationToken)
     {
         if (!await WaitUntilAsync(() => IsReady(SellingListingEditor), cancellationToken, RepriceEditorAppearLimit).ConfigureAwait(false))
-            return await AbandonUnsentEditorAsync(state,
+            return await AbandonUnsentEditorAsync(state, row,
                 $"its editor did not become ready within {RepriceEditorAppearLimit.TotalSeconds:0}s", cancellationToken).ConfigureAwait(false);
 
         var exact = state.Current;
@@ -607,7 +607,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             return RepriceAttemptOutcome.Final(editor, exact);
         var shown = await framework.RunOnTick(() => DescribeDifferentEditorListing(exact), cancellationToken: cancellationToken).ConfigureAwait(false);
         if (shown is null)
-            return await AbandonUnsentEditorAsync(state, $"its editor failed verification ({editor.Message})", cancellationToken).ConfigureAwait(false);
+            return await AbandonUnsentEditorAsync(state, row, $"its editor failed verification ({editor.Message})", cancellationToken).ConfigureAwait(false);
 
         var reason = $"row {row} opened the editor for {shown}, not {DescribeListing(exact)}";
         var proofFailure = await CloseUnconfirmedEditorAndProveUnsentAsync(state).ConfigureAwait(false);
@@ -648,19 +648,23 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
     // After the Adjust Price callback only the editor's confirm can send a price, and this
     // session has not clicked it. Close the editor/menu without confirming, then prove the
-    // listing still holds its exact requested identity and old price. Only then is the result
-    // failed-before-send; anything unproven (a confirmation appeared, a surface would not
-    // close, the listing changed) stays Indeterminate. Adjust Price is never fired again.
+    // listing still holds its exact requested identity and old price. Proven unsent, nothing
+    // reached the server, so the attempt is an ordinary pre-send failure and selection may be
+    // retried within the remaining budget. Anything unproven (a confirmation appeared, a
+    // surface would not close, the listing changed) stays Indeterminate and is never retried.
     private async Task<RepriceAttemptOutcome> AbandonUnsentEditorAsync(
-        RepriceSelectionState state, string reason, CancellationToken cancellationToken)
+        RepriceSelectionState state, int row, string reason, CancellationToken cancellationToken)
     {
         var proofFailure = await CloseUnconfirmedEditorAndProveUnsentAsync(state).ConfigureAwait(false);
         if (proofFailure is null)
         {
-            log.Warning("RepriceEditorAbandonedUnsent slot={Slot} item={Item}: {Reason}", state.Current.SlotIndex, state.Current.ItemId, reason);
-            return RepriceAttemptOutcome.Final(RetainerAutomationResult.Failed("RetainerRepriceEditorAbandonedUnsent",
-                $"Adjust Price was dispatched once, but {reason}. The editor was closed without confirming and " +
-                $"{DescribeListing(state.Requested with { SlotIndex = state.Current.SlotIndex })} is unchanged; nothing was sent."));
+            log.Warning("RepriceEditorAbandonedUnsent slot={Slot} item={Item} row={Row}: {Reason}", state.Current.SlotIndex, state.Current.ItemId, row, reason);
+            state.AdjustDispatched = false;
+            state.OwnsSurface = false;
+            state.RecordRowFailure(row);
+            return RepriceAttemptOutcome.Retry(row,
+                $"Adjust Price was dispatched once, but {reason}; the editor was closed without confirming and " +
+                $"{DescribeListing(state.Requested with { SlotIndex = state.Current.SlotIndex })} is unchanged (proven unsent)");
         }
         return RepriceAttemptOutcome.Final(RetainerAutomationResult.Failed("RetainerSellingListingSelectionIndeterminate",
             $"Adjust Price was dispatched once, but {reason}; it could not be proven unsent: {proofFailure}"));
@@ -909,7 +913,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         var ownership = $"row {row}, expected slot {state.Current.SlotIndex}, RetainerSellList addon id {sellList->Id}, " +
             $"AgentContext owner addon {agent->OwnerAddon}, ContextMenu blocked parent {menu->BlockedParentId}, " +
             $"AgentContext active {agent->IsAgentActive()}, UpdateCheckerParam {agent->UpdateCheckerParam}";
-        if (agent->OwnerAddon != sellList->Id || menu->BlockedParentId != sellList->Id)
+        // BlockedParentId is the same field Dalamud uses to name a menu's parent addon (it
+        // logged RetainerSellList for these menus live). OwnerAddon has not been observed
+        // live, so it is recorded as evidence only.
+        if (menu->BlockedParentId != sellList->Id)
             return AdjustPriceGate.Wait($"the open menu is not owned by RetainerSellList ({ownership})");
         if (context == null)
             return AdjustPriceGate.Wait($"AgentContext has no current context menu ({ownership})");
