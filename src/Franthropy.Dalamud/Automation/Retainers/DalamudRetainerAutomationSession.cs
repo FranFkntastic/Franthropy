@@ -142,6 +142,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
         public Dictionary<int, int> RowFailures { get; } = [];
 
+        /// <summary>Rows already scrolled into view once; a second scroll for the same row counts as a failure.</summary>
+        public HashSet<int> ScrolledRows { get; } = [];
+
         public void RecordRowFailure(int row) => RowFailures[row] = RowFailures.GetValueOrDefault(row) + 1;
 
         public void ObserveMarket(string fingerprint)
@@ -831,7 +834,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         var activated = renderedUi.TryActivateListRowIndex(SellingList, row);
         if (!activated.Success)
         {
-            state.RecordRowFailure(row);
+            // A row scrolled into view is not a row failure: the same row is retried next.
+            if (activated.Code != "RenderedListRowScrolledIntoView" || !state.ScrolledRows.Add(row))
+                state.RecordRowFailure(row);
             return RepriceAttemptOutcome.Retry(row, $"row activation refused before dispatch: {activated.Code}: {activated.Message}");
         }
         state.OwnsSurface = true;

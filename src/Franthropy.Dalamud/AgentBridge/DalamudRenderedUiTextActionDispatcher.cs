@@ -266,6 +266,22 @@ public sealed class DalamudRenderedUiTextActionDispatcher
         var matches = new List<(nint ListNode, nint RowNode)>();
         FindListRows(&addon->UldManager, rowIndex, matches, new HashSet<nint>());
         matches = [.. matches.GroupBy(match => match.ListNode).Select(group => group.First())];
+        if (matches.Count == 0 && expectedRow == 0)
+        {
+            // A scrolling list only renders the rows in view. When exactly one visible list
+            // holds the requested index, scroll it into view (a local UI change; nothing is
+            // dispatched) and let the caller retry on a later frame.
+            var lists = new List<nint>();
+            FindListsContainingIndex(&addon->UldManager, rowIndex, lists, new HashSet<nint>());
+            if (lists.Count == 1)
+            {
+                var scrollList = (AtkComponentList*)((AtkComponentNode*)lists[0])->Component;
+                scrollList->ScrollToItem(checked((short)rowIndex));
+                return Fail("RenderedListRowScrolledIntoView",
+                    $"Row {rowIndex} of {scrollList->ListLength} was not rendered; the list was scrolled to it. Retry on a later frame.",
+                    addonName);
+            }
+        }
         if (matches.Count != 1)
         {
             var candidates = new List<string>();
@@ -562,6 +578,24 @@ public sealed class DalamudRenderedUiTextActionDispatcher
             }
 
             FindListRows(&componentNode->Component->UldManager, rowIndex, matches, visited);
+        }
+    }
+
+    private static unsafe void FindListsContainingIndex(
+        AtkUldManager* manager, int rowIndex, List<nint> lists, HashSet<nint> visited)
+    {
+        if (manager == null || manager->NodeList == null || !visited.Add((nint)manager))
+            return;
+        for (var index = 0; index < manager->NodeListCount; index++)
+        {
+            var node = manager->NodeList[index];
+            var componentNode = node == null ? null : node->GetAsAtkComponentNode();
+            if (componentNode == null || componentNode->Component == null)
+                continue;
+            if (componentNode->Component->GetComponentType() == ComponentType.List && IsEffectivelyVisible(node) &&
+                rowIndex < ((AtkComponentList*)componentNode->Component)->ListLength)
+                lists.Add((nint)componentNode);
+            FindListsContainingIndex(&componentNode->Component->UldManager, rowIndex, lists, visited);
         }
     }
 
