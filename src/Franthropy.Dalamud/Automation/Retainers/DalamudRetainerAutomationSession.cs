@@ -142,6 +142,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
         public Dictionary<int, int> RowFailures { get; } = [];
 
+        /// <summary>Rows already scrolled into view once; a second scroll for the same row counts as a failure.</summary>
+        public HashSet<int> ScrolledRows { get; } = [];
+
         public void RecordRowFailure(int row) => RowFailures[row] = RowFailures.GetValueOrDefault(row) + 1;
 
         public void ObserveMarket(string fingerprint)
@@ -634,7 +637,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (addon == null || !addon->AtkUnitBase.IsReady || !addon->AtkUnitBase.IsVisible ||
             addon->AskingPrice == null || addon->Quantity == null || addon->ItemName == null)
             return null;
-        var rawName = addon->ItemName->NodeText.ToString();
+        // NodeText is an SeString: Adjust Price renders the name inside colour/link macros,
+        // so only its extracted text (which keeps the literal HQ glyph) is comparable.
+        var rawName = addon->ItemName->NodeText.ExtractText();
         var shownName = rawName.Replace("\uE03C", string.Empty, StringComparison.Ordinal).Trim();
         var shownHq = RetainerSellingEditorPolicy.ShowsHighQuality(rawName);
         var shownQuantity = addon->Quantity->Value;
@@ -829,7 +834,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         var activated = renderedUi.TryActivateListRowIndex(SellingList, row);
         if (!activated.Success)
         {
-            state.RecordRowFailure(row);
+            // A row scrolled into view is not a row failure: the same row is retried next.
+            if (activated.Code != "RenderedListRowScrolledIntoView" || !state.ScrolledRows.Add(row))
+                state.RecordRowFailure(row);
             return RepriceAttemptOutcome.Retry(row, $"row activation refused before dispatch: {activated.Code}: {activated.Message}");
         }
         state.OwnsSurface = true;
@@ -2293,7 +2300,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             throw new NativeCapabilityUnavailableException("The exact retainer listing changed before editing.");
         var itemName = dataManager.GetExcelSheet<Item>().GetRow(listing.ItemId).Name.ExtractText();
         RetainerSellingEditorPolicy.RequireListing(listing.Quantity, displayedPrice, itemName, listing.IsHq,
-            addon->Quantity->Value, addon->AskingPrice->Value, addon->ItemName->NodeText.ToString());
+            addon->Quantity->Value, addon->AskingPrice->Value, addon->ItemName->NodeText.ExtractText());
         return addon;
     }
 
