@@ -83,7 +83,6 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private enum AdjustPriceGateKind
     {
         Waiting,
-        WrongListing,
         Failed,
         HardStop,
         EditorOpened,
@@ -138,8 +137,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
         public List<string> Attempts { get; } = [];
 
-        /// <summary>Sell-list row to the physical market slot its menu was observed to target.</summary>
-        public Dictionary<int, int> RowSlots { get; } = [];
+        /// <summary>Sell-list rows whose Adjust Price editor showed a different listing (closed unsent).</summary>
+        public HashSet<int> WrongRows { get; } = [];
 
         public Dictionary<int, int> RowFailures { get; } = [];
 
@@ -150,7 +149,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             if (marketFingerprint == fingerprint)
                 return;
             marketFingerprint = fingerprint;
-            RowSlots.Clear();
+            WrongRows.Clear();
             RowFailures.Clear();
         }
     }
@@ -558,13 +557,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 case AdjustPriceGateKind.Failed:
                     state.RecordRowFailure(row);
                     return RepriceAttemptOutcome.Retry(row, gate.Condition);
-                case AdjustPriceGateKind.Waiting or AdjustPriceGateKind.WrongListing
+                case AdjustPriceGateKind.Waiting
                     when settle < RepriceReadinessSettleFrames && settleClock.Elapsed < RepriceSettleLimit:
                     await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
                     continue;
-                case AdjustPriceGateKind.WrongListing:
-                    state.RowSlots[row] = gate.Slot;
-                    return RepriceAttemptOutcome.Retry(row, gate.Condition);
                 case AdjustPriceGateKind.Waiting:
                     state.RecordRowFailure(row);
                     return RepriceAttemptOutcome.Retry(row, $"still not ready after {settle + 1} frames / {settleClock.Elapsed.TotalSeconds:0.0}s: {gate.Condition}");
@@ -575,54 +571,102 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                     var direct = await framework.RunOnTick(() => VerifySellingEditor(state.Current), cancellationToken: cancellationToken).ConfigureAwait(false);
                     if (direct.Success)
                         return RepriceAttemptOutcome.Final(direct, state.Current);
-                    // The editor exposes no slot, so no row-to-slot mapping can be learned; the
-                    // failure count moves probing on to the next candidate row instead.
+                    // The editor exposes no slot; a row shown to open a different listing is
+                    // skipped, otherwise the failure count moves probing on to the next row.
                     state.RecordRowFailure(row);
+                    var shown = await framework.RunOnTick(() => DescribeDifferentEditorListing(state.Current), cancellationToken: cancellationToken).ConfigureAwait(false);
+                    if (shown is not null)
+                        state.WrongRows.Add(row);
                     await ReleaseOwnedRepriceSurfacesAsync(state, cancellationToken).ConfigureAwait(false);
                     return RepriceAttemptOutcome.Retry(row, $"row opened the editor directly, but it does not show the exact listing " +
                         $"(closed without confirming): {direct.Message}");
                 }
                 case AdjustPriceGateKind.DispatchUnacknowledged:
-                    return await AbandonUnsentEditorAsync(state,
+                    return await AbandonUnsentEditorAsync(state, row,
                         "the ContextMenu did not acknowledge the Adjust Price callback", cancellationToken).ConfigureAwait(false);
                 case AdjustPriceGateKind.Dispatched:
-                    state.RowSlots[row] = gate.Slot;
-                    return await CompleteAdjustPriceDispatchAsync(state, cancellationToken).ConfigureAwait(false);
+                    return await CompleteAdjustPriceDispatchAsync(state, row, cancellationToken).ConfigureAwait(false);
             }
         }
     }
 
-    // Post-dispatch: Adjust Price was fired exactly once. Unproven outcomes stay
-    // Indeterminate and are never retried, so no second callback or price is ever sent.
+    // Post-dispatch: Adjust Price was fired exactly once, and only the editor's Confirm can
+    // send a price. The editor is the binding proof: the menu names no slot. An editor showing
+    // a different listing that is then proven closed unsent is a recoverable wrong row; every
+    // unproven outcome stays Indeterminate and is never retried.
     private async Task<RepriceAttemptOutcome> CompleteAdjustPriceDispatchAsync(
-        RepriceSelectionState state, CancellationToken cancellationToken)
+        RepriceSelectionState state, int row, CancellationToken cancellationToken)
     {
         if (!await WaitUntilAsync(() => IsReady(SellingListingEditor), cancellationToken, RepriceEditorAppearLimit).ConfigureAwait(false))
-            return await AbandonUnsentEditorAsync(state,
+            return await AbandonUnsentEditorAsync(state, row,
                 $"its editor did not become ready within {RepriceEditorAppearLimit.TotalSeconds:0}s", cancellationToken).ConfigureAwait(false);
 
         var exact = state.Current;
         var editor = await framework.RunOnTick(() => VerifySellingEditor(exact), cancellationToken: cancellationToken).ConfigureAwait(false);
-        return editor.Success
-            ? RepriceAttemptOutcome.Final(editor, exact)
-            : await AbandonUnsentEditorAsync(state, $"its editor failed verification ({editor.Message})", cancellationToken).ConfigureAwait(false);
+        if (editor.Success)
+            return RepriceAttemptOutcome.Final(editor, exact);
+        var shown = await framework.RunOnTick(() => DescribeDifferentEditorListing(exact), cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (shown is null)
+            return await AbandonUnsentEditorAsync(state, row, $"its editor failed verification ({editor.Message})", cancellationToken).ConfigureAwait(false);
+
+        var reason = $"row {row} opened the editor for {shown}, not {DescribeListing(exact)}";
+        var proofFailure = await CloseUnconfirmedEditorAndProveUnsentAsync(state).ConfigureAwait(false);
+        if (proofFailure is not null)
+            return RepriceAttemptOutcome.Final(RetainerAutomationResult.Failed("RetainerSellingListingSelectionIndeterminate",
+                $"Adjust Price was dispatched once, but {reason}; it could not be proven unsent: {proofFailure}"));
+        // Proven unsent: the editor was closed unconfirmed, no SelectYesno appeared, and the
+        // requested listing still holds its old price. Another row may now be tried.
+        state.AdjustDispatched = false;
+        state.OwnsSurface = false;
+        state.WrongRows.Add(row);
+        state.RecordRowFailure(row);
+        log.Warning("RepriceWrongRowClosedUnsent slot={Slot} item={Item} row={Row}: {Reason}",
+            exact.SlotIndex, exact.ItemId, row, reason);
+        return RepriceAttemptOutcome.Retry(row, $"{reason}; closed without confirming and proven unsent");
+    }
+
+    // Describes what the open RetainerSell editor shows when it is readable and is not the
+    // expected listing; null when it matches or cannot be read, so an unreadable editor is
+    // never classified as a different (retryable) listing.
+    private unsafe string? DescribeDifferentEditorListing(RetainerMarketListingTarget expected)
+    {
+        var addon = gameGui.GetAddonByName<AddonRetainerSell>(SellingListingEditor, 1);
+        if (addon == null || !addon->AtkUnitBase.IsReady || !addon->AtkUnitBase.IsVisible ||
+            addon->AskingPrice == null || addon->Quantity == null || addon->ItemName == null)
+            return null;
+        var rawName = addon->ItemName->NodeText.ToString();
+        var shownName = rawName.Replace("\uE03C", string.Empty, StringComparison.Ordinal).Trim();
+        var shownHq = RetainerSellingEditorPolicy.ShowsHighQuality(rawName);
+        var shownQuantity = addon->Quantity->Value;
+        var shownPrice = addon->AskingPrice->Value;
+        var expectedName = dataManager.GetExcelSheet<Item>().GetRow(expected.ItemId).Name.ExtractText().Trim();
+        if (string.IsNullOrWhiteSpace(shownName) || shownQuantity <= 0 || shownPrice <= 0)
+            return null;
+        if (string.Equals(shownName, expectedName, StringComparison.Ordinal) && shownHq == expected.IsHq &&
+            shownQuantity == expected.Quantity && shownPrice == expected.UnitPrice)
+            return null;
+        return $"raw name '{rawName}' (hq={shownHq}) x{shownQuantity} @ {shownPrice}";
     }
 
     // After the Adjust Price callback only the editor's confirm can send a price, and this
     // session has not clicked it. Close the editor/menu without confirming, then prove the
-    // listing still holds its exact requested identity and old price. Only then is the result
-    // failed-before-send; anything unproven (a confirmation appeared, a surface would not
-    // close, the listing changed) stays Indeterminate. Adjust Price is never fired again.
+    // listing still holds its exact requested identity and old price. Proven unsent, nothing
+    // reached the server, so the attempt is an ordinary pre-send failure and selection may be
+    // retried within the remaining budget. Anything unproven (a confirmation appeared, a
+    // surface would not close, the listing changed) stays Indeterminate and is never retried.
     private async Task<RepriceAttemptOutcome> AbandonUnsentEditorAsync(
-        RepriceSelectionState state, string reason, CancellationToken cancellationToken)
+        RepriceSelectionState state, int row, string reason, CancellationToken cancellationToken)
     {
         var proofFailure = await CloseUnconfirmedEditorAndProveUnsentAsync(state).ConfigureAwait(false);
         if (proofFailure is null)
         {
-            log.Warning("RepriceEditorAbandonedUnsent slot={Slot} item={Item}: {Reason}", state.Current.SlotIndex, state.Current.ItemId, reason);
-            return RepriceAttemptOutcome.Final(RetainerAutomationResult.Failed("RetainerRepriceEditorAbandonedUnsent",
-                $"Adjust Price was dispatched once, but {reason}. The editor was closed without confirming and " +
-                $"{DescribeListing(state.Requested with { SlotIndex = state.Current.SlotIndex })} is unchanged; nothing was sent."));
+            log.Warning("RepriceEditorAbandonedUnsent slot={Slot} item={Item} row={Row}: {Reason}", state.Current.SlotIndex, state.Current.ItemId, row, reason);
+            state.AdjustDispatched = false;
+            state.OwnsSurface = false;
+            state.RecordRowFailure(row);
+            return RepriceAttemptOutcome.Retry(row,
+                $"Adjust Price was dispatched once, but {reason}; the editor was closed without confirming and " +
+                $"{DescribeListing(state.Requested with { SlotIndex = state.Current.SlotIndex })} is unchanged (proven unsent)");
         }
         return RepriceAttemptOutcome.Final(RetainerAutomationResult.Failed("RetainerSellingListingSelectionIndeterminate",
             $"Adjust Price was dispatched once, but {reason}; it could not be proven unsent: {proofFailure}"));
@@ -781,7 +825,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         }
         state.ObserveMarket(fingerprint.ToString());
 
-        var row = ChooseRepriceRow(state, occupied, candidate => MatchesMarketListing(manager, container, candidate, state.Current));
+        var row = ChooseRepriceRow(state, occupied);
         var activated = renderedUi.TryActivateListRowIndex(SellingList, row);
         if (!activated.Success)
         {
@@ -793,16 +837,13 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     }
 
     // The sell list's row order is not proven to equal container slot order, so rows are
-    // probed: rows already seen targeting a matching slot first, then the compacted rank
-    // and raw slot of the requested listing, then every other row. A row seen targeting a
-    // different listing is skipped until the market contents change.
-    private static int ChooseRepriceRow(RepriceSelectionState state, IReadOnlyList<int> occupied, Func<int, bool> matches)
+    // probed: the compacted rank and raw slot of the requested listing first, then every
+    // other row. A row whose editor showed a different listing is skipped until the market
+    // contents change.
+    private static int ChooseRepriceRow(RepriceSelectionState state, IReadOnlyList<int> occupied)
     {
         var rowLimit = occupied.Count == 0 ? 0 : occupied[^1] + 1;
         var candidates = new List<int>();
-        foreach (var (knownRow, knownSlot) in state.RowSlots)
-            if (matches(knownSlot))
-                candidates.Add(knownRow);
         var rank = -1;
         for (var index = 0; index < occupied.Count; index++)
             if (occupied[index] == state.Current.SlotIndex)
@@ -815,13 +856,13 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
         var choice = candidates
             .Distinct()
-            .Where(row => !(state.RowSlots.TryGetValue(row, out var known) && !matches(known)))
+            .Where(row => !state.WrongRows.Contains(row))
             .OrderBy(row => state.RowFailures.GetValueOrDefault(row))
             .Select(row => (int?)row)
             .FirstOrDefault();
         if (choice is { } chosen)
             return chosen;
-        state.RowSlots.Clear();
+        state.WrongRows.Clear();
         return rank >= 0 ? rank : state.Current.SlotIndex;
     }
 
@@ -840,6 +881,12 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     // One tick of the Adjust Price gate. Each refusal names the exact condition and its
     // observed values. The callback fires at most once, only after every check passes on
     // the same tick, and AdjustDispatched is set before it so no later path can resend.
+    //
+    // The sell list's row menu is opened through AgentContext (Dalamud classifies it as the
+    // Default menu type), not AgentInventoryContext, and AgentContext records no inventory
+    // target. Ownership is therefore proven by the RetainerSellList addon owning both the
+    // agent's menu and the visible ContextMenu addon; which listing the row named is proven
+    // after dispatch by the RetainerSell editor, which sends nothing until it is confirmed.
     private unsafe AdjustPriceGate EvaluateAdjustPriceGate(RepriceSelectionState state, int row, ref string? previousLabels)
     {
         var verified = VerifyActive(active?.RetainerId ?? 0);
@@ -857,44 +904,39 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             return AdjustPriceGate.Wait("ContextMenu and RetainerSell are both open");
         if (IsReady(YesNo))
             return AdjustPriceGate.Wait("an unowned SelectYesno is open");
-        var agent = AgentInventoryContext.Instance();
+        var sellList = gameGui.GetAddonByName<AtkUnitBase>(SellingList, 1);
+        var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
+        if (sellList == null || menu == null)
+            return AdjustPriceGate.Wait("the RetainerSellList or ContextMenu addon pointer is unavailable");
+        var agent = AgentContext.Instance();
         if (agent == null)
-            return AdjustPriceGate.Wait("AgentInventoryContext is unavailable");
-        var manager = InventoryManager.Instance();
-        var container = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
-        if (manager == null || container == null || !container->IsLoaded)
-            return AdjustPriceGate.Wait("the RetainerMarket container is not loaded");
-
-        var target = ResolveMenuTargetSlot(agent, container, out var targetEvidence);
-        if (target < 0)
-            return AdjustPriceGate.Wait($"menu target {targetEvidence}");
-        if (!MatchesMarketListing(manager, container, target, state.Current))
-            return new(AdjustPriceGateKind.WrongListing, target,
-                $"menu targets slot {target} holding {DescribeMarketSlot(manager, container, target)}, not {DescribeListing(state.Current)} ({targetEvidence})");
+            return AdjustPriceGate.Wait("AgentContext is unavailable");
+        var context = agent->CurrentContextMenu;
+        var ownership = $"row {row}, expected slot {state.Current.SlotIndex}, RetainerSellList addon id {sellList->Id}, " +
+            $"AgentContext owner addon {agent->OwnerAddon}, ContextMenu blocked parent {menu->BlockedParentId}, " +
+            $"AgentContext active {agent->IsAgentActive()}, UpdateCheckerParam {agent->UpdateCheckerParam}";
+        // BlockedParentId is the same field Dalamud uses to name a menu's parent addon (it
+        // logged RetainerSellList for these menus live). OwnerAddon has not been observed
+        // live, so it is recorded as evidence only.
+        if (menu->BlockedParentId != sellList->Id)
+            return AdjustPriceGate.Wait($"the open menu is not owned by RetainerSellList ({ownership})");
+        if (context == null)
+            return AdjustPriceGate.Wait($"AgentContext has no current context menu ({ownership})");
 
         // Addon 959 is the localized market-list context action, not a guessed menu position.
         var label = ResolveAddonText(959);
         if (string.IsNullOrWhiteSpace(label))
-            return new(AdjustPriceGateKind.Failed, target, "Addon 959 (Adjust Price) has no localized text");
-        var start = agent->ContexItemStartIndex;
-        var count = agent->ContextItemCount;
-        if (start < 0 || count <= 0 || start > agent->EventParams.Length - count)
-            return AdjustPriceGate.Wait($"menu label slice start={start} count={count} is invalid");
-        var labels = new List<string>();
-        for (var index = start; index < start + count; index++)
-        {
-            var value = agent->EventParams[index];
-            if (value.Type is AtkValueType.String or AtkValueType.ManagedString or AtkValueType.WideString or AtkValueType.ConstString)
-                labels.Add(value.GetValueAsString());
-        }
-        if (labels.Count != count)
-            return AdjustPriceGate.Wait($"menu exposes {labels.Count} string labels for {count} entries");
+            return new(AdjustPriceGateKind.Failed, -1, "Addon 959 (Adjust Price) has no localized text");
+        if (!TryReadAgentContextLabels(context, out var labels, out var layout))
+            return AdjustPriceGate.Wait($"menu labels unreadable: {layout} ({ownership})");
+        var mask = context->ContextItemDisabledMask;
+        var described = $"labels [{string.Join(", ", labels)}], {layout}, disabled mask 0x{mask:X}, {ownership}";
         var match = DalamudContextMenuOptionParser.Find(labels,
             new("Adjust Price", new HashSet<string>(StringComparer.Ordinal) { label }));
-        if (!match.Success || match.Index >= count)
-            return AdjustPriceGate.Wait($"menu labels [{string.Join(", ", labels)}] do not offer exactly one '{label}'");
-        if (agent->IsContextItemDisabled(match.Index))
-            return AdjustPriceGate.Wait($"'{label}' at index {match.Index} is disabled (mask 0x{agent->ContextItemDisabledMask:X})");
+        if (!match.Success || match.Index < 0 || match.Index >= labels.Count)
+            return AdjustPriceGate.Wait($"menu does not offer exactly one '{label}' ({described})");
+        if (match.Index < 32 && (mask & (1u << match.Index)) != 0)
+            return AdjustPriceGate.Wait($"'{label}' at index {match.Index} is disabled ({described})");
         var fingerprint = string.Join("\u001f", labels);
         if (previousLabels != fingerprint)
         {
@@ -902,77 +944,80 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             previousLabels = fingerprint;
             return AdjustPriceGate.Wait(changed ? "context labels changed; waiting for them to settle" : "waiting one frame for stable context labels");
         }
-        var menu = gameGui.GetAddonByName<AtkUnitBase>("ContextMenu", 1);
-        if (menu == null)
-            return AdjustPriceGate.Wait("ContextMenu addon pointer is unavailable");
 
-        if (target != state.Current.SlotIndex)
-            log.Information("RepriceAdoptedIdenticalListing item={Item} requestedSlot={Requested} menuSlot={Target} row={Row}",
-                state.Current.ItemId, state.Current.SlotIndex, target, row);
-        state.Current = state.Current with { SlotIndex = target };
-        // EventParams indexes belong to the agent callback, not rendered rows:
-        // injected context entries can reorder the latter independently.
+        // AgentContext names no slot. UpdateCheckerParam may be the activated list index; it
+        // is recorded with the row and expected slot so live runs can establish its meaning,
+        // but it is not trusted as a binding. The editor verification after dispatch is.
+        log.Information("RepriceAdjustPriceDispatch item={Item} index={Index}: {Evidence}",
+            state.Current.ItemId, match.Index, described);
+        // The index is the agent's native menu index: the callback is fired on the addon
+        // directly, below Dalamud's rendered-row remapping of injected entries.
         var values = stackalloc AtkValue[5];
         for (var i = 0; i < 5; i++) values[i] = new() { Type = AtkValueType.Int, Int = i == 1 ? match.Index : 0 };
         state.AdjustDispatched = true;
         return menu->FireCallback(5, values, true)
-            ? new(AdjustPriceGateKind.Dispatched, target, "Adjust Price dispatched")
-            : new(AdjustPriceGateKind.DispatchUnacknowledged, target, "Adjust Price callback was not acknowledged");
+            ? new(AdjustPriceGateKind.Dispatched, state.Current.SlotIndex, "Adjust Price dispatched")
+            : new(AdjustPriceGateKind.DispatchUnacknowledged, state.Current.SlotIndex, "Adjust Price callback was not acknowledged");
     }
 
-    // Binds the open inventory context menu to one physical RetainerMarket slot. The agent's
-    // recorded inventory/slot is mandatory and must name a valid market slot. The target item
-    // pointer's position in the container and the item's own container/slot record are
-    // corroborating evidence: either may be unavailable (null item, or a copy outside the
-    // container), but where present it must agree. Any contradiction refuses the binding.
-    private static unsafe int ResolveMenuTargetSlot(AgentInventoryContext* agent, InventoryContainer* container, out string evidence)
+    // AgentContext's label slice is not AgentInventoryContext's (which records its own start
+    // index). ClientStructs documents no start for it: Dalamud reads the item count from
+    // value 0, places addon names after an 8-value header, and reads event ids/handlers from
+    // index 7. Neither offset is assumed: the slice is accepted only when exactly one of the
+    // two candidate starts holds a run of exactly `count` strings, and the layout is reported.
+    private static unsafe bool TryReadAgentContextLabels(
+        FFXIVClientStructs.FFXIV.Client.UI.Agent.ContextMenu* context, out List<string> labels, out string layout)
     {
-        var item = agent->TargetInventorySlot;
-        int? pointerSlot = null;
-        if (item != null && container->Items != null)
+        labels = [];
+        var values = context->EventParams;
+        var header = values[0];
+        var count = header.Type switch
         {
-            var offset = (long)((byte*)item - (byte*)container->Items);
-            if (offset >= 0 && offset % sizeof(InventoryItem) == 0 && offset / sizeof(InventoryItem) < container->Size)
-                pointerSlot = (int)(offset / sizeof(InventoryItem));
-        }
-        var observed = $"agent target {agent->TargetInventoryId}/{agent->TargetInventorySlotId}, item pointer " +
-            (item == null ? "null" : pointerSlot is { } p ? $"at market slot {p}" : "outside the market container") +
-            (item == null ? string.Empty : $", item record {item->Container}/{item->Slot}") +
-            $", market size {container->Size}, owner addon {agent->OwnerAddonId}";
-
-        if (agent->TargetInventoryId != InventoryType.RetainerMarket)
+            AtkValueType.UInt => (int)header.UInt,
+            AtkValueType.Int => header.Int,
+            _ => -1,
+        };
+        var dump = new System.Text.StringBuilder();
+        for (var index = 0; index < Math.Min(values.Length, 8 + Math.Max(count, 0) + 1); index++)
         {
-            evidence = $"binding refused: the agent names inventory {agent->TargetInventoryId} slot {agent->TargetInventorySlotId}, " +
-                $"not RetainerMarket; this menu's recorded target is a non-market inventory ({observed})";
-            return -1;
+            var value = values[index];
+            dump.Append(index == 0 ? string.Empty : " ").Append('[').Append(index).Append(']').Append(value.Type);
+            if (IsMenuText(value))
+                dump.Append("=\"").Append(value.GetValueAsString()).Append('"');
+            else if (value.Type is AtkValueType.UInt)
+                dump.Append('=').Append(value.UInt);
+            else if (value.Type is AtkValueType.Int)
+                dump.Append('=').Append(value.Int);
         }
-        var agentSlot = agent->TargetInventorySlotId;
-        if (agentSlot < 0 || agentSlot >= container->Size)
+        if (count <= 0 || count > 32)
         {
-            evidence = $"binding refused: the agent names RetainerMarket slot {agentSlot}, outside 0..{container->Size - 1} ({observed})";
-            return -1;
+            layout = $"item count {count} is invalid; values {dump}";
+            return false;
         }
-        if (item != null && (item->Container != InventoryType.RetainerMarket || item->Slot != agentSlot))
+        var starts = new List<int>();
+        foreach (var start in new[] { 7, 8 })
         {
-            evidence = $"binding refused: the target item record names {item->Container}/{item->Slot}, not RetainerMarket/{agentSlot} ({observed})";
-            return -1;
+            if (start + count > values.Length || IsMenuText(values[start - 1]))
+                continue;
+            var run = true;
+            for (var index = start; index < start + count && run; index++)
+                run = IsMenuText(values[index]);
+            if (run && (start + count == values.Length || !IsMenuText(values[start + count])))
+                starts.Add(start);
         }
-        if (pointerSlot is { } pointed && pointed != agentSlot)
+        if (starts.Count != 1)
         {
-            evidence = $"binding refused: the target item pointer sits at market slot {pointed}, not {agentSlot} ({observed})";
-            return -1;
+            layout = $"{starts.Count} candidate label slices for item count {count}; values {dump}";
+            return false;
         }
-        evidence = observed;
-        return agentSlot;
+        for (var index = starts[0]; index < starts[0] + count; index++)
+            labels.Add(values[index].GetValueAsString());
+        layout = $"label slice {starts[0]}..{starts[0] + count - 1}";
+        return true;
     }
 
-    private static unsafe string DescribeMarketSlot(InventoryManager* manager, InventoryContainer* container, int slot)
-    {
-        var item = container->GetInventorySlot(slot);
-        if (item == null || item->ItemId == 0 || item->Quantity == 0)
-            return "nothing";
-        return $"item {item->ItemId}{(item->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality) ? " HQ" : string.Empty)} x{item->Quantity} @ {manager->GetRetainerMarketPrice(checked((short)slot))}";
-    }
+    private static bool IsMenuText(AtkValue value) =>
+        value.Type is AtkValueType.String or AtkValueType.ManagedString or AtkValueType.WideString or AtkValueType.ConstString;
 
     private static string DescribeListing(RetainerMarketListingTarget listing) =>
         $"slot {listing.SlotIndex} item {listing.ItemId}{(listing.IsHq ? " HQ" : string.Empty)} x{listing.Quantity} @ {listing.UnitPrice}";
@@ -1067,6 +1112,15 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         }
 
         var expected = opened.Listing with { UnitPrice = newUnitPrice };
+        // Identical listings (same item, quality, quantity and price) are indistinguishable in
+        // the editor, so the one it opened is not known. Capture them before confirming; the
+        // commit is accepted only when exactly one of them, and nothing else, changes.
+        var before = await framework.RunOnTick(CaptureMarketSlots, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var identical = before is null
+            ? new HashSet<int> { opened.Listing.SlotIndex }
+            : before.Where(entry => entry.Value.Matches(opened.Listing)).Select(entry => entry.Key).ToHashSet();
+        identical.Add(opened.Listing.SlotIndex);
+        var lastChanges = string.Empty;
         var mutationMayHaveBeenSent = false;
         try
         {
@@ -1081,16 +1135,23 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             for (var attempt = 0; attempt < 180 && commitClock.Elapsed < RepriceCommitObserveLimit; attempt++)
             {
                 var observed = await framework.RunOnTick(
-                    () => ObserveSellingListingPriceCommit(expected),
+                    () => ObserveSellingListingPriceCommit(expected, before, identical),
                     cancellationToken: cancellationToken).ConfigureAwait(false);
+                lastChanges = observed.Changes;
                 var action = RetainerMarketPriceUpdatePolicy.Decide(
-                    observed.Committed,
+                    observed.CommittedSlot >= 0,
                     observed.YesNoReady);
                 if (action == RetainerMarketPriceUpdateAction.Complete)
                 {
+                    if (observed.CommittedSlot != opened.Listing.SlotIndex)
+                        log.Information("RepriceCommitAdoptedIdenticalListing item={Item} requestedSlot={Requested} committedSlot={Committed} identicalSlots={Identical}",
+                            opened.Listing.ItemId, opened.Listing.SlotIndex, observed.CommittedSlot, string.Join(",", identical.Order()));
                     return RetainerAutomationResult.Succeeded(
                         "RetainerMarketPriceUpdated",
-                        "The exact live retainer listing committed the requested unit price.");
+                        observed.CommittedSlot == opened.Listing.SlotIndex
+                            ? $"The exact live retainer listing (slot {observed.CommittedSlot}) committed the requested unit price."
+                            : $"Identical listing slot {observed.CommittedSlot} (requested slot {opened.Listing.SlotIndex}; identical slots " +
+                              $"{string.Join(",", identical.Order())}) committed the requested unit price.");
                 }
                 if (action == RetainerMarketPriceUpdateAction.RejectUnexpectedConfirmation)
                 {
@@ -1104,7 +1165,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
             return RetainerAutomationResult.Failed(
                 "RetainerMarketPriceUpdateIndeterminate",
-                "The price request was sent, but its exact live postcondition was not observed. Re-scan before deciding whether to retry.");
+                "The price request was sent, but its exact live postcondition was not observed. Re-scan before deciding whether to retry." +
+                (identical.Count > 1
+                    ? $" Identical slots {string.Join(",", identical.Order())}; last observed: {(lastChanges.Length == 0 ? "no slot changed" : lastChanges)}."
+                    : string.Empty));
         }
         catch (OperationCanceledException exception) when (mutationMayHaveBeenSent)
         {
@@ -2223,7 +2287,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             !MatchesMarketListing(manager, container, listing.SlotIndex, listing))
             throw new NativeCapabilityUnavailableException("The exact retainer listing changed before editing.");
         var itemName = dataManager.GetExcelSheet<Item>().GetRow(listing.ItemId).Name.ExtractText();
-        RetainerSellingEditorPolicy.RequireListing(listing.Quantity, displayedPrice, itemName,
+        RetainerSellingEditorPolicy.RequireListing(listing.Quantity, displayedPrice, itemName, listing.IsHq,
             addon->Quantity->Value, addon->AskingPrice->Value, addon->ItemName->NodeText.ToString());
         return addon;
     }
@@ -2264,33 +2328,80 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             throw new NativeCapabilityUnavailableException("The listing control does not expose one owned native event.");
     }
 
-    private unsafe (bool Committed, bool YesNoReady) ObserveSellingListingPriceCommit(
-        RetainerMarketListingTarget expected)
+    private readonly record struct MarketSlotState(uint ItemId, int Quantity, bool IsHq, ulong UnitPrice)
+    {
+        public bool Matches(RetainerMarketListingTarget listing) =>
+            RetainerMarketListingObservation.Matches(listing, ItemId, Quantity, IsHq, UnitPrice);
+
+        public override string ToString() => $"item {ItemId}{(IsHq ? " HQ" : string.Empty)} x{Quantity} @ {UnitPrice}";
+    }
+
+    private static unsafe Dictionary<int, MarketSlotState>? CaptureMarketSlots()
     {
         var manager = InventoryManager.Instance();
         var container = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
-        var committed = false;
-        if (manager != null &&
-            container != null &&
-            container->IsLoaded &&
-            expected.SlotIndex >= 0 &&
-            expected.SlotIndex < container->Size)
+        if (manager == null || container == null || !container->IsLoaded)
+            return null;
+        var slots = new Dictionary<int, MarketSlotState>();
+        for (var index = 0; index < container->Size; index++)
         {
-            var slot = container->GetInventorySlot(expected.SlotIndex);
-            committed = slot != null &&
-                RetainerMarketPriceCommitObservation.Matches(
-                    expected,
-                    expected.SlotIndex,
-                    slot->ItemId,
-                    slot->Quantity,
-                    slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality),
-                    manager->GetRetainerMarketPrice(checked((short)expected.SlotIndex)),
-                    IsReady(SellingListingEditor));
+            var item = container->GetInventorySlot(index);
+            if (item == null || item->ItemId == 0 || item->Quantity == 0)
+                continue;
+            slots[index] = new(item->ItemId, (int)item->Quantity, item->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality),
+                manager->GetRetainerMarketPrice(checked((short)index)));
+        }
+        return slots;
+    }
+
+    // Returns the slot that committed the new price, or -1. With one identical listing only the
+    // requested slot is watched, as before. With several, exactly one of them must have changed,
+    // to the expected listing at the new price, and every other listing must be unchanged; zero
+    // or several changes are never accepted, so the caller's budget ends Indeterminate.
+    private unsafe (int CommittedSlot, string Changes, bool YesNoReady) ObserveSellingListingPriceCommit(
+        RetainerMarketListingTarget expected, IReadOnlyDictionary<int, MarketSlotState>? before, IReadOnlySet<int> identical)
+    {
+        var yesNo = IsReady(YesNo);
+        var editorReady = IsReady(SellingListingEditor);
+        if (identical.Count <= 1 || before is null)
+        {
+            var manager = InventoryManager.Instance();
+            var container = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
+            var committed = false;
+            if (manager != null &&
+                container != null &&
+                container->IsLoaded &&
+                expected.SlotIndex >= 0 &&
+                expected.SlotIndex < container->Size)
+            {
+                var slot = container->GetInventorySlot(expected.SlotIndex);
+                committed = slot != null &&
+                    RetainerMarketPriceCommitObservation.Matches(
+                        expected,
+                        expected.SlotIndex,
+                        slot->ItemId,
+                        slot->Quantity,
+                        slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality),
+                        manager->GetRetainerMarketPrice(checked((short)expected.SlotIndex)),
+                        editorReady);
+            }
+            return (committed ? expected.SlotIndex : -1, string.Empty, yesNo);
         }
 
-        return (
-            committed,
-            IsReady(YesNo));
+        var now = CaptureMarketSlots();
+        if (now is null || editorReady)
+            return (-1, now is null ? "market container not loaded" : "editor still open", yesNo);
+        var changed = before.Keys.Union(now.Keys)
+            .Where(index => !before.TryGetValue(index, out var old) || !now.TryGetValue(index, out var current) || old != current)
+            .Order()
+            .ToList();
+        var changes = string.Join("; ", changed.Select(index =>
+            $"slot {index}: {(before.TryGetValue(index, out var old) ? old.ToString() : "empty")} -> " +
+            $"{(now.TryGetValue(index, out var current) ? current.ToString() : "empty")}"));
+        if (changed.Count == 1 && identical.Contains(changed[0]) &&
+            now.TryGetValue(changed[0], out var committedSlot) && committedSlot.Matches(expected))
+            return (changed[0], changes, yesNo);
+        return (-1, changes, yesNo);
     }
 
     private static unsafe bool MatchesMarketListing(
@@ -2478,13 +2589,21 @@ internal static class RetainerClosingPolicy
 
 internal static class RetainerSellingEditorPolicy
 {
-    public static void RequireListing(int expectedQuantity, uint expectedPrice, string expectedName,
+    // The editor renders HQ items with the SeIconChar.HighQuality glyph in the item name;
+    // its presence must equal the listing's quality, or the other-quality stack would pass.
+    public static bool ShowsHighQuality(string displayedName) =>
+        displayedName.Contains('\uE03C');
+
+    public static void RequireListing(int expectedQuantity, uint expectedPrice, string expectedName, bool expectedHq,
         int displayedQuantity, int displayedPrice, string displayedName)
     {
+        var displayedHq = ShowsHighQuality(displayedName);
         if (expectedQuantity <= 0 || expectedPrice == 0 || expectedPrice > int.MaxValue ||
-            displayedQuantity != expectedQuantity || displayedPrice != expectedPrice ||
+            displayedQuantity != expectedQuantity || displayedPrice != expectedPrice || displayedHq != expectedHq ||
             string.IsNullOrWhiteSpace(expectedName) || !string.Equals(expectedName.Trim(),
                 displayedName.Replace("\uE03C", string.Empty, StringComparison.Ordinal).Trim(), StringComparison.Ordinal))
-            throw new NativeCapabilityUnavailableException("The rendered listing item, quantity or price does not match the exact observed listing.");
+            throw new NativeCapabilityUnavailableException(
+                $"The rendered listing raw name '{displayedName}' (hq={displayedHq}) x{displayedQuantity} @ {displayedPrice} " +
+                $"does not match the exact observed listing '{expectedName}' (hq={expectedHq}) x{expectedQuantity} @ {expectedPrice}.");
     }
 }
