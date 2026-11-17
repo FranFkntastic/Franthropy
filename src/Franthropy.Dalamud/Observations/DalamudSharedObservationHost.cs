@@ -21,6 +21,12 @@ public sealed record DalamudSharedObservationHostOptions
     public required IGameInventory GameInventory { get; init; }
     public required IPlayerState PlayerState { get; init; }
     public required IAddonLifecycle AddonLifecycle { get; init; }
+    /// <summary>Required for passive retainer proof; omitted services fail closed without affecting character observations.</summary>
+    public IFramework? Framework { get; init; }
+    public IGameInteropProvider? InteropProvider { get; init; }
+    public ISigScanner? SigScanner { get; init; }
+    /// <summary>Required with visit hooks so proof failures have Warning-level diagnostics.</summary>
+    public IPluginLog? PluginLog { get; init; }
     public Action<string, Exception?>? Diagnostic { get; init; }
     public ObservationWriterQueueOptions WriterQueue { get; init; } = new();
     public int WriterCapability { get; init; } = DalamudSharedObservationHost.SellingSurfaceWriterCapability;
@@ -116,7 +122,11 @@ public sealed class DalamudSharedObservationHost : IDisposable
             CaptureSessions,
             ReportFault,
             options.Diagnostic,
-            options.WriterQueue);
+            options.WriterQueue,
+            options.Framework,
+            options.InteropProvider,
+            options.SigScanner,
+            options.PluginLog);
         try
         {
             next.Start();
@@ -231,6 +241,17 @@ public sealed class DalamudSharedObservationHost : IDisposable
         private readonly Action<string, Exception?>? diagnostic;
         private readonly ObservationWriterQueue queue;
         private readonly LatestByKeyBuffer<ObservationEnvelope> pendingListings = new();
+        private readonly RetainerVisitProofTracker visit = new();
+        private readonly IFramework? framework;
+        private readonly IGameInteropProvider? interop;
+        private readonly ISigScanner? scanner;
+        private readonly IPluginLog? pluginLog;
+        private RetainerVisitProofHooks? visitHooks;
+        private ObservationOwner? visitOwner;
+        private double nextVisitCheck;
+        private bool settledInventoryPending;
+        private bool settledGilPending;
+        private readonly HashSet<string> reportedSuppressions = [];
         private long sourceRevision;
         private bool started;
         private bool disposed;
@@ -244,7 +265,11 @@ public sealed class DalamudSharedObservationHost : IDisposable
             ObservationCaptureSessionRegistry? captureSessions,
             Action<string> fault,
             Action<string, Exception?>? diagnostic,
-            ObservationWriterQueueOptions writerOptions)
+            ObservationWriterQueueOptions writerOptions,
+            IFramework? framework,
+            IGameInteropProvider? interop,
+            ISigScanner? scanner,
+            IPluginLog? pluginLog)
         {
             this.gameInventory = gameInventory;
             this.playerState = playerState;
@@ -253,6 +278,10 @@ public sealed class DalamudSharedObservationHost : IDisposable
             this.provenance = provenance;
             this.captureSessions = captureSessions;
             this.diagnostic = diagnostic;
+            this.framework = framework;
+            this.interop = interop;
+            this.scanner = scanner;
+            this.pluginLog = pluginLog;
             queue = new ObservationWriterQueue(writerOptions, fault, diagnostic);
         }
 
@@ -263,6 +292,13 @@ public sealed class DalamudSharedObservationHost : IDisposable
             started = true;
             try
             {
+                if (framework is not null && pluginLog is not null)
+                {
+                    visitHooks = new RetainerVisitProofHooks(interop, scanner, OnVisitOpened, OnVisitBatch, ReportVisit);
+                    framework.Update += OnVisitUpdate;
+                }
+                else
+                    ReportVisit("[Warning] RetainerVisitHooksUnavailable: hook=SetActiveRetainer/ApplyRetainerMarketPriceBatch, signatureMatches=unknown; framework or plugin-log service missing; all passive retainer captures refused for this collector session.", null);
                 gameInventory.InventoryChanged += OnInventoryChanged;
                 addonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerList", OnRetainerListOpened);
                 addonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerSellList", OnRetainerSellingListChanged);
@@ -283,6 +319,8 @@ public sealed class DalamudSharedObservationHost : IDisposable
             if (disposed)
                 return;
             disposed = true;
+            if (framework is not null) framework.Update -= OnVisitUpdate;
+            visitHooks?.Dispose();
             if (started)
             {
                 gameInventory.InventoryChanged -= OnInventoryChanged;
@@ -309,6 +347,8 @@ public sealed class DalamudSharedObservationHost : IDisposable
                 var retainerId = owner is null || (!hasRetainerListings && retainer.Count == 0)
                     ? null
                     : CurrentRetainerIdOrDefault();
+                if ((hasRetainerListings || retainer.Count > 0) && !AllowRetainerCapture(retainerId, "inventory-change"))
+                    retainerId = null;
                 var plan = SharedObservationCapturePlan.Create(
                     player.Count > 0,
                     saddlebag.Count > 0,
@@ -399,7 +439,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
             {
                 var owner = CurrentOwnerOrDefault();
                 var retainerId = owner is null ? null : CurrentRetainerIdOrDefault();
-                if (owner is not null && retainerId is not null)
+                if (owner is not null && retainerId is not null && AllowRetainerCapture(retainerId, "selling-list"))
                     EnqueueLatestListing(CaptureRetainerListings(owner, retainerId.Value));
             }
             catch (Exception ex)
@@ -414,20 +454,148 @@ public sealed class DalamudSharedObservationHost : IDisposable
             {
                 var owner = CurrentOwnerOrDefault();
                 var retainerId = owner is null ? null : CurrentRetainerIdOrDefault();
+                if (!AllowRetainerCapture(retainerId, "inventory-close")) return;
                 var plan = SharedObservationCapturePlan.Create(false, false, true, false, owner, retainerId);
                 plan.Execute(
                     capturePlayerInventory: static () => { },
                     captureSaddlebag: static () => { },
-                    captureRetainerInventory: () => Enqueue(CaptureRetainerInventory(owner!, retainerId!.Value)),
+                    captureRetainerInventory: () => EnqueueCompleteRetainerSnapshot(CaptureRetainerInventory(owner!, retainerId!.Value)),
                     captureRetainerListings: static () => { },
                     reportFailure: ex => diagnostic?.Invoke("The closing retainer observation could not be captured.", ex));
                 if (owner is not null && retainerId is not null)
-                    Enqueue(CaptureRetainerGil(owner, retainerId.Value));
+                    EnqueueCompleteRetainerSnapshot(CaptureRetainerGil(owner, retainerId.Value));
             }
             catch (Exception ex)
             {
                 diagnostic?.Invoke("The closing retainer observation could not be captured.", ex);
             }
+        }
+
+        private void ReportVisit(string message, Exception? ex)
+        {
+            try
+            {
+                if (message.StartsWith("[Warning]", StringComparison.Ordinal))
+                    pluginLog?.Warning(ex, "{Message}", message);
+            }
+            catch { }
+            try { diagnostic?.Invoke(message, ex); } catch { }
+        }
+
+        private void OnVisitOpened(ulong previousId, ulong id, double now)
+        {
+            visit.Open(id, now);
+            visitOwner = CurrentOwnerOrDefault();
+            settledInventoryPending = settledGilPending = false;
+            nextVisitCheck = now;
+            reportedSuppressions.Clear();
+            ReportVisit($"RetainerVisitOpened: generation={visit.Generation}, previous={previousId:X16}, retainer={id:X16}.", null);
+        }
+
+        private void OnVisitBatch(int[] slots, double now)
+        {
+            reportedSuppressions.Clear();
+            var active = CurrentRetainerIdOrDefault() ?? 0;
+            if (!visit.Apply(visit.Generation, active, now, slots))
+                ReportVisit($"[Warning] RetainerVisitLateArrival: active={active:X16}, {VisitContext(now, null)}, arrivingCovered=[{string.Join(",", slots)}].", null);
+            else if (visit.FirstBatchIsAmbiguous && visit.Applies.Count == 1)
+                ReportVisit($"[Warning] RetainerVisitLateArrival: possible boundary-straddling first batch (no wire retainer identity); second apply required, {VisitContext(now, null)}.", null);
+        }
+
+        private bool AllowRetainerCapture(ulong? id, string path)
+        {
+            if (visitHooks?.Available == true && id is { } value && visit.CanCapture(value) &&
+                visitOwner is not null && visitOwner == CurrentOwnerOrDefault())
+                return true;
+            if (reportedSuppressions.Add(path))
+                ReportVisit($"RetainerVisitSuppressedUnproven: path={path}, requested={id:X16}, generation={visit.Generation}, retainer={visit.RetainerId:X16}; full settle-time capture supersedes suppressed deltas.", null);
+            return false;
+        }
+
+        private unsafe HashSet<int>? OccupiedMarketSlots()
+        {
+            var manager = InventoryManager.Instance();
+            var container = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
+            if (container == null || !container->IsLoaded) return null;
+            var items = gameInventory.GetInventoryItems(GameInventoryType.RetainerMarket);
+            if (items.Length != 20) return null;
+            var occupied = new HashSet<int>();
+            foreach (ref readonly var item in items)
+                if (!item.IsEmpty && item.ItemId != 0 && item.Quantity > 0)
+                    occupied.Add(checked((int)item.InventorySlot));
+            return occupied;
+        }
+
+        private static unsafe bool ActiveRosterIsEmpty(ulong id)
+        {
+            var manager = RetainerManager.Instance();
+            var retainer = manager == null ? null : manager->GetActiveRetainer();
+            return retainer != null && retainer->RetainerId == id && retainer->MarketItemCount == 0;
+        }
+
+        private string VisitContext(double now, IReadOnlySet<int>? occupied) =>
+            $"generation={visit.Generation}, retainer={visit.RetainerId:X16}, elapsedMs={now - visit.OpenedAt:F1}, " +
+            $"applyElapsedMs=[{string.Join(",", visit.Applies.Select(time => (time - visit.OpenedAt).ToString("F1")))}], " +
+            $"covered=[{string.Join(",", visit.CoveredSlots.Order())}], occupied=[{(occupied is null ? "unavailable" : string.Join(",", occupied.Order()))}]";
+
+        private void OnVisitUpdate(IFramework _)
+        {
+            if (visitHooks?.Available != true || visit.RetainerId == 0 ||
+                (visit.Proven && !settledInventoryPending && !settledGilPending)) return;
+            try
+            {
+                var now = RetainerVisitProofHooks.Now;
+                if (now < nextVisitCheck) return;
+                nextVisitCheck = now + 50;
+                var active = CurrentRetainerIdOrDefault() ?? 0;
+                if (visit.Proven)
+                {
+                    CaptureDeferredRetainerState(active);
+                    return;
+                }
+                var occupied = OccupiedMarketSlots();
+                var outcome = visit.Evaluate(now, active, occupied, ActiveRosterIsEmpty(active));
+                if (outcome is null) return;
+                ReportVisit($"{(outcome == "RetainerVisitProofTimeout" ? "[Warning] " : string.Empty)}{outcome}: {VisitContext(now, occupied)}.", null);
+                if (outcome != "RetainerVisitProven" || !AllowRetainerCapture(active, "settle")) return;
+                var owner = visitOwner!;
+                // These run together on the framework thread; no native selection can
+                // interleave. Isolate capture failures so unavailable gil cannot lose listings.
+                CaptureSettled(() => EnqueueLatestListing(CaptureRetainerListings(owner, active)));
+                settledInventoryPending = settledGilPending = true;
+                CaptureDeferredRetainerState(active);
+            }
+            catch (Exception ex) { ReportVisit("RetainerVisitCaptureUnavailable: settle-time observation failed.", ex); }
+        }
+
+        private void CaptureDeferredRetainerState(ulong active)
+        {
+            if (!AllowRetainerCapture(active, "settle-inventory")) return;
+            // Some visits load these containers later than prices. Preserve the last
+            // truthful snapshot and recover automatically, including before a close.
+            if (settledInventoryPending)
+                CaptureSettled(() => settledInventoryPending = !EnqueueCompleteRetainerSnapshot(CaptureRetainerInventory(visitOwner!, active)));
+            if (settledGilPending)
+                CaptureSettled(() => settledGilPending = !EnqueueCompleteRetainerSnapshot(CaptureRetainerGil(visitOwner!, active)));
+        }
+
+        private bool EnqueueCompleteRetainerSnapshot(ObservationEnvelope snapshot)
+        {
+            if (snapshot.Capture.Evidence.Completeness != ObservationCompleteness.Complete)
+            {
+                var path = $"incomplete-{snapshot.Scope.Container}";
+                if (reportedSuppressions.Add(path))
+                    ReportVisit($"RetainerVisitCaptureUnavailable: retainer={visit.RetainerId:X16}, container={snapshot.Scope.Container}; preserving the previous observation until the full container is available.", null);
+                return false;
+            }
+            Enqueue(snapshot);
+            return true;
+        }
+
+        private void CaptureSettled(Action capture)
+        {
+            try { capture(); }
+            catch (Exception ex) { ReportVisit("RetainerVisitCaptureUnavailable: a settled observation could not be captured.", ex); }
         }
 
         private ObservationEnvelope CaptureCharacterInventory(
@@ -632,10 +800,9 @@ public sealed class DalamudSharedObservationHost : IDisposable
         private static unsafe ulong? CurrentRetainerIdOrDefault()
         {
             var manager = RetainerManager.Instance();
-            var retainer = manager is null ? null : manager->GetActiveRetainer();
-            if (retainer is null || retainer->RetainerId == 0)
+            if (manager is null || manager->LastSelectedRetainerId == 0)
                 return null;
-            return retainer->RetainerId;
+            return manager->LastSelectedRetainerId;
         }
 
         private void Enqueue(ObservationEnvelope observation)
