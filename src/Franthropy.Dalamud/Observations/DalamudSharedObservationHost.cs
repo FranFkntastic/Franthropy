@@ -503,8 +503,8 @@ public sealed class DalamudSharedObservationHost : IDisposable
             var active = CurrentRetainerIdOrDefault() ?? 0;
             if (!visit.Apply(visit.Generation, active, now, slots))
                 ReportVisit($"[Warning] RetainerVisitLateArrival: active={active:X16}, {VisitContext(now, null)}, arrivingCovered=[{string.Join(",", slots)}].", null);
-            else if (visit.FirstBatchIsAmbiguous && visit.Applies.Count == 1)
-                ReportVisit($"[Warning] RetainerVisitLateArrival: possible boundary-straddling first batch (no wire retainer identity); second apply required, {VisitContext(now, null)}.", null);
+            else if (!visit.IsAttributable(now))
+                ReportVisit($"RetainerVisitBoundaryAmbiguous: batch may be the previous retainer's late round (no wire retainer identity); not counted toward proof, {VisitContext(now, null)}.", null);
         }
 
         private bool AllowRetainerCapture(ulong? id, string path)
@@ -540,6 +540,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
 
         private string VisitContext(double now, IReadOnlySet<int>? occupied) =>
             $"generation={visit.Generation}, retainer={visit.RetainerId:X16}, elapsedMs={now - visit.OpenedAt:F1}, " +
+            $"attributableFromMs={(visit.AttributableFrom is { } from ? (from - visit.OpenedAt).ToString("F1") : "open")}, " +
             $"applyElapsedMs=[{string.Join(",", visit.Applies.Select(time => (time - visit.OpenedAt).ToString("F1")))}], " +
             $"covered=[{string.Join(",", visit.CoveredSlots.Order())}], occupied=[{(occupied is null ? "unavailable" : string.Join(",", occupied.Order()))}]";
 
@@ -561,7 +562,7 @@ public sealed class DalamudSharedObservationHost : IDisposable
                 var occupied = OccupiedMarketSlots();
                 var outcome = visit.Evaluate(now, active, occupied, ActiveRosterIsEmpty(active));
                 if (outcome is null) return;
-                ReportVisit($"{(outcome == "RetainerVisitProofTimeout" ? "[Warning] " : string.Empty)}{outcome}: {VisitContext(now, occupied)}.", null);
+                ReportVisit($"{(outcome is "RetainerVisitProofTimeout" or "RetainerVisitBoundaryUnresolved" ? "[Warning] " : string.Empty)}{outcome}: {VisitContext(now, occupied)}.", null);
                 if (outcome != "RetainerVisitProven" || !AllowRetainerCapture(active, "settle")) return;
                 var owner = visitOwner!;
                 // These run together on the framework thread; no native selection can
