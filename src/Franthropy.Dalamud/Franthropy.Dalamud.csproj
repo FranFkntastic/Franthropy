@@ -147,6 +147,7 @@
     <Compile Remove="Automation\Vendors\Coordination\DalamudGilVendorBuyRuntime.cs" />
     <Compile Remove="Automation\MarketBoard\DalamudMarketBoardListingObserver.cs" />
     <Compile Remove="Observations\DalamudSharedObservationHost.cs" />
+    <Compile Remove="Observations\RetainerVisitProofHooks.cs" />
     <Compile Remove="Observations\Reporting\ReportInventoryScanner.cs" />
     <Compile Remove="Observations\Reporting\ReportRetainerCache.cs" />
     <Compile Remove="Observations\Reporting\BaselineStalenessWatchdog.cs" />
