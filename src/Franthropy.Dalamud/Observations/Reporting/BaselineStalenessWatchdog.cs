@@ -44,6 +44,7 @@ public sealed class BaselineStalenessWatchdog : IDisposable
     private readonly Action<string> report;
     private readonly CancellationTokenSource lifetime = new();
     private Task? loop;
+    private readonly System.Collections.Generic.Dictionary<string, string> reported = new();
 
     public BaselineStalenessWatchdog(
         ObservationStoreOptions storeOptions,
@@ -93,29 +94,31 @@ public sealed class BaselineStalenessWatchdog : IDisposable
         await connection.OpenAsync(token).ConfigureAwait(false);
 
         var ownerPrefix = $"{contentId:X16}:{homeWorldId}:";
+        var conditions = new System.Collections.Generic.Dictionary<string, string>();
 
         // 1. Player inventory baseline: must exist, not be stale, and be recent.
         var owner = new ObservationOwner(contentId, homeWorldId);
         var playerKey = SqliteObservationStore.CreateScopeKey(new ObservationScope(
             owner, ObservationSubject.Character(owner), ObservationContainerKind.PlayerInventory));
+        void Record(string message) => conditions[playerKey] = message;
         var player = await ReadScopeAsync(connection, playerKey, token).ConfigureAwait(false);
         if (player is null)
         {
-            report(
+            Record(
                 "Inventory baseline is MISSING for the current character " +
                 $"(scope {ownerPrefix}...:{ContainerPlayerInventory}); remote purchases will fail price " +
                 "verification until a complete inventory capture succeeds.");
         }
         else if (player.IsStale)
         {
-            report(
+            Record(
                 $"Inventory baseline is STALE for the current character (reason: {player.StaleReason ?? "unknown"}); " +
                 "remote purchases will fail price verification until a complete inventory capture succeeds.");
         }
         else if (player.LastConfirmedAtUtc is { } confirmed &&
                  DateTimeOffset.UtcNow - confirmed > options.MaxBaselineAge)
         {
-            report(
+            Record(
                 $"Inventory baseline is OLD (last confirmed {confirmed:u}, age threshold {options.MaxBaselineAge}); " +
                 "if remote purchases fail price verification, this is why.");
         }
@@ -126,11 +129,18 @@ public sealed class BaselineStalenessWatchdog : IDisposable
         foreach (var scope in staleScopes)
         {
             var containerName = DescribeContainer(scope.Container);
-            report(
+            conditions[scope.ScopeKey] =
                 $"Stale {containerName} projection for retainer {scope.SubjectId:X16} " +
                 $"(reason: {scope.StaleReason ?? "unknown"}). This scope rejects all inventory deltas until the " +
-                "retainer's corresponding window is opened again so it can be re-captured.");
+                "retainer's corresponding window is opened again so it can be re-captured.";
         }
+        foreach (var condition in conditions)
+            if (!reported.TryGetValue(condition.Key, out var previous) || previous != condition.Value)
+                report(condition.Value);
+        // Only a complete successful read clears conditions; an unavailable store is not recovery.
+        foreach (var key in System.Linq.Enumerable.ToArray(reported.Keys))
+            if (key.StartsWith(ownerPrefix, StringComparison.Ordinal)) reported.Remove(key);
+        foreach (var condition in conditions) reported[condition.Key] = condition.Value;
     }
 
     private static string DescribeContainer(int container) => container switch
