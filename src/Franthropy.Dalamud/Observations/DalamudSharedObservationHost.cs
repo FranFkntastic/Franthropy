@@ -472,15 +472,19 @@ public sealed class DalamudSharedObservationHost : IDisposable
             }
         }
 
+        // Visit lifecycle outcomes are routine (several per bell visit) and stay at Debug.
+        // Only failures reach Warning; consumer diagnostic callbacks log at Warning/Error,
+        // so routing routine outcomes there would flood every consumer's log.
         private void ReportVisit(string message, Exception? ex)
         {
             try
             {
-                if (message.StartsWith("[Warning]", StringComparison.Ordinal))
+                if (message.StartsWith("[Warning]", StringComparison.Ordinal) || ex is not null)
                     pluginLog?.Warning(ex, "{Message}", message);
+                else
+                    pluginLog?.Debug("{Message}", message);
             }
             catch { }
-            try { diagnostic?.Invoke(message, ex); } catch { }
         }
 
         private void OnVisitOpened(ulong previousId, ulong id, double now)
