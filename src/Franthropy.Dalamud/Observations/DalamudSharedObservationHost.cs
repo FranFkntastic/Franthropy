@@ -21,12 +21,13 @@ public sealed record DalamudSharedObservationHostOptions
     public required IGameInventory GameInventory { get; init; }
     public required IPlayerState PlayerState { get; init; }
     public required IAddonLifecycle AddonLifecycle { get; init; }
-    /// <summary>Required for passive retainer proof; omitted services fail closed without affecting character observations.</summary>
-    public IFramework? Framework { get; init; }
-    public IGameInteropProvider? InteropProvider { get; init; }
-    public ISigScanner? SigScanner { get; init; }
-    /// <summary>Required with visit hooks so proof failures have Warning-level diagnostics.</summary>
-    public IPluginLog? PluginLog { get; init; }
+    /// <summary>Drives retainer-visit proof settlement. Passive retainer captures are published only for proven visits.</summary>
+    public required IFramework Framework { get; init; }
+    /// <summary>Installs the read-only retainer-visit proof hooks; if they cannot install, passive retainer captures fail closed.</summary>
+    public required IGameInteropProvider InteropProvider { get; init; }
+    public required ISigScanner SigScanner { get; init; }
+    /// <summary>Receives Warning-level retainer-visit proof failures.</summary>
+    public required IPluginLog PluginLog { get; init; }
     public Action<string, Exception?>? Diagnostic { get; init; }
     public ObservationWriterQueueOptions WriterQueue { get; init; } = new();
     public int WriterCapability { get; init; } = DalamudSharedObservationHost.SellingSurfaceWriterCapability;
