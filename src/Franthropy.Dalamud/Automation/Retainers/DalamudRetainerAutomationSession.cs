@@ -108,9 +108,10 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         int Row,
         string? Condition,
         RetainerAutomationResult? Result,
-        RetainerMarketListingTarget? Listing)
+        RetainerMarketListingTarget? Listing,
+        bool ScrolledIntoView = false)
     {
-        public static RepriceAttemptOutcome Retry(int row, string condition) => new(row, condition, null, null);
+        public static RepriceAttemptOutcome Retry(int row, string condition, bool scrolledIntoView = false) => new(row, condition, null, null, scrolledIntoView);
 
         public static RepriceAttemptOutcome Final(RetainerAutomationResult result, RetainerMarketListingTarget? listing = null) =>
             new(-1, null, result, listing);
@@ -491,8 +492,12 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
             var reason = outcome.Condition ?? "unspecified pre-dispatch failure";
             state.Attempts.Add($"#{attempt} row {(outcome.Row < 0 ? "-" : outcome.Row.ToString())}: {reason}");
-            log.Warning("RepriceSelectionAttemptFailed attempt={Attempt}/{Budget} slot={Slot} item={Item} row={Row}: {Condition}",
-                attempt, RepriceSelectionAttemptBudget, state.Current.SlotIndex, listing.ItemId, outcome.Row, reason);
+            if (outcome.ScrolledIntoView)
+                log.Debug("RepriceSelectionAttemptFailed attempt={Attempt}/{Budget} slot={Slot} item={Item} row={Row}: {Condition}",
+                    attempt, RepriceSelectionAttemptBudget, state.Current.SlotIndex, listing.ItemId, outcome.Row, reason);
+            else
+                log.Warning("RepriceSelectionAttemptFailed attempt={Attempt}/{Budget} slot={Slot} item={Item} row={Row}: {Condition}",
+                    attempt, RepriceSelectionAttemptBudget, state.Current.SlotIndex, listing.ItemId, outcome.Row, reason);
         }
 
         await ReleaseOwnedRepriceSurfacesAsync(state, CancellationToken.None).ConfigureAwait(false);
@@ -837,7 +842,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             // A row scrolled into view is not a row failure: the same row is retried next.
             if (activated.Code != "RenderedListRowScrolledIntoView" || !state.ScrolledRows.Add(row))
                 state.RecordRowFailure(row);
-            return RepriceAttemptOutcome.Retry(row, $"row activation refused before dispatch: {activated.Code}: {activated.Message}");
+            return RepriceAttemptOutcome.Retry(row, $"row activation refused before dispatch: {activated.Code}: {activated.Message}",
+                scrolledIntoView: activated.Code == "RenderedListRowScrolledIntoView");
         }
         state.OwnsSurface = true;
         return RepriceAttemptOutcome.Activated(row);
