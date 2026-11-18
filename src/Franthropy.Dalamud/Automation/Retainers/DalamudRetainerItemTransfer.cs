@@ -53,12 +53,7 @@ public sealed class DalamudRetainerItemTransfer
     {
         var result = await RetainerDepositVerifier.DepositAsync(
             stack, framework, gameGui, log, gameInventory,
-            () =>
-            {
-                var pending = BeginDeposit(stack, requestedQuantity);
-                return new RetainerDepositStart(pending.Success, pending.Requested,
-                    pending.PlayerQuantityBefore, pending.RetainerQuantityBefore, pending.Code, pending.Message);
-            },
+            () => BeginDeposit(stack, requestedQuantity),
             requested => SubmitQuantity(stack.ItemId, requested) is { } submitted
                 ? new RetainerDepositResult(submitted.Success, submitted.Transferred, submitted.Code, submitted.Message)
                 : throw new InvalidOperationException(),
@@ -66,7 +61,7 @@ public sealed class DalamudRetainerItemTransfer
         return new(result.Success, result.Transferred, result.Code, result.Message);
     }
 
-    private unsafe PendingRetainerItemTransfer BeginDeposit(
+    private unsafe RetainerDepositStart BeginDeposit(
         DalamudInventoryStack stack,
         int requestedQuantity)
     {
@@ -77,23 +72,23 @@ public sealed class DalamudRetainerItemTransfer
         }
         catch (Exception exception)
         {
-            return PendingRetainerItemTransfer.Fail(NativeCapabilityGuard.FailureCode, exception.Message);
+            return RetainerDepositStart.Fail(NativeCapabilityGuard.FailureCode, exception.Message);
         }
 
         if (!PlayerItemContainers.Contains(stack.Container) || requestedQuantity <= 0)
         {
-            return PendingRetainerItemTransfer.Fail(
+            return RetainerDepositStart.Fail(
                 "InvalidRequest",
                 $"Invalid item deposit request for item {stack.ItemId}: {requestedQuantity} from {stack.Container}.");
         }
 
         var inventoryManager = InventoryManager.Instance();
         if (inventoryManager == null)
-            return PendingRetainerItemTransfer.Fail("InventoryUnavailable", "Inventory manager is unavailable.");
+            return RetainerDepositStart.Fail("InventoryUnavailable", "Inventory manager is unavailable.");
 
         var playerContainer = inventoryManager->GetInventoryContainer(stack.Container);
         if (playerContainer == null || !playerContainer->IsLoaded)
-            return PendingRetainerItemTransfer.Fail("PlayerInventoryUnavailable", "Player inventory is unavailable.");
+            return RetainerDepositStart.Fail("PlayerInventoryUnavailable", "Player inventory is unavailable.");
 
         var slot = playerContainer->GetInventorySlot(stack.SlotIndex);
         var slotIsHighQuality = slot != null && slot->Flags.HasFlag(InventoryItem.ItemFlags.HighQuality);
@@ -102,7 +97,7 @@ public sealed class DalamudRetainerItemTransfer
             slot->Quantity != stack.Quantity ||
             slotIsHighQuality != stack.IsHighQuality)
         {
-            return PendingRetainerItemTransfer.Fail(
+            return RetainerDepositStart.Fail(
                 "SourceSlotChanged",
                 $"Expected {stack.Quantity}x item {stack.ItemId} was not found in {stack.Container} slot {stack.SlotIndex}.");
         }
@@ -120,7 +115,7 @@ public sealed class DalamudRetainerItemTransfer
 
         if (!hasLoadedRetainerContainer)
         {
-            return PendingRetainerItemTransfer.Fail("RetainerInventoryUnavailable", "Retainer item inventory is unavailable.");
+            return RetainerDepositStart.Fail("RetainerInventoryUnavailable", "Retainer item inventory is unavailable.");
         }
 
         var playerBefore = CountPlayer(stack.ItemId, stack.IsHighQuality);
@@ -129,13 +124,15 @@ public sealed class DalamudRetainerItemTransfer
 
         var retainerAgent = AgentModule.Instance()->GetAgentByInternalId(AgentId.Retainer);
         if (retainerAgent == null || !retainerAgent->IsAgentActive())
-            return PendingRetainerItemTransfer.Fail("RetainerAgentUnavailable", "Retainer agent is unavailable.");
+            return RetainerDepositStart.Fail("RetainerAgentUnavailable", "Retainer agent is unavailable.");
 
         if (!RetainerDepositVerifier.PreconditionsAvailable(stack))
-            return PendingRetainerItemTransfer.Fail("InventoryUnavailable", "All verification containers must be loaded before dispatch.");
+            return RetainerDepositStart.Fail("InventoryUnavailable", "All verification containers must be loaded before dispatch.");
         if (RetainerDepositVerifier.QuantityPopupVisible(gameGui))
-            return PendingRetainerItemTransfer.Fail("QuantityPopupAlreadyOpen", "An unowned quantity popup exists before dispatch.");
+            return RetainerDepositStart.Fail("QuantityPopupAlreadyOpen", "An unowned quantity popup exists before dispatch.");
 
+        var selection = RetainerInventoryCommandPolicy.Select(
+            RetainerTransferDirection.Entrust, isCrystalContainer: false, stack.Quantity, transfer);
         try
         {
             retainerItemCommand(
@@ -143,12 +140,12 @@ public sealed class DalamudRetainerItemTransfer
                 (uint)stack.SlotIndex,
                 stack.Container,
                 0,
-                RetainerItemCommand.EntrustToRetainer);
+                selection.Command);
         }
         catch (Exception ex)
         {
             log.Error(ex, "Unable to invoke the retainer item deposit command.");
-            return PendingRetainerItemTransfer.Fail(
+            return RetainerDepositStart.Fail(
                 "DepositDispatchIndeterminate",
                 $"Dispatch began; do not retry. Retainer item deposit command is unavailable. {ex.Message}");
         }
@@ -158,8 +155,9 @@ public sealed class DalamudRetainerItemTransfer
             transfer,
             playerBefore,
             retainerBefore,
+            selection.NeedsQuantityInput,
             "CommandSubmitted",
-            $"Opened deposit quantity for item {stack.ItemId}.");
+            $"Dispatched {selection.Command} for item {stack.ItemId}.");
     }
 
     private unsafe RetainerDepositResult SubmitQuantity(uint itemId, int requested)
@@ -189,22 +187,5 @@ public sealed class DalamudRetainerItemTransfer
         uint Slot,
         InventoryType InventoryType,
         uint A4,
-        RetainerItemCommand Command);
-
-    private enum RetainerItemCommand : long
-    {
-        EntrustToRetainer = 1,
-    }
-
-    private sealed record PendingRetainerItemTransfer(
-        bool Success,
-        int Requested,
-        int PlayerQuantityBefore,
-        int RetainerQuantityBefore,
-        string Code,
-        string Message)
-    {
-        public static PendingRetainerItemTransfer Fail(string code, string message) =>
-            new(false, 0, 0, 0, code, message);
-    }
+        RetainerInventoryCommand Command);
 }

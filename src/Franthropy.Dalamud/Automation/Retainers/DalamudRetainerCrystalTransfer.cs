@@ -65,12 +65,7 @@ public sealed class DalamudRetainerCrystalTransfer
     {
         var result = await RetainerDepositVerifier.DepositAsync(
             stack, framework, gameGui, log, gameInventory,
-            () =>
-            {
-                var pending = BeginDeposit(stack, requestedQuantity);
-                return new RetainerDepositStart(pending.Success, pending.Requested,
-                    pending.PlayerQuantityBefore, pending.RetainerQuantityBefore, pending.Code, pending.Message);
-            },
+            () => BeginDeposit(stack, requestedQuantity),
             requested => SubmitQuantity(stack.ItemId, requested) is { } submitted
                 ? new RetainerDepositResult(submitted.Success, submitted.Transferred, submitted.Code, submitted.Message)
                 : throw new InvalidOperationException(),
@@ -78,7 +73,7 @@ public sealed class DalamudRetainerCrystalTransfer
         return new(result.Success, result.Transferred, result.Code, result.Message);
     }
 
-    private unsafe PendingRetainerCrystalTransfer BeginDeposit(
+    private unsafe RetainerDepositStart BeginDeposit(
         DalamudInventoryStack stack,
         int requestedQuantity)
     {
@@ -89,37 +84,37 @@ public sealed class DalamudRetainerCrystalTransfer
         }
         catch (Exception exception)
         {
-            return PendingRetainerCrystalTransfer.Fail(NativeCapabilityGuard.FailureCode, exception.Message);
+            return RetainerDepositStart.Fail(NativeCapabilityGuard.FailureCode, exception.Message);
         }
 
         if (stack.Container != InventoryType.Crystals ||
             requestedQuantity <= 0 ||
             !ElementalCurrencyCatalog.IsElementalCurrency(stack.ItemId))
         {
-            return PendingRetainerCrystalTransfer.Fail(
+            return RetainerDepositStart.Fail(
                 "InvalidRequest",
                 $"Invalid crystal deposit request for item {stack.ItemId}: {requestedQuantity} from {stack.Container}.");
         }
 
         var inventoryManager = InventoryManager.Instance();
         if (inventoryManager == null)
-            return PendingRetainerCrystalTransfer.Fail("InventoryUnavailable", "Inventory manager is unavailable.");
+            return RetainerDepositStart.Fail("InventoryUnavailable", "Inventory manager is unavailable.");
 
         var playerContainer = inventoryManager->GetInventoryContainer(InventoryType.Crystals);
         if (playerContainer == null || !playerContainer->IsLoaded)
-            return PendingRetainerCrystalTransfer.Fail("PlayerCrystalsUnavailable", "Player crystal inventory is unavailable.");
+            return RetainerDepositStart.Fail("PlayerCrystalsUnavailable", "Player crystal inventory is unavailable.");
 
         var slot = playerContainer->GetInventorySlot(stack.SlotIndex);
         if (slot == null || slot->ItemId != stack.ItemId || slot->Quantity != stack.Quantity)
         {
-            return PendingRetainerCrystalTransfer.Fail(
+            return RetainerDepositStart.Fail(
                 "SourceSlotChanged",
                 $"Expected {stack.Quantity}x item {stack.ItemId} was not found in crystal slot {stack.SlotIndex}.");
         }
 
         var retainerContainer = inventoryManager->GetInventoryContainer(InventoryType.RetainerCrystals);
         if (retainerContainer == null || !retainerContainer->IsLoaded)
-            return PendingRetainerCrystalTransfer.Fail("RetainerCrystalsUnavailable", "Retainer crystal inventory is unavailable.");
+            return RetainerDepositStart.Fail("RetainerCrystalsUnavailable", "Retainer crystal inventory is unavailable.");
 
         var retainerBefore = DalamudInventoryStackScanner.CountLoadedItem(InventoryType.RetainerCrystals, stack.ItemId);
         var capacity = Math.Max(0, ElementalCurrencyCatalog.PerItemCapacity - retainerBefore);
@@ -131,19 +126,22 @@ public sealed class DalamudRetainerCrystalTransfer
                 0,
                 stack.Quantity,
                 retainerBefore,
+                false,
                 "NoCapacity",
                 $"Retainer crystal storage is full for item {stack.ItemId}.");
         }
 
         var retainerAgent = AgentModule.Instance()->GetAgentByInternalId(AgentId.Retainer);
         if (retainerAgent == null || !retainerAgent->IsAgentActive())
-            return PendingRetainerCrystalTransfer.Fail("RetainerAgentUnavailable", "Retainer agent is unavailable.");
+            return RetainerDepositStart.Fail("RetainerAgentUnavailable", "Retainer agent is unavailable.");
 
         if (!RetainerDepositVerifier.PreconditionsAvailable(stack))
-            return PendingRetainerCrystalTransfer.Fail("InventoryUnavailable", "All verification containers must be loaded before dispatch.");
+            return RetainerDepositStart.Fail("InventoryUnavailable", "All verification containers must be loaded before dispatch.");
         if (RetainerDepositVerifier.QuantityPopupVisible(gameGui))
-            return PendingRetainerCrystalTransfer.Fail("QuantityPopupAlreadyOpen", "An unowned quantity popup exists before dispatch.");
+            return RetainerDepositStart.Fail("QuantityPopupAlreadyOpen", "An unowned quantity popup exists before dispatch.");
 
+        var selection = RetainerInventoryCommandPolicy.Select(
+            RetainerTransferDirection.Entrust, isCrystalContainer: true, stack.Quantity, transfer);
         try
         {
             retainerItemCommand(
@@ -151,12 +149,12 @@ public sealed class DalamudRetainerCrystalTransfer
                 (uint)stack.SlotIndex,
                 InventoryType.Crystals,
                 0,
-                RetainerItemCommand.EntrustToRetainer);
+                selection.Command);
         }
         catch (Exception ex)
         {
             log.Error(ex, "Unable to invoke the retainer crystal deposit command.");
-            return PendingRetainerCrystalTransfer.Fail(
+            return RetainerDepositStart.Fail(
                 "DepositDispatchIndeterminate",
                 $"Dispatch began; do not retry. Retainer crystal deposit command is unavailable. {ex.Message}");
         }
@@ -166,8 +164,9 @@ public sealed class DalamudRetainerCrystalTransfer
             transfer,
             stack.Quantity,
             retainerBefore,
+            selection.NeedsQuantityInput,
             "CommandSubmitted",
-            $"Opened deposit quantity for item {stack.ItemId}.");
+            $"Dispatched {selection.Command} for item {stack.ItemId}.");
     }
 
     private unsafe RetainerCrystalTransferResult SubmitQuantity(uint itemId, int requested)
@@ -191,22 +190,5 @@ public sealed class DalamudRetainerCrystalTransfer
         uint Slot,
         InventoryType InventoryType,
         uint A4,
-        RetainerItemCommand Command);
-
-    private enum RetainerItemCommand : long
-    {
-        EntrustToRetainer = 1,
-    }
-
-    private sealed record PendingRetainerCrystalTransfer(
-        bool Success,
-        int Requested,
-        int PlayerQuantityBefore,
-        int RetainerQuantityBefore,
-        string Code,
-        string Message)
-    {
-        public static PendingRetainerCrystalTransfer Fail(string code, string message) =>
-            new(false, 0, 0, 0, code, message);
-    }
+        RetainerInventoryCommand Command);
 }

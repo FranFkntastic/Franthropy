@@ -7,7 +7,10 @@ using Franthropy.Dalamud.Automation.Inventory;
 
 namespace Franthropy.Dalamud.Automation.Retainers;
 
-internal sealed record RetainerDepositStart(bool Success, int Requested, int PlayerBefore, int RetainerBefore, string Code, string Message);
+internal sealed record RetainerDepositStart(bool Success, int Requested, int PlayerBefore, int RetainerBefore, bool NeedsQuantityInput, string Code, string Message)
+{
+    public static RetainerDepositStart Fail(string code, string message) => new(false, 0, 0, 0, false, code, message);
+}
 
 /// <summary>One dispatch, then read-only reconciliation shared by ordinary and crystal deposits.</summary>
 internal static class RetainerDepositVerifier
@@ -75,7 +78,7 @@ internal static class RetainerDepositVerifier
             return new(pending.Success, 0, pending.Code, pending.Message);
         }
         var expected = pending.Requested;
-        var quantityExpected = stack.Quantity > 1;
+        var quantityExpected = pending.NeedsQuantityInput;
         var seen = false;
         var submitted = false;
         var polls = 0;
@@ -93,7 +96,16 @@ internal static class RetainerDepositVerifier
             buffered.Add(message);
             log.Information("{DepositDiagnostic}", message);
         }
-        string Evidence() => $"item={stack.ItemId} source={stack.Container}/{stack.SlotIndex} expected={expected}; budget={VerificationBudgetMs}ms settle={SettleBudgetMs}ms elapsed={elapsed.ElapsedMilliseconds}ms polls={polls}; player={pending.PlayerBefore}->{player} retainer={pending.RetainerBefore}->{retainer}; quantity expected={quantityExpected} seen={seen} submitted={submitted}; inventoryEvents={mutation?.Snapshot().ToString() ?? "unavailable"}; preconditions={available}; not retried";
+        string MovementEvidence()
+        {
+            var playerLoss = pending.PlayerBefore - player;
+            var retainerGain = retainer - pending.RetainerBefore;
+            if (playerLoss != retainerGain)
+                return $"moved=unconfirmed expected={expected} playerLoss={playerLoss} retainerGain={retainerGain}";
+            var wholeStack = pending.Requested < stack.Quantity && playerLoss == stack.Quantity;
+            return $"moved={playerLoss} expected={expected}{(wholeStack ? " wholeStackMoved=true" : string.Empty)}";
+        }
+        string Evidence() => $"item={stack.ItemId} source={stack.Container}/{stack.SlotIndex} {MovementEvidence()}; budget={VerificationBudgetMs}ms settle={SettleBudgetMs}ms elapsed={elapsed.ElapsedMilliseconds}ms polls={polls}; player={pending.PlayerBefore}->{player} retainer={pending.RetainerBefore}->{retainer}; quantity expected={quantityExpected} seen={seen} submitted={submitted}; inventoryEvents={mutation?.Snapshot().ToString() ?? "unavailable"}; preconditions={available}; not retried";
         Trace($"DepositDispatch {Evidence()}");
         try
         {
@@ -131,7 +143,7 @@ internal static class RetainerDepositVerifier
                 }
 
                 // Submission is allowed only during the quantity phase, and at most once.
-                if (!settling && !submitted && available)
+                if (quantityExpected && !settling && !submitted && available)
                 {
                     var result = await framework.RunOnTick(() => submit(expected), cancellationToken: token).ConfigureAwait(false);
                     if (result.Success)
