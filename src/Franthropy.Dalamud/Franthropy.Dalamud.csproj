@@ -129,6 +129,8 @@
     <Compile Remove="UI\Tables\DalamudRankedColumns.cs" />
     <Compile Remove="UI\Tables\DalamudCrossRowHighlight.cs" />
     <Compile Remove="UI\Tables\DalamudProgressCell.cs" />
+    <Compile Remove="UI\Tables\DalamudRowRemoveButton.cs" />
+    <Compile Remove="UI\Feedback\DalamudUndoStrip.cs" />
     <Compile Remove="Diagnostics\DalamudConditionTrustProbe.cs" />
     <Compile Remove="Diagnostics\DalamudRenderControl.cs" />
     <Compile Remove="Diagnostics\NativeCapabilityGuard.cs" />
