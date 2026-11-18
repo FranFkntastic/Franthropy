@@ -14,33 +14,6 @@ using Franthropy.Dalamud.Automation.Ui;
 
 namespace Franthropy.Dalamud.Automation.Retainers;
 
-internal enum RetainerRetrievalCommand : long
-{
-    RetrieveFromRetainer = 0,
-    RetrieveQuantity = 3,
-}
-
-internal sealed record RetainerRetrievalCommandSelection(
-    RetainerRetrievalCommand Command,
-    bool NeedsQuantityInput);
-
-internal static class RetainerRetrievalCommandPolicy
-{
-    public static RetainerRetrievalCommandSelection Select(
-        bool isCrystalContainer,
-        int sourceQuantity,
-        int requestedQuantity)
-    {
-        var transfer = Math.Min(sourceQuantity, requestedQuantity);
-        if (isCrystalContainer)
-            return new(RetainerRetrievalCommand.RetrieveFromRetainer, true);
-
-        return transfer < sourceQuantity
-            ? new(RetainerRetrievalCommand.RetrieveQuantity, true)
-            : new(RetainerRetrievalCommand.RetrieveFromRetainer, false);
-    }
-}
-
 /// <summary>
 /// Retrieves an exact quantity from the currently open retainer using the
 /// game's typed retainer command. The normal verifier watches the addressed
@@ -301,7 +274,8 @@ public sealed class DalamudRetainerItemRetrieval
         }
 
         var transfer = Math.Min(requestedQuantity, stack.Quantity);
-        var selection = RetainerRetrievalCommandPolicy.Select(
+        var selection = RetainerInventoryCommandPolicy.Select(
+            RetainerTransferDirection.Retrieve,
             stack.Container == InventoryType.RetainerCrystals,
             stack.Quantity,
             transfer);
@@ -729,7 +703,7 @@ public sealed class DalamudRetainerItemRetrieval
         uint Slot,
         InventoryType InventoryType,
         uint A4,
-        RetainerRetrievalCommand Command);
+        RetainerInventoryCommand Command);
 
     private sealed record PendingRetainerRetrieval(
         bool Success,
