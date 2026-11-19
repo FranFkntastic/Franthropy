@@ -3,10 +3,30 @@ using Franthropy.Dalamud.Automation;
 namespace Franthropy.Dalamud.Travel;
 
 /// <summary>Framework-thread operation. Resume a journaled attempt in observation-only mode.</summary>
-public sealed class CharacterSwitchOperation(DalamudLifestreamLogin login, LifestreamLoginRequest target,
-    DateTimeOffset deadline, Action<string> warning, bool alreadySubmitted = false)
+public sealed class CharacterSwitchOperation
 {
-    private bool submitted = alreadySubmitted;
+    private readonly Func<LifestreamLoginRequest, LifestreamLoginSubmissionResult> dispatch;
+    private readonly LifestreamLoginRequest target;
+    private readonly DateTimeOffset deadline;
+    private readonly Action<string> warning;
+    private readonly Action persistSubmitting;
+    private bool submitted;
+
+    public CharacterSwitchOperation(DalamudLifestreamLogin login, LifestreamLoginRequest target, DateTimeOffset deadline,
+        Action<string> warning, Action persistSubmitting, bool alreadySubmitted = false)
+        : this(login.TryChangeCharacter, target, deadline, warning, persistSubmitting, alreadySubmitted) { }
+
+    internal CharacterSwitchOperation(Func<LifestreamLoginRequest, LifestreamLoginSubmissionResult> dispatch,
+        LifestreamLoginRequest target, DateTimeOffset deadline, Action<string> warning, Action persistSubmitting, bool alreadySubmitted)
+    {
+        this.dispatch = dispatch;
+        this.target = target;
+        this.deadline = deadline;
+        this.warning = warning;
+        this.persistSubmitting = persistSubmitting;
+        submitted = alreadySubmitted;
+    }
+
     private OperationResult result = new(OperationStatus.Pending, "AwaitingEligibility", "Checking switch eligibility.");
     public OperationResult Tick(CharacterSwitchGameState observed, DateTimeOffset now)
     {
@@ -42,10 +62,13 @@ public sealed class CharacterSwitchOperation(DalamudLifestreamLogin login, Lifes
         if (submitted) return result = new(OperationStatus.Pending, "AwaitingIdentity", "Waiting for the exact logged-in identity.");
         if (CharacterSwitchPolicy.GetRefusal(observed) is { } reason)
             return result = new(OperationStatus.Pending, "SwitchBlocked", reason);
+        try { persistSubmitting(); }
+        catch (Exception ex) { return result = new(OperationStatus.Failed, "SubmissionNotPersisted", ex.Message); }
         submitted = true;
-        var response = login.TryChangeCharacter(request!);
-        if (response.Code == "NotReady") submitted = false; // provider explicitly rejected, no work accepted
-        return result = new(response.Success || response.Code == "NotReady" ? OperationStatus.Pending :
+        LifestreamLoginSubmissionResult response;
+        try { response = dispatch(request!); }
+        catch (Exception ex) { return result = new(OperationStatus.Indeterminate, "SwitchDispatchUncertain", ex.Message); }
+        return result = new(response.Success ? OperationStatus.Pending :
             response.Code == "IpcFailure" ? OperationStatus.Indeterminate : OperationStatus.Failed, response.Code, response.Message);
     }
 

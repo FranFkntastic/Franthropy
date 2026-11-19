@@ -58,7 +58,11 @@ public sealed record TradePartner(
     ulong GameObjectId,
     string Name,
     uint HomeWorldId,
-    string HomeWorldName = "");
+    string HomeWorldName = "")
+{
+    internal bool Matches(ulong objectId, string name, uint homeWorldId) =>
+        GameObjectId == objectId && Name == name && HomeWorldId == homeWorldId;
+}
 
 [Serializable]
 public sealed class TradeTimingOptions
@@ -90,12 +94,22 @@ public sealed class TradeTimingOptions
 public sealed class TradeRecoveryState
 {
     public ulong OwnerContentId { get; set; }
+    public TradeConfirmation? AwaitingVerification { get; set; }
     public bool ObserveOnly { get; set; }
     public bool CancellationPending { get; set; }
     public uint PartnerEntityId { get; set; }
 }
 
-public sealed record TradeStartResult(bool Success, string Message);
+// List-shaped baseline so ordinary JSON stores need no custom dictionary-key converter.
+public sealed record TradeConfirmation(ulong Sender, TradePartner Partner, IReadOnlyList<TradeBatchLine> Lines,
+    int GilAmount, IReadOnlyList<TradeOfferedItem> Before)
+{
+    internal TradeBatch ToBatch() => new(Lines, GilAmount,
+        Before.ToDictionary(x => new TradeInventoryKey(x.ItemId, x.IsHighQuality), x => x.Quantity));
+}
+
+public enum TradeSettlement { Delivered, NotDelivered }
+public sealed record TradeStartResult(bool Success, string Message, string? Code = null);
 
 public enum TradeValidationCode
 {

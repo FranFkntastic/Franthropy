@@ -12,10 +12,14 @@ public sealed class TradeReceiveOperation
     public TradeDeltaEvidence? Evidence { get; private set; }
     private readonly IReadOnlyDictionary<TradeInventoryKey, int> expected;
     private IReadOnlyDictionary<TradeInventoryKey, int>? before;
-    private bool confirmed, opened, closed, stopped;
+    private bool confirmed, opened, closed, awaitingReadyAcknowledgement;
+    private uint? foreignEntity;
+    private IReadOnlyDictionary<TradeInventoryKey, int>? locked;
+    /// <summary>The exact credited offer, populated only on success. Subtract it once from the caller's remaining manifest.</summary>
+    public IReadOnlyDictionary<TradeInventoryKey, int>? Received { get; private set; }
     private OperationResult result = new(OperationStatus.Pending, "AwaitingTrade", "Waiting for the expected sender.");
 
-    public TradeReceiveOperation(ITradeIo io, TradePartner partner, IReadOnlyList<TradeOfferedItem> manifest, DateTimeOffset deadline,
+    public TradeReceiveOperation(ITradeIo io, TradePartner partner, IReadOnlyList<TradeOfferedItem> remainingManifest, DateTimeOffset deadline,
         Action<string> warning)
     {
         this.io = io;
@@ -23,17 +27,17 @@ public sealed class TradeReceiveOperation
         this.partner = partner;
         this.deadline = deadline;
         this.warning = warning ?? throw new ArgumentNullException(nameof(warning));
-        if (manifest.Count is 0 or > TradePlanner.MaximumTradeSlots || manifest.Any(x => x.ItemId <= 1 || x.Quantity <= 0))
-            throw new ArgumentException("Expected one batch of up to five positive item lines.", nameof(manifest));
-        expected = manifest.GroupBy(x => new TradeInventoryKey(x.ItemId, x.IsHighQuality))
+        if (remainingManifest.Count == 0 || remainingManifest.Any(x => x.ItemId <= 1 || x.Quantity <= 0))
+            throw new ArgumentException("Expected a non-empty remaining manifest of positive item quantities.", nameof(remainingManifest));
+        expected = remainingManifest.GroupBy(x => new TradeInventoryKey(x.ItemId, x.IsHighQuality))
             .ToDictionary(g => g.Key, g => g.Sum(x => x.Quantity));
     }
 
     public OperationResult Stop()
     {
-        stopped = true;
-        return result.IsTerminal || before != null ? result :
-            result = new(OperationStatus.Cancelled, "StoppedBeforeLock", "Incoming trade was left untouched.");
+        if (result.IsTerminal || confirmed) return result;
+        CancelOwned();
+        return result = new(OperationStatus.Cancelled, "StoppedBeforeConfirm", "Stopped without confirming.");
     }
 
     public OperationResult Tick(DateTimeOffset now)
@@ -54,7 +58,7 @@ public sealed class TradeReceiveOperation
             return result;
         }
         try { result = Advance(now); }
-        catch (Exception ex) { result = new(before != null ? OperationStatus.Indeterminate : OperationStatus.Failed, "ReceiveObservationFailed", ex.Message); }
+        catch (Exception ex) { result = new(confirmed ? OperationStatus.Indeterminate : OperationStatus.Failed, "ReceiveObservationFailed", ex.Message); }
         if (result.Status is OperationStatus.Indeterminate or OperationStatus.Failed)
             warning($"{partner.Name}@{partner.HomeWorldId}: {result.Code}: {result.Message}");
         return result;
@@ -63,8 +67,11 @@ public sealed class TradeReceiveOperation
     private OperationResult Advance(DateTimeOffset now)
     {
         if (now >= deadline)
-            return new(before != null ? OperationStatus.Indeterminate : OperationStatus.Failed, "ReceiveDeadline",
+        {
+            if (!confirmed) CancelOwned();
+            return new(confirmed ? OperationStatus.Indeterminate : OperationStatus.Failed, "ReceiveDeadline",
                 $"Receive deadline {deadline:O} expired. {result.Message}");
+        }
         if (actor == 0) return Refuse("ReceiverUnknown", "No logged-in receiver was observable when armed.");
         if (io.LocalContentId == 0) return result;
         if (io.LocalContentId != actor) return Refuse("ReceiverChanged", "Receiver identity changed during the trade.");
@@ -72,51 +79,98 @@ public sealed class TradeReceiveOperation
         {
             if (!opened) return result;
             closed = true; // a later window must never inherit this window's Ready or Confirm
-            if (before == null) return new(OperationStatus.Cancelled, "ClosedBeforeLock", "Incoming trade closed before Ready.");
+            if (!confirmed) return new(OperationStatus.Cancelled, "ClosedBeforeConfirm", "Window closed without confirmation; retry the remaining manifest.");
             var inventory = io.ObserveTradeableInventory();
-            if (inventory.IsAuthoritative && confirmed)
+            if (inventory.IsAuthoritative && before != null && locked != null)
             {
                 var after = TradePlanner.CountExactInventory(inventory.Stacks);
                 Evidence = new(partner, now, before, after);
-                if (before.Keys.Concat(after.Keys).Concat(expected.Keys).Distinct().All(k =>
-                    after.GetValueOrDefault(k) - before.GetValueOrDefault(k) == expected.GetValueOrDefault(k)))
-                    return new(OperationStatus.Succeeded, "IncomingDeltaVerified", "The received inventory delta equals the manifest.");
+                if (before.Keys.Concat(after.Keys).Concat(locked.Keys).Distinct().All(k =>
+                    after.GetValueOrDefault(k) - before.GetValueOrDefault(k) == locked.GetValueOrDefault(k)))
+                {
+                    Received = locked;
+                    return new(OperationStatus.Succeeded, "IncomingDeltaVerified", "The received inventory delta equals the confirmed offer.");
+                }
             }
             return new(OperationStatus.Pending, "AwaitingReceiveDelta", "Waiting for exact received inventory evidence.");
         }
-        opened = true;
         if (io.ObserveTradePartnerEntityId() is not { } entity) return result;
         if (entity != (uint)partner.GameObjectId || !io.PartnerIsAvailable(partner))
-            return Refuse("PartnerMismatch", "The live sender differs from the expected character.");
-        if (!io.IsRemoteLocked || io.IsNumericInputOpen) return result;
+        {
+            if (confirmed) return result; // Only an observed closure releases this confirmed window.
+            opened = false;
+            before = null;
+            locked = null;
+            if (foreignEntity != entity)
+            {
+                var who = io.GetAvailablePartners().FirstOrDefault(p => (uint)p.GameObjectId == entity);
+                warning($"Ignoring unexpected sender {who?.Name}@{who?.HomeWorldId} (entity {entity}); expected {partner.Name}@{partner.HomeWorldId}.");
+                foreignEntity = entity;
+            }
+            io.TryCancelTrade(out _); // foreign session: pre-lock only
+            return result;
+        }
+        opened = true;
+        foreignEntity = null;
+        if (confirmed) return result;
+        if (!io.IsRemoteLocked)
+        {
+            before = null;
+            locked = null;
+            return result;
+        }
+        if (io.IsNumericInputOpen) return result;
         var local = io.ObserveOffer();
         var remote = io.ObserveRemoteOffer();
         if (local == null || remote == null || remote.SyncPending || local.SyncPending) return result;
         var actual = remote.Items.GroupBy(x => new TradeInventoryKey(x.ItemId, x.IsHighQuality))
             .ToDictionary(g => g.Key, g => g.Sum(x => x.Quantity));
         if (remote.PartnerEntityId != entity || local.PartnerEntityId != entity || remote.Gil != 0 ||
-            local.Gil != 0 || local.Items.Count != 0 || actual.Count != expected.Count ||
-            expected.Any(kv => actual.GetValueOrDefault(kv.Key) != kv.Value))
+            local.Gil != 0 || local.Items.Count != 0 || actual.Count == 0 ||
+            remote.Items.Any(i => i.Quantity <= 0) ||
+            actual.Any(kv => kv.Value > expected.GetValueOrDefault(kv.Key)))
             return Refuse("LockedManifestMismatch", "The locked partner offer or local consideration differs from the expected manifest.");
-        if (before == null && io.CanClickReady)
+        var canReady = io.CanClickReady;
+        if (!canReady) awaitingReadyAcknowledgement = false;
+        if (canReady && !io.CanConfirmTrade && (before == null || !awaitingReadyAcknowledgement || !SameOffer(actual)))
         {
             var inv = io.ObserveTradeableInventory();
             if (!inv.IsAuthoritative) return result;
+            locked = actual;
             before = TradePlanner.CountExactInventory(inv.Stacks);
             if (!io.TryClickReady(out var error))
             {
                 before = null;
                 if (error.Length != 0) return Refuse("ReadyRejected", error);
             }
+            else awaitingReadyAcknowledgement = true;
         }
-        else if (before != null && !confirmed && !stopped && io.CanConfirmTrade)
+        else if (before != null && io.CanConfirmTrade)
         {
-            if (io.TryConfirmTrade(out var error)) confirmed = true;
-            else if (error.Length != 0) return Refuse("ConfirmRejected", error);
+            if (!SameOffer(actual)) return Refuse("LockedManifestMismatch", "The locked offer changed after Ready.");
+            confirmed = true;
+            if (!io.TryConfirmTrade(out var error))
+            {
+                confirmed = false;
+                if (error.Length != 0) return Refuse("ConfirmRejected", error);
+            }
         }
         return new(OperationStatus.Pending, confirmed ? "AwaitingClosure" : "AwaitingConfirmation", "Waiting for verified transfer.");
     }
 
-    private OperationResult Refuse(string code, string reason) =>
-        new(before == null ? OperationStatus.Failed : OperationStatus.Indeterminate, code, reason);
+    private bool SameOffer(IReadOnlyDictionary<TradeInventoryKey, int> actual) =>
+        locked != null && locked.Count == actual.Count && actual.All(p => locked.GetValueOrDefault(p.Key) == p.Value);
+
+    private void CancelOwned()
+    {
+        if (opened && !confirmed && io.LocalContentId == actor && io.IsTradeOpen &&
+            io.ObserveTradePartnerEntityId() == (uint)partner.GameObjectId && io.PartnerIsAvailable(partner))
+            io.TryCancelUnconfirmedTrade(out _);
+    }
+
+    private OperationResult Refuse(string code, string reason)
+    {
+        if (!confirmed) CancelOwned();
+        return new(confirmed ? OperationStatus.Indeterminate : OperationStatus.Failed, code, reason);
+    }
 }

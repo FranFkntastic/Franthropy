@@ -90,14 +90,27 @@ public sealed class TradeRunner : IDisposable
         this.externalAutomation = externalAutomation;
         this.log = log;
         this.clock = clock;
+        if (this.recovery.AwaitingVerification is { } marker)
+        {
+            actor = marker.Sender;
+            partner = marker.Partner;
+            unsettledBatch = marker.ToBatch();
+            Result = new(OperationStatus.Indeterminate, "SettlementRequired", "A confirmation is awaiting settlement.");
+            if (io.IsTradeOpen)
+            {
+                this.recovery.CancellationPending = true;
+                this.recovery.OwnerContentId = marker.Sender;
+                this.recovery.PartnerEntityId = (uint)marker.Partner.GameObjectId;
+                this.recovery.ObserveOnly = true;
+            }
+        }
         if (this.recovery.CancellationPending)
         {
             cancellationCheckpointSaved = true;
             externalAutomation.SuppressTradeAutoConfirm();
             pendingFinish = (this.recovery.ObserveOnly ? TradeExecutionState.Failed : TradeExecutionState.Stopped,
                 "Recovering the previous trade closure.");
-            if (this.recovery.ObserveOnly)
-                Result = new(OperationStatus.Indeterminate, "InterruptedAfterLock", "An interrupted locked trade requires reconciliation.");
+            confirmationSubmitted = this.recovery.AwaitingVerification != null;
             SetActive(TradeExecutionState.ClosingTrade, pendingFinish.Value.Message, CompletionTimeout);
         }
     }
@@ -113,7 +126,7 @@ public sealed class TradeRunner : IDisposable
     /// </summary>
     public Func<TradePartner, string?>? RecipientGuard { get; set; }
 
-    /// <summary>Raised on the framework thread after each batch's inventory delta is verified, before the queue is saved.</summary>
+    /// <summary>Raised on the framework thread after verification and durable saving of the updated queue.</summary>
     public event Action<TradePartner, TradeBatch>? BatchVerified;
 
     /// <summary>
@@ -158,8 +171,8 @@ public sealed class TradeRunner : IDisposable
 
     public TradeStartResult Start()
     {
-        if (Result?.Status == OperationStatus.Indeterminate)
-            return new(false, "Previous trade has unresolved custody.");
+        if (recovery.AwaitingVerification != null)
+            return new(false, "Previous confirmation requires settlement.", "SettlementRequired");
         if (IsActive)
             return new(false, "Trade is already running.");
         var hasSelectedPartner = io.TryGetSelectedPartner(out var selectedPartner);
@@ -173,8 +186,8 @@ public sealed class TradeRunner : IDisposable
 
     public TradeStartResult Start(TradePartner selectedPartner)
     {
-        if (Result?.Status == OperationStatus.Indeterminate)
-            return new(false, "Previous trade is indeterminate; its custody must be settled before another run.");
+        if (recovery.AwaitingVerification != null)
+            return new(false, "Previous confirmation requires settlement.", "SettlementRequired");
         if (IsActive)
             return new(false, "Trade is already running.");
         if (!io.TryGetExecutionReadiness(out var readinessError))
@@ -279,7 +292,7 @@ public sealed class TradeRunner : IDisposable
                         "Offer acknowledgement timed out; rebuilding the uncommitted trade.");
                     return;
                 }
-                Result = new(readyClicked ? OperationStatus.Indeterminate : OperationStatus.Failed,
+                Result = new(confirmationSubmitted ? OperationStatus.Indeterminate : OperationStatus.Failed,
                     $"{Snapshot.State}Deadline", $"Deadline {deadline:O} expired while {DescribeState(Snapshot.State)}. Last observation: {Snapshot.Message}");
                 Fail(Result.Message);
                 return;
@@ -288,7 +301,7 @@ public sealed class TradeRunner : IDisposable
             if (io.LocalContentId == 0) return;
             if (io.LocalContentId != actor)
             {
-                Result = new(OperationStatus.Indeterminate, "SenderChanged", "Sender changed before trade settlement.");
+                Result = new(confirmationSubmitted ? OperationStatus.Indeterminate : OperationStatus.Failed, "SenderChanged", "Sender changed before trade settlement.");
                 CompleteFinish(TradeExecutionState.Failed, Result.Message);
                 return;
             }
@@ -349,10 +362,10 @@ public sealed class TradeRunner : IDisposable
             pendingFinish = (TradeExecutionState.Stopped, message);
             return;
         }
-        if (readyClicked)
+        if (confirmationSubmitted)
         {
             stopAfterBatch = true;
-            Snapshot = Snapshot with { Message = "Stop requested after lock; waiting for the outcome." };
+            Snapshot = Snapshot with { Message = "Stop requested after confirmation; waiting for the outcome." };
             return;
         }
         Finish(TradeExecutionState.Stopped, message);
@@ -360,11 +373,11 @@ public sealed class TradeRunner : IDisposable
 
     public void Dispose()
     {
-        if (IsActive && readyClicked && Snapshot.State != TradeExecutionState.ClosingTrade && io.IsTradeOpen)
-            BeginClosing(TradeExecutionState.Failed, "Unloading after lock; retaining trade ownership without cancellation.");
+        if (IsActive && confirmationSubmitted && Snapshot.State != TradeExecutionState.ClosingTrade && io.IsTradeOpen)
+            BeginClosing(TradeExecutionState.Failed, "Unloading after confirmation; retaining trade ownership without cancellation.");
         if (IsActive && Snapshot.State != TradeExecutionState.ClosingTrade)
             Stop("Trade stopped because the plugin is unloading.");
-        if (recovery.CancellationPending || (IsActive && readyClicked))
+        if (recovery.CancellationPending)
             externalAutomation.RetainTradeSuppressionOnDispose();
         else
             externalAutomation.RestoreTradeAutoConfirm();
@@ -527,10 +540,7 @@ public sealed class TradeRunner : IDisposable
     {
         if (!io.IsTradeOpen)
         {
-            SetActive(
-                TradeExecutionState.VerifyingInventory,
-                $"Trade closed; verifying batch {batchNumber:N0}.",
-                CompletionTimeout);
+            Fail("Trade closed before this operation submitted confirmation.");
             return;
         }
         if (readyClicked || now < nextActionAt)
@@ -583,26 +593,30 @@ public sealed class TradeRunner : IDisposable
     {
         if (!io.IsTradeOpen)
         {
-            SetActive(
-                TradeExecutionState.VerifyingInventory,
-                $"Trade closed; verifying batch {batchNumber:N0}.",
-                CompletionTimeout);
+            Fail("Trade closed before this operation submitted confirmation.");
             return;
         }
-        if (confirmationSubmitted || stopAfterBatch || !io.IsRemoteLocked)
+        if (confirmationSubmitted || stopAfterBatch)
             return;
 
-        if (!VerifyOffer())
+        if (!VerifyOffer() || !io.IsRemoteLocked || !io.CanConfirmTrade)
             return;
 
+        var planned = batch!;
+        recovery.AwaitingVerification = new(actor, partner!, planned.Lines.ToArray(), planned.GilAmount,
+            planned.ExpectedInventoryBefore.Select(p => new TradeOfferedItem(p.Key.ItemId, p.Key.IsHighQuality, p.Value)).ToArray());
+        try { save(); }
+        catch { recovery.AwaitingVerification = null; throw; }
+        confirmationSubmitted = true; // A throwing dispatch may already have clicked.
         if (!io.TryConfirmTrade(out var error))
         {
+            confirmationSubmitted = false; // The adapter explicitly declined without dispatch.
+            PersistSettlement(TradeSettlement.NotDelivered);
             if (!string.IsNullOrWhiteSpace(error))
                 Fail(error);
             return;
         }
 
-        confirmationSubmitted = true;
         SetActive(
             TradeExecutionState.VerifyingInventory,
             $"Confirmed batch {batchNumber:N0}; waiting for inventory evidence.",
@@ -649,9 +663,9 @@ public sealed class TradeRunner : IDisposable
             return;
         }
         var inventory = observation.Stacks;
-        if (!readyClicked)
+        if (!confirmationSubmitted)
         {
-            Fail("Trade closed before this operation locked the manifest.");
+            Fail("Trade closed before this operation submitted confirmation.");
             return;
         }
         Evidence = new(partner!, now, batch.ExpectedInventoryBefore, TradePlanner.CountExactInventory(inventory));
@@ -664,11 +678,13 @@ public sealed class TradeRunner : IDisposable
             return;
         }
 
-        TradePlanner.ApplyCompletedBatch(queue, batch);
-        completedUnitCount = checked(completedUnitCount + batch.UnitCount);
+        var verified = batch;
+        PersistSettlement(TradeSettlement.Delivered);
+        confirmationSubmitted = readyClicked = false;
+        batch = null;
+        completedUnitCount = checked(completedUnitCount + verified.UnitCount);
         completedBatchCount++;
-        NotifyBatchVerified(batch);
-        save();
+        NotifyBatchVerified(verified);
         checkpointQueueSignature = ComputeQueueSignature(queue);
         if (stopAfterBatch && queue.Count != 0)
         {
@@ -693,6 +709,52 @@ public sealed class TradeRunner : IDisposable
         TickOpeningTrade(now);
     }
 
+    /// <summary>Observe only the original sender after closure; null means insufficient or conflicting evidence.</summary>
+    public TradeSettlement? ObserveSettlement()
+    {
+        if (recovery.AwaitingVerification is not { } marker || io.IsTradeOpen ||
+            io.LocalContentId != marker.Sender || io.ObserveTradeableInventory() is not { IsAuthoritative: true } inventory)
+            return null;
+        var planned = marker.ToBatch();
+        if (TradePlanner.HasExpectedInventoryDelta(planned, inventory.Stacks, out _)) return TradeSettlement.Delivered;
+        var after = TradePlanner.CountExactInventory(inventory.Stacks);
+        return after.Keys.Concat(planned.ExpectedInventoryBefore.Keys).All(k =>
+            after.GetValueOrDefault(k) == planned.ExpectedInventoryBefore.GetValueOrDefault(k)) ? TradeSettlement.NotDelivered : null;
+    }
+
+    public void AcknowledgeSettlement(TradeSettlement decision)
+    {
+        if (IsActive || io.IsTradeOpen || recovery.AwaitingVerification == null)
+            throw new InvalidOperationException("Settlement requires a stopped runner, closed window and pending confirmation.");
+        PersistSettlement(decision);
+        unsettledBatch = null;
+        confirmationSubmitted = readyClicked = false;
+        Result = null;
+        checkpointQueueSignature = string.Empty;
+        Snapshot = Snapshot with { State = TradeExecutionState.Idle, Message = $"Confirmation settled: {decision}.",
+            RemainingItemCount = queue.Count, RemainingUnitCount = queue.Sum(x => x.Quantity) };
+    }
+
+    private void PersistSettlement(TradeSettlement decision)
+    {
+        if (!Enum.IsDefined(decision)) throw new ArgumentOutOfRangeException(nameof(decision));
+        var marker = recovery.AwaitingVerification ?? throw new InvalidOperationException("Missing confirmation checkpoint.");
+        var previous = queue.Select(i => (Item: i, i.Quantity)).ToArray();
+        try
+        {
+            if (decision == TradeSettlement.Delivered) TradePlanner.ApplyCompletedBatch(queue, marker.ToBatch());
+            recovery.AwaitingVerification = null;
+            save();
+        }
+        catch
+        {
+            recovery.AwaitingVerification = marker;
+            queue.Clear();
+            foreach (var entry in previous) { entry.Item.Quantity = entry.Quantity; queue.Add(entry.Item); }
+            throw;
+        }
+    }
+
     private void NotifyBatchVerified(TradeBatch verified) => NotifyBatch(BatchVerified, verified, "verified");
 
     private bool CheckConsideration(TradePartner expected)
@@ -709,14 +771,14 @@ public sealed class TradeRunner : IDisposable
     {
         if (partner == null || listeners == null)
             return;
-        try
+        foreach (Action<TradePartner, TradeBatch> listener in listeners.GetInvocationList())
         {
-            listeners(partner, planned);
-        }
-        catch (Exception exception)
-        {
-            log.Error(exception, "[Franthropy] Trade batch {Stage} listener failed run={RunId} batch={Batch}.", stage, runId ?? "", batchNumber);
-            if (stage != "abandoned") throw;
+            try { listener(partner, planned); }
+            catch (Exception exception)
+            {
+                log.Error(exception, "[Franthropy] Trade batch {Stage} listener failed run={RunId} batch={Batch}.", stage, runId ?? "", batchNumber);
+                if (stage is "starting" or "locking") throw;
+            }
         }
     }
 
@@ -732,7 +794,8 @@ public sealed class TradeRunner : IDisposable
         batch = TradePlanner.BuildNextBatch(
             queue.ToList(),
             inventory);
-        NotifyBatch(BatchStarting, batch, "starting");
+        try { NotifyBatch(BatchStarting, batch, "starting"); }
+        catch (Exception ex) { Fail($"Batch starting listener failed: {ex.Message}"); return false; }
         batchRecoveryDeadline = clock() + OpenTradeTimeout + OfferItemsTimeout;
         offerLineOperation = null;
         offerGilOperation = null;
@@ -767,7 +830,7 @@ public sealed class TradeRunner : IDisposable
 
     private void Fail(string message)
     {
-        Result ??= new(readyClicked ? OperationStatus.Indeterminate : OperationStatus.Failed,
+        Result ??= new(confirmationSubmitted ? OperationStatus.Indeterminate : OperationStatus.Failed,
             $"{Snapshot.State}Failed", message);
         Finish(TradeExecutionState.Failed, message);
     }
@@ -786,7 +849,7 @@ public sealed class TradeRunner : IDisposable
 
     private void BeginClosing(TradeExecutionState state, string message)
     {
-        recovery.ObserveOnly = readyClicked;
+        recovery.ObserveOnly = confirmationSubmitted;
         recovery.OwnerContentId = actor;
         pendingFinish = (state, message);
         if (!recovery.CancellationPending)
@@ -809,7 +872,7 @@ public sealed class TradeRunner : IDisposable
         if (deadline != default && clock() >= deadline)
         {
             var reason = $"TradeClosureDeadline {deadline:O} expired; retaining ownership until closure is observed.";
-            Result = new(OperationStatus.Indeterminate, "TradeClosureDeadline", reason);
+            Result = new(confirmationSubmitted ? OperationStatus.Indeterminate : OperationStatus.Failed, "TradeClosureDeadline", reason);
             log.Warning("[Franthropy] {Reason}", reason);
             pendingFinish = terminal = (TradeExecutionState.Failed, reason);
             deadline = default;
@@ -825,9 +888,9 @@ public sealed class TradeRunner : IDisposable
             // Invalid offer contents prevent confirmation, not cancellation of
             // our own session. Read recipient ownership independently.
             if (io.LocalContentId == 0) return;
-            if (io.LocalContentId != recovery.OwnerContentId)
+            if (recovery.OwnerContentId != 0 && io.LocalContentId != recovery.OwnerContentId)
             {
-                Result = new(OperationStatus.Indeterminate, "ClosureOwnerChanged", "Sender changed; the open trade was left untouched.");
+                Result = new(confirmationSubmitted ? OperationStatus.Indeterminate : OperationStatus.Failed, "ClosureOwnerChanged", "Sender changed; the open trade was left untouched.");
                 CompleteFinish(TradeExecutionState.Failed, Result.Message);
                 return;
             }
@@ -840,7 +903,11 @@ public sealed class TradeRunner : IDisposable
                 return;
             }
             var error = string.Empty;
-            if (!recovery.ObserveOnly) io.TryCancelTrade(out error);
+            if (!recovery.ObserveOnly)
+            {
+                if (recovery.OwnerContentId == 0) io.TryCancelTrade(out error);
+                else io.TryCancelUnconfirmedTrade(out error);
+            }
             Snapshot = Snapshot with
             {
                 Message = $"{terminal.Message} Waiting for trade closure." +
@@ -912,13 +979,13 @@ public sealed class TradeRunner : IDisposable
         {
             TradeExecutionState.Completed => OperationStatus.Succeeded,
             TradeExecutionState.Stopped => OperationStatus.Cancelled,
-            _ when readyClicked => OperationStatus.Indeterminate,
+            _ when confirmationSubmitted => OperationStatus.Indeterminate,
             _ => OperationStatus.Failed
         }, $"{previousState}.{state}", message);
         nextActionAt = default;
         if (batch != null && state is TradeExecutionState.Failed or TradeExecutionState.Stopped)
             NotifyBatch(BatchAbandoned, batch, "abandoned");
-        unsettledBatch = Result.Status == OperationStatus.Indeterminate ? batch : null;
+        unsettledBatch = recovery.AwaitingVerification?.ToBatch();
         batch = null;
         Snapshot = new(
             state,

@@ -46,6 +46,7 @@ public interface ITradeIo
     bool TryClickReady(out string error);
     bool TryConfirmTrade(out string error);
     bool TryCancelTrade(out string error);
+    bool TryCancelUnconfirmedTrade(out string error);
 }
 
 public sealed class DalamudTradeIo : ITradeIo, ITradeAutoAcceptIo
@@ -364,9 +365,7 @@ public sealed class DalamudTradeIo : ITradeIo, ITradeAutoAcceptIo
         player = EnumeratePartnerCandidates()
             .FirstOrDefault(candidate =>
                 candidate.IsTargetable &&
-                candidate.GameObjectId == partner.GameObjectId &&
-                candidate.Name.TextValue == partner.Name &&
-                candidate.HomeWorld.RowId == partner.HomeWorldId)!;
+                partner.Matches(candidate.GameObjectId, candidate.Name.TextValue, candidate.HomeWorld.RowId))!;
         return player != null;
     }
 
@@ -506,16 +505,25 @@ public sealed class DalamudTradeIo : ITradeIo, ITradeAutoAcceptIo
         return true;
     }
 
-    public unsafe bool TryCancelTrade(out string error)
+    public bool TryCancelTrade(out string error) => Cancel(false, out error);
+    public bool TryCancelUnconfirmedTrade(out string error) => Cancel(true, out error);
+
+    private unsafe bool Cancel(bool ownedUnconfirmed, out string error)
     {
         if (!TryResolveUiCapability(out error))
             return false;
 
         var manager = InventoryManager.Instance();
-        if (manager == null || manager->TradeLocalState != TradeState.SelectingTradeGoods)
+        if (manager == null || (manager->TradeLocalState != TradeState.SelectingTradeGoods &&
+            !(ownedUnconfirmed && manager->TradeLocalState is TradeState.LockedIn or TradeState.WaitingForConfirmation)))
         {
             error = "Local trade is not observably pre-lock; leaving it untouched.";
             return false;
+        }
+        if (ownedUnconfirmed && TryGetTradeConfirmation(out var prompt))
+        {
+            new AddonMaster.SelectYesno(prompt).No();
+            return true;
         }
         if (!TryGetCancelButton(out var addon, out var button))
         {
