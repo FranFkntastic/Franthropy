@@ -23,6 +23,9 @@ jobs:
       - name: Test shared observations
         run: dotnet test tests/Franthropy.Observations.Tests/Franthropy.Observations.Tests.csproj -c Release
 
+      - name: Test local peer pipes
+        run: dotnet test tests/Franthropy.PeerLink.Tests/Franthropy.PeerLink.Tests.csproj -c Release
+
       - name: Pack reusable projects
         shell: pwsh
         run: |
