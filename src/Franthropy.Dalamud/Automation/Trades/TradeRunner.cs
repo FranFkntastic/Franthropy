@@ -32,6 +32,7 @@ public sealed class TradeRunner : IDisposable
     private TradeOfferLineOperation? offerLineOperation;
     private TradeOfferGilOperation? offerGilOperation;
     private bool readyClicked;
+    private bool readyAcknowledged;
     private bool confirmationSubmitted;
     private ulong actor;
     private bool stopAfterBatch;
@@ -583,6 +584,7 @@ public sealed class TradeRunner : IDisposable
         }
 
         readyClicked = true;
+        readyAcknowledged = false;
         SetActive(
             TradeExecutionState.ConfirmingTrade,
             $"Batch {batchNumber:N0} is locked; waiting for partner confirmation.",
@@ -599,7 +601,22 @@ public sealed class TradeRunner : IDisposable
         if (confirmationSubmitted || stopAfterBatch)
             return;
 
-        if (!VerifyOffer() || !io.IsRemoteLocked || !io.CanConfirmTrade)
+        if (!VerifyOffer())
+            return;
+        if (!io.CanClickReady)
+            readyAcknowledged = true;
+        else if (readyAcknowledged && !io.CanConfirmTrade)
+        {
+            // The local lock took effect and was then dropped (the partner edited and re-locked).
+            // Nothing was confirmed, so return to the Ready protocol under the same deadline.
+            var partnerDeadline = deadline;
+            readyClicked = readyAcknowledged = false;
+            nextActionAt = clock() + timing.ActionDelay;
+            SetActive(TradeExecutionState.WaitingForPartner, "Trade lock was released; locking the unchanged offer again...", null);
+            deadline = partnerDeadline;
+            return;
+        }
+        if (!io.IsRemoteLocked || !io.CanConfirmTrade)
             return;
 
         var planned = batch!;
