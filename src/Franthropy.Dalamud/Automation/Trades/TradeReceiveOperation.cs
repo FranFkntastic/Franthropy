@@ -14,6 +14,9 @@ public sealed class TradeReceiveOperation
     private IReadOnlyDictionary<TradeInventoryKey, int>? before;
     private bool confirmed, opened, closed, awaitingReadyAcknowledgement;
     private uint? foreignEntity;
+    private OperationResult? closing;
+    private DateTimeOffset? closingDeadline;
+    private static readonly TimeSpan ClosureTimeout = TimeSpan.FromSeconds(30);
     private IReadOnlyDictionary<TradeInventoryKey, int>? locked;
     /// <summary>The exact credited offer, populated only on success. Subtract it once from the caller's remaining manifest.</summary>
     public IReadOnlyDictionary<TradeInventoryKey, int>? Received { get; private set; }
@@ -36,8 +39,7 @@ public sealed class TradeReceiveOperation
     public OperationResult Stop()
     {
         if (result.IsTerminal || confirmed) return result;
-        CancelOwned();
-        return result = new(OperationStatus.Cancelled, "StoppedBeforeConfirm", "Stopped without confirming.");
+        return result = BeginClosing(new(OperationStatus.Cancelled, "StoppedBeforeConfirm", "Stopped without confirming."));
     }
 
     public OperationResult Tick(DateTimeOffset now)
@@ -57,6 +59,20 @@ public sealed class TradeReceiveOperation
             }
             return result;
         }
+        if (closing != null)
+        {
+            // A cancellation dispatch is not closure: keep cancelling the owned window until it is observed closed.
+            if (!OwnsOpenWindow()) return result = closing;
+            closingDeadline ??= now + ClosureTimeout;
+            if (now >= closingDeadline)
+            {
+                warning($"{partner.Name}@{partner.HomeWorldId}: TradeClosureDeadline after {closing.Code}; the unconfirmed window is still open.");
+                return result = new(OperationStatus.Failed, "TradeClosureDeadline",
+                    $"The unconfirmed trade window did not close within {ClosureTimeout.TotalSeconds:N0}s after {closing.Code}.");
+            }
+            CancelOwned();
+            return result;
+        }
         try { result = Advance(now); }
         catch (Exception ex) { result = new(confirmed ? OperationStatus.Indeterminate : OperationStatus.Failed, "ReceiveObservationFailed", ex.Message); }
         if (result.Status is OperationStatus.Indeterminate or OperationStatus.Failed)
@@ -68,9 +84,8 @@ public sealed class TradeReceiveOperation
     {
         if (now >= deadline)
         {
-            if (!confirmed) CancelOwned();
-            return new(confirmed ? OperationStatus.Indeterminate : OperationStatus.Failed, "ReceiveDeadline",
-                $"Receive deadline {deadline:O} expired. {result.Message}");
+            return BeginClosing(new(confirmed ? OperationStatus.Indeterminate : OperationStatus.Failed, "ReceiveDeadline",
+                $"Receive deadline {deadline:O} expired. {result.Message}"));
         }
         if (actor == 0) return Refuse("ReceiverUnknown", "No logged-in receiver was observable when armed.");
         if (io.LocalContentId == 0) return result;
@@ -161,16 +176,29 @@ public sealed class TradeReceiveOperation
     private bool SameOffer(IReadOnlyDictionary<TradeInventoryKey, int> actual) =>
         locked != null && locked.Count == actual.Count && actual.All(p => locked.GetValueOrDefault(p.Key) == p.Value);
 
+    private bool OwnsOpenWindow() =>
+        opened && !confirmed && io.LocalContentId == actor && io.IsTradeOpen &&
+        io.ObserveTradePartnerEntityId() == (uint)partner.GameObjectId && io.PartnerIsAvailable(partner);
+
     private void CancelOwned()
     {
-        if (opened && !confirmed && io.LocalContentId == actor && io.IsTradeOpen &&
-            io.ObserveTradePartnerEntityId() == (uint)partner.GameObjectId && io.PartnerIsAvailable(partner))
+        if (OwnsOpenWindow())
             io.TryCancelUnconfirmedTrade(out _);
+    }
+
+    /// <summary>Returns <paramref name="final"/> at once when nothing owned is open; otherwise stays pending
+    /// and keeps cancelling until closure is observed.</summary>
+    private OperationResult BeginClosing(OperationResult final)
+    {
+        if (confirmed) return final;
+        CancelOwned();
+        if (!OwnsOpenWindow()) return final;
+        closing = final;
+        return new(OperationStatus.Pending, "ClosingTrade", $"Closing the unconfirmed trade window after {final.Code}.");
     }
 
     private OperationResult Refuse(string code, string reason)
     {
-        if (!confirmed) CancelOwned();
-        return new(confirmed ? OperationStatus.Indeterminate : OperationStatus.Failed, code, reason);
+        return BeginClosing(new(confirmed ? OperationStatus.Indeterminate : OperationStatus.Failed, code, reason));
     }
 }
