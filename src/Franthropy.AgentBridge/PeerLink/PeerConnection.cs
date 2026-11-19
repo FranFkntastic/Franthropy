@@ -14,6 +14,7 @@ public sealed class PeerConnection
     private readonly PeerPresence peer;
     private readonly object gate = new();
     private CancellationTokenSource generation = new();
+    private bool retired;
     private PeerState? state;
     public PeerState? State { get { lock (gate) return state; } }
     public event Action<PeerState>? StateChanged;
@@ -53,6 +54,25 @@ public sealed class PeerConnection
         var failures = 0;
         while (!owner.Stopping.IsCancellationRequested)
         {
+            if (owner.IsWithdrawn(peer))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(500), owner.Stopping);
+                if (owner.IsWithdrawn(peer))
+                {
+                    bool notify;
+                    lock (gate)
+                    {
+                        retired = true;
+                        notify = state != PeerState.Lost;
+                        state = PeerState.Lost;
+                        generation.Cancel();
+                        generation.Dispose();
+                    }
+                    owner.Forget(peer.InstanceId);
+                    if (notify) await Notify(PeerState.Lost);
+                    return;
+                }
+            }
             var id = Guid.NewGuid();
             var probe = await Exchange(owner.Envelope("heartbeat",id,Guid.NewGuid(),PipeProtocol.Empty),
                 "HeartbeatTimeout",PipeProtocol.HeartbeatTimeout,Stopwatch.GetTimestamp(),owner.Stopping);
@@ -77,12 +97,7 @@ public sealed class PeerConnection
                 }
             }
             if (!up) Warn(id,probe);
-            if (changed.HasValue)
-            {
-                try { await owner.Options.Dispatch(() => StateChanged?.Invoke(changed.Value),owner.Stopping); }
-                catch (Exception e) when (!owner.Stopping.IsCancellationRequested)
-                { owner.Options.Warning($"Peer state callback: {e.GetType().Name}"); }
-            }
+            if (changed.HasValue) await Notify(changed.Value);
             failures = up ? 0 : Math.Min(failures + 1,5);
             await Task.Delay(up ? TimeSpan.FromSeconds(2) : TimeSpan.FromMilliseconds(250 << failures),owner.Stopping);
         }
@@ -90,16 +105,26 @@ public sealed class PeerConnection
 
     internal void Release() => generation.Dispose();
 
+    private async Task Notify(PeerState changed)
+    {
+        try { await owner.Options.Dispatch(() => StateChanged?.Invoke(changed),owner.Stopping); }
+        catch (Exception e) when (!owner.Stopping.IsCancellationRequested)
+        { owner.Options.Warning($"Peer state callback: {e.GetType().Name}"); }
+    }
+
     private async Task<PeerResult> Exchange(PeerMessage msg,string threshold,TimeSpan limit,long start,CancellationToken ct)
     {
-        if (peer.ProtocolVersion != 1) return new PeerResult.Refused("VersionMismatch","Peer advertised incompatible protocol.");
         var remaining = limit - Stopwatch.GetElapsedTime(start);
         if (remaining <= TimeSpan.Zero) return new PeerResult.TimedOut(threshold,limit);
         using var deadline = new CancellationTokenSource(remaining);
         CancellationTokenSource scope;
+        CancellationToken session;
         lock (gate)
         {
-            scope = CancellationTokenSource.CreateLinkedTokenSource(ct,owner.Stopping,generation.Token,deadline.Token);
+            if (retired) return new PeerResult.LinkLost("Peer presence withdrawn.");
+            if (peer.ProtocolVersion != 1) return new PeerResult.Refused("VersionMismatch","Peer advertised incompatible protocol.");
+            session = generation.Token;
+            scope = CancellationTokenSource.CreateLinkedTokenSource(ct,owner.Stopping,session,deadline.Token);
         }
         using var lifetime = scope;
         NamedPipeClientStream? pipe = new(".",peer.PipeName,PipeDirection.InOut,
@@ -145,7 +170,7 @@ public sealed class PeerConnection
                 if (deadline.IsCancellationRequested && !owner.Stopping.IsCancellationRequested)
                 {
                     var latePipe = pipe;
-                    _ = owner.Run(() => ObserveLate(reply,latePipe,msg,threshold));
+                    _ = owner.Run(() => ObserveLate(reply,latePipe,msg,threshold,session));
                     pipe = null;
                 }
                 else _ = reply.ContinueWith(t => _ = t.Exception,TaskContinuationOptions.OnlyOnFaulted);
@@ -166,12 +191,14 @@ public sealed class PeerConnection
     private void Late(PeerMessage msg,string threshold) =>
         owner.Options.Warning($"LateResponse ignored: peer {peer.InstanceId}, request {msg.MessageId}, attempt {msg.CorrelationId}, threshold {threshold}.");
 
-    private async Task ObserveLate(Task<PeerMessage> read,NamedPipeClientStream pipe,PeerMessage msg,string threshold)
+    private async Task ObserveLate(Task<PeerMessage> read,NamedPipeClientStream pipe,PeerMessage msg,string threshold,CancellationToken session)
     {
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(session,owner.Stopping);
         using (pipe)
         {
-            try { await read.WaitAsync(TimeSpan.FromMinutes(5),owner.Stopping); Late(msg,threshold); }
-            catch (Exception e) when (!owner.Stopping.IsCancellationRequested)
+            try { await read.WaitAsync(TimeSpan.FromMinutes(5),stop.Token); Late(msg,threshold); }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+            catch (Exception e) when (!stop.IsCancellationRequested)
             { owner.Options.Warning($"LateResponseWatch ended for {msg.MessageId}: {e.GetType().Name}"); }
             finally { pipe.Dispose(); try { await read; } catch { } }
         }

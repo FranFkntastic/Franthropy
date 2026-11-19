@@ -66,6 +66,13 @@ public sealed class PeerEndpoint : IAsyncDisposable
         }
     }
 
+    internal bool IsWithdrawn(PeerPresence peer) => store.IsWithdrawn(peer);
+
+    internal void Forget(Guid instanceId)
+    {
+        lock (gate) connections.Remove(instanceId);
+    }
+
     // Own every background operation until unload, including reads watching for late evidence.
     internal Task<T> Run<T>(Func<Task<T>> work)
     {
