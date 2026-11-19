@@ -79,6 +79,9 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <Compile Remove="Automation\Trades\*.cs" />
+    <Compile Remove="Travel\CharacterSwitch*.cs" />
+    <Compile Remove="Travel\WorldVisitOperation.cs" />
     <Compile Remove="Automation\Ui\DalamudNumericDialog.cs" />
     <Compile Remove="Automation\DalamudExternalUiAutomationSuppression.cs" />
     <Compile Remove="AgentBridge\ReflectedPluginWindowInputFramePump.cs" />
