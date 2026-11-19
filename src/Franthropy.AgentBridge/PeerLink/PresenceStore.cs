@@ -56,6 +56,39 @@ internal sealed class PresenceStore
         finally { File.Delete(temporary); }
     }
 
+    private PeerPresence? ReadOwned(string path, bool pruneDead)
+    {
+        using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+        var p = JsonSerializer.Deserialize<PeerPresence>(file);
+        if (p == null || p.InstanceId == Self.InstanceId || p.Application != application ||
+            PathFor(p.InstanceId) != path || p.PipeName != Pipe(p.InstanceId)) return null;
+        try
+        {
+            using var process = Process.GetProcessById(p.ProcessId);
+            if (!process.HasExited && process.StartTime.ToUniversalTime().Ticks == p.ProcessStartUtcTicks)
+                return p;
+        }
+        catch (ArgumentException) { } // PID no longer exists.
+        if (pruneDead) File.Delete(path);
+        return null;
+    }
+
+    internal bool IsWithdrawn(PeerPresence peer)
+    {
+        try
+        {
+            var current = ReadOwned(PathFor(peer.InstanceId), pruneDead: false);
+            return current == null || current.ProcessId != peer.ProcessId ||
+                current.ProcessStartUtcTicks != peer.ProcessStartUtcTicks;
+        }
+        catch (FileNotFoundException) { return true; }
+        catch (DirectoryNotFoundException) { return true; }
+        catch (JsonException) { return true; }
+        // An inaccessible snapshot or process does not establish loss of ownership.
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception
+            or InvalidOperationException) { return false; }
+    }
+
     internal List<PeerPresence> Discover(Action<string> warn)
     {
         List<PeerPresence> peers = [];
@@ -63,18 +96,7 @@ internal sealed class PresenceStore
         {
             try
             {
-                using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-                var p = JsonSerializer.Deserialize<PeerPresence>(file);
-                if (p == null || p.InstanceId == Self.InstanceId || p.Application != application ||
-                    PathFor(p.InstanceId) != path || p.PipeName != Pipe(p.InstanceId)) continue;
-                try
-                {
-                    using var process = Process.GetProcessById(p.ProcessId);
-                    if (!process.HasExited && process.StartTime.ToUniversalTime().Ticks == p.ProcessStartUtcTicks)
-                    { peers.Add(p); continue; }
-                }
-                catch (ArgumentException) { } // PID no longer exists.
-                File.Delete(path);
+                if (ReadOwned(path, pruneDead: true) is { } p) peers.Add(p);
             }
             catch (FileNotFoundException) { } // Concurrent unload.
             catch (Exception e) { warn($"Presence {Path.GetFileName(path)}: {e.GetType().Name}"); }

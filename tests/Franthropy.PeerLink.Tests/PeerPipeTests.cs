@@ -43,6 +43,53 @@ public sealed class PeerPipeTests : IDisposable
     }
 
     [Fact]
+    public async Task WithdrawnPresenceRetiresMonitorAndPendingRequestWithoutEndpointShutdown()
+    {
+        using var release = new ManualResetEventSlim();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lost = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int losses = 0;
+        await using var target = await Start(_ =>
+        {
+            entered.TrySetResult();
+            if (!release.Wait(TimeSpan.FromSeconds(30))) throw new TimeoutException();
+            return new PeerResult.Delivered(Value);
+        });
+        await using var sender = await Start();
+        var presence = Assert.Single(await sender.DiscoverAsync());
+        var old = sender.Connect(presence);
+        old.StateChanged += state =>
+        {
+            if (state == PeerState.Lost) { Interlocked.Increment(ref losses); lost.TrySetResult(); }
+        };
+        var bound = TimeSpan.FromSeconds(8);
+        var pending = old.RequestAsync(Guid.NewGuid(),Value,"ReceiptDeadline",TimeSpan.FromMinutes(1));
+        try
+        {
+            await entered.Task.WaitAsync(bound);
+            // Withdraw only the presence: a heartbeat to the still-running pipe would succeed.
+            var path = Assert.Single(Directory.GetFiles(root,$"{presence.InstanceId:N}.json",SearchOption.AllDirectories));
+            File.Delete(path);
+            await lost.Task.WaitAsync(bound);
+            Assert.IsType<PeerResult.LinkLost>(await pending.WaitAsync(bound));
+            Assert.IsType<PeerResult.LinkLost>(await old.RequestAsync(Guid.NewGuid(),Value,"ReceiptDeadline",bound).WaitAsync(bound));
+
+            // Re-publish to distinguish eviction from a cached link merely reporting Lost.
+            await target.UpdateIdentityAsync(Value);
+            Assert.NotSame(old,sender.Connect(presence));
+        }
+        finally { release.Set(); }
+
+        await target.DisposeAsync();
+        await using var replacement = await Start();
+        var current = Assert.Single(await sender.DiscoverAsync());
+        Assert.Equal(replacement.InstanceId,current.InstanceId);
+        Assert.IsType<PeerResult.Delivered>(await sender.Connect(current).RequestAsync(Guid.NewGuid(),Value,"ReceiptDeadline",bound));
+        Assert.Equal(PeerState.Lost,old.State);
+        Assert.Equal(1,Volatile.Read(ref losses));
+    }
+
+    [Fact]
     public async Task LateReplyCannotReplaceNamedTimeout()
     {
         using var release = new ManualResetEventSlim();
