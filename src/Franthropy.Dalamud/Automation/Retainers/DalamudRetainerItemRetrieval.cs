@@ -35,13 +35,7 @@ public sealed class DalamudRetainerItemRetrieval
     // Agent/container reads can flicker for a frame around dispatch and popups;
     // only a loss that persists this long ends verification early.
     private const int PreconditionLossToleranceMs = 500;
-    private static readonly IReadOnlyList<InventoryType> PlayerOrdinaryItemContainers =
-    [
-        InventoryType.Inventory1,
-        InventoryType.Inventory2,
-        InventoryType.Inventory3,
-        InventoryType.Inventory4,
-    ];
+    private static IReadOnlyList<InventoryType> PlayerOrdinaryItemContainers => DalamudRetainerInventory.PlayerOrdinaryItemContainers;
 
     private readonly ISigScanner sigScanner;
     private readonly IGameGui gameGui;
@@ -245,18 +239,12 @@ public sealed class DalamudRetainerItemRetrieval
                 $"Invalid retrieval request for item {stack.ItemId}: {requestedQuantity} from {stack.Container}.");
         }
 
+        if (DalamudRetainerInventory.CommandBlocker(gameGui, stack.Container == InventoryType.RetainerCrystals, out var retainerAgent) is { } blocker)
+            return PendingRetainerRetrieval.Fail(blocker.Code, blocker.Message);
+
         var inventoryManager = InventoryManager.Instance();
         if (inventoryManager == null)
             return PendingRetainerRetrieval.Fail("InventoryUnavailable", "Inventory manager is unavailable.");
-        IReadOnlyList<InventoryType> playerContainers = stack.Container == InventoryType.RetainerCrystals
-            ? [InventoryType.Crystals] : PlayerOrdinaryItemContainers;
-        foreach (var type in playerContainers)
-        {
-            var playerContainer = inventoryManager->GetInventoryContainer(type);
-            if (playerContainer == null || !playerContainer->IsLoaded)
-                return PendingRetainerRetrieval.Fail("InventoryUnavailable", $"Player inventory {type} is not loaded before dispatch.");
-        }
-
         var container = inventoryManager->GetInventoryContainer(stack.Container);
         if (container == null || !container->IsLoaded)
             return PendingRetainerRetrieval.Fail("RetainerInventoryUnavailable", "Retainer source inventory is unavailable.");
@@ -300,19 +288,11 @@ public sealed class DalamudRetainerItemRetrieval
                 "RetainerInventoryUnavailable",
                 "Every retainer inventory container must be loaded before retrieval can be verified.");
         }
-        var module = AgentModule.Instance();
-        var retainerAgent = module == null ? null : module->GetAgentByInternalId(AgentId.Retainer);
-        if (retainerAgent == null || !retainerAgent->IsAgentActive())
-            return PendingRetainerRetrieval.Fail("RetainerAgentUnavailable", "Retainer agent is unavailable.");
-
         nint context;
         try { context = RetainerNativeCommandCapability.Context(retainerAgent); }
         catch (Exception exception) { return PendingRetainerRetrieval.Fail("CommandUnavailable", exception.Message); }
         if (context == 0)
             return PendingRetainerRetrieval.Fail("CommandUnavailable", "Retainer native context is unavailable before dispatch.");
-        var existingNumeric = gameGui.GetAddonByName<AtkUnitBase>(InputNumericAddon, 1);
-        if (existingNumeric != null && existingNumeric->IsVisible)
-            return PendingRetainerRetrieval.Fail("QuantityPopupAlreadyOpen", "An unowned quantity popup exists before dispatch.");
         diagnostics.Write(log, "RetrievalDispatch utc={Utc} source={Container}/{Slot} item={Item} hq={Hq} sourceQuantity={SourceQuantity} requested={Requested} transfer={Transfer} command={Command} agent={Agent:X} context={Context:X} target={Target:X} active={Active} loaded={Loaded} playerBefore={Player} retainerBefore={Retainer} quantityExpected={QuantityExpected}",
             DateTime.UtcNow, stack.Container, stack.SlotIndex, stack.ItemId, stack.IsHighQuality, stack.Quantity,
             requestedQuantity, transfer, (long)selection.Command, (nint)retainerAgent, context,

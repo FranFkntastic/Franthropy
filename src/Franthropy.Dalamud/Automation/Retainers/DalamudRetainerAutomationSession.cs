@@ -22,19 +22,13 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private const string RetainerList = "RetainerList";
     private const string SelectString = "SelectString";
     private const string Talk = "Talk";
-    private const string InventoryLarge = "InventoryRetainerLarge";
-    private const string InventorySmall = "InventoryRetainer";
+    private const string InventoryLarge = DalamudRetainerInventory.InventoryLarge;
+    private const string InventorySmall = DalamudRetainerInventory.InventorySmall;
     private const string SellingList = "RetainerSellList";
     private const string MarketList = "RetainerMarketList";
     private const string SellingListingEditor = "RetainerSell";
     private const string YesNo = "SelectYesno";
-    private static readonly IReadOnlyList<InventoryType> PlayerOrdinaryItemContainers =
-    [
-        InventoryType.Inventory1,
-        InventoryType.Inventory2,
-        InventoryType.Inventory3,
-        InventoryType.Inventory4,
-    ];
+    private static IReadOnlyList<InventoryType> PlayerOrdinaryItemContainers => DalamudRetainerInventory.PlayerOrdinaryItemContainers;
     private readonly IFramework framework;
     private readonly IGameGui gameGui;
     private readonly IDataManager dataManager;
@@ -379,13 +373,33 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (!compatibility.IsAvailable)
             return RetainerAutomationResult.Failed(NativeCapabilityGuard.FailureCode, compatibility.Message);
 
+        try
+        {
+            NativeCapabilityGuard.RequireAddress(InventoryManager.Addresses.GetInventoryContainer.Value, "Inventory containers");
+        }
+        catch (NativeCapabilityUnavailableException exception)
+        {
+            return RetainerAutomationResult.Failed(NativeCapabilityGuard.FailureCode, exception.Message);
+        }
+
         var selected = await framework.RunOnTick(() => SelectCommand(2378), cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!selected.Success)
             return selected;
 
-        return await WaitUntilAsync(IsInventoryReady, cancellationToken).ConfigureAwait(false)
+        const int requiredReadyTicks = 3;
+        var readyTicks = 0;
+        string? blocker = null;
+        bool Settled()
+        {
+            blocker = DalamudRetainerInventory.OpenBlocker(gameGui);
+            readyTicks = blocker == null ? readyTicks + 1 : 0;
+            return readyTicks >= requiredReadyTicks;
+        }
+
+        return await WaitUntilAsync(Settled, cancellationToken).ConfigureAwait(false)
             ? RetainerAutomationResult.Succeeded("RetainerInventoryReady", "Retainer inventory opened.")
-            : RetainerAutomationResult.Failed("RetainerInventoryTimeout", "Timed out waiting for retainer inventory.");
+            : RetainerAutomationResult.Failed("RetainerInventoryTimeout",
+                $"Timed out waiting for retainer inventory: {blocker ?? $"ready for {readyTicks}/{requiredReadyTicks} samples"}");
     }
 
     public Task<RetainerAutomationResult> OpenSellingListAsync(CancellationToken cancellationToken = default) =>
