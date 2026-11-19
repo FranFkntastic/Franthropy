@@ -82,6 +82,9 @@ public sealed class DalamudRetainerItemTransfer
                 $"Invalid item deposit request for item {stack.ItemId}: {requestedQuantity} from {stack.Container}.");
         }
 
+        if (DalamudRetainerInventory.CommandBlocker(gameGui, crystals: false, out var retainerAgent) is { } blocker)
+            return RetainerDepositStart.Fail(blocker.Code, blocker.Message);
+
         var inventoryManager = InventoryManager.Instance();
         if (inventoryManager == null)
             return RetainerDepositStart.Fail("InventoryUnavailable", "Inventory manager is unavailable.");
@@ -102,34 +105,9 @@ public sealed class DalamudRetainerItemTransfer
                 $"Expected {stack.Quantity}x item {stack.ItemId} was not found in {stack.Container} slot {stack.SlotIndex}.");
         }
 
-        var hasLoadedRetainerContainer = false;
-        foreach (var type in DalamudRetainerInventory.OrdinaryItemContainers)
-        {
-            var retainerContainer = inventoryManager->GetInventoryContainer(type);
-            if (retainerContainer != null && retainerContainer->IsLoaded)
-            {
-                hasLoadedRetainerContainer = true;
-                break;
-            }
-        }
-
-        if (!hasLoadedRetainerContainer)
-        {
-            return RetainerDepositStart.Fail("RetainerInventoryUnavailable", "Retainer item inventory is unavailable.");
-        }
-
         var playerBefore = CountPlayer(stack.ItemId, stack.IsHighQuality);
         var retainerBefore = CountRetainer(stack.ItemId, stack.IsHighQuality);
         var transfer = Math.Min(requestedQuantity, stack.Quantity);
-
-        var retainerAgent = AgentModule.Instance()->GetAgentByInternalId(AgentId.Retainer);
-        if (retainerAgent == null || !retainerAgent->IsAgentActive())
-            return RetainerDepositStart.Fail("RetainerAgentUnavailable", "Retainer agent is unavailable.");
-
-        if (!RetainerDepositVerifier.PreconditionsAvailable(stack))
-            return RetainerDepositStart.Fail("InventoryUnavailable", "All verification containers must be loaded before dispatch.");
-        if (RetainerDepositVerifier.QuantityPopupVisible(gameGui))
-            return RetainerDepositStart.Fail("QuantityPopupAlreadyOpen", "An unowned quantity popup exists before dispatch.");
 
         var selection = RetainerInventoryCommandPolicy.Select(
             RetainerTransferDirection.Entrust, isCrystalContainer: false, stack.Quantity, transfer);

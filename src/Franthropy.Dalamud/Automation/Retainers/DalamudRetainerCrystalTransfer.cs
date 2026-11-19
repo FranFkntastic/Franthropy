@@ -96,6 +96,9 @@ public sealed class DalamudRetainerCrystalTransfer
                 $"Invalid crystal deposit request for item {stack.ItemId}: {requestedQuantity} from {stack.Container}.");
         }
 
+        if (DalamudRetainerInventory.CommandBlocker(gameGui, crystals: true, out var retainerAgent) is { } blocker)
+            return RetainerDepositStart.Fail(blocker.Code, blocker.Message);
+
         var inventoryManager = InventoryManager.Instance();
         if (inventoryManager == null)
             return RetainerDepositStart.Fail("InventoryUnavailable", "Inventory manager is unavailable.");
@@ -130,15 +133,6 @@ public sealed class DalamudRetainerCrystalTransfer
                 "NoCapacity",
                 $"Retainer crystal storage is full for item {stack.ItemId}.");
         }
-
-        var retainerAgent = AgentModule.Instance()->GetAgentByInternalId(AgentId.Retainer);
-        if (retainerAgent == null || !retainerAgent->IsAgentActive())
-            return RetainerDepositStart.Fail("RetainerAgentUnavailable", "Retainer agent is unavailable.");
-
-        if (!RetainerDepositVerifier.PreconditionsAvailable(stack))
-            return RetainerDepositStart.Fail("InventoryUnavailable", "All verification containers must be loaded before dispatch.");
-        if (RetainerDepositVerifier.QuantityPopupVisible(gameGui))
-            return RetainerDepositStart.Fail("QuantityPopupAlreadyOpen", "An unowned quantity popup exists before dispatch.");
 
         var selection = RetainerInventoryCommandPolicy.Select(
             RetainerTransferDirection.Entrust, isCrystalContainer: true, stack.Quantity, transfer);
