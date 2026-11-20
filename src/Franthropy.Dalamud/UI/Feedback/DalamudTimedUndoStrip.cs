@@ -18,6 +18,7 @@ public sealed class DalamudTimedUndoStrip<TItem>
     private readonly TimeSpan window;
     private readonly TimeProvider timeProvider;
     private bool offered;
+    private bool drawnSinceOffer;
     private TItem? item;
     private DateTimeOffset offeredAt;
     private int lastDrawFrame = -1;
@@ -46,6 +47,7 @@ public sealed class DalamudTimedUndoStrip<TItem>
     public void Offer(TItem removed)
     {
         offered = true;
+        drawnSinceOffer = false;
         item = removed;
         offeredAt = timeProvider.GetUtcNow();
     }
@@ -71,6 +73,7 @@ public sealed class DalamudTimedUndoStrip<TItem>
     public void Clear()
     {
         offered = false;
+        drawnSinceOffer = false;
         item = default;
     }
 
@@ -89,12 +92,13 @@ public sealed class DalamudTimedUndoStrip<TItem>
         ArgumentNullException.ThrowIfNull(describe);
         restored = default;
         var frame = ImGui.GetFrameCount();
-        if (ExpireWhenHidden && frame != lastDrawFrame && lastDrawFrame != frame - 1)
+        if (ExpireWhenHidden && drawnSinceOffer && frame != lastDrawFrame && lastDrawFrame != frame - 1)
             Clear();
         lastDrawFrame = frame;
 
         if (!TryPeek(out var current))
             return false;
+        drawnSinceOffer = true;
 
         switch (DalamudUndoStrip.Draw(id, describe(current), itemSubmitted))
         {

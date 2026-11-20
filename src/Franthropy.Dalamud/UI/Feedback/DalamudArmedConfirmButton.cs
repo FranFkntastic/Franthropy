@@ -22,6 +22,7 @@ public sealed class DalamudArmedConfirmButton<TKey>
     private readonly TimeProvider timeProvider;
     private readonly IEqualityComparer<TKey> comparer;
     private bool armed;
+    private bool drawnSinceArm;
     private TKey? armedKey;
     private DateTimeOffset armedAt;
     private int lastDrawFrame = -1;
@@ -64,6 +65,7 @@ public sealed class DalamudArmedConfirmButton<TKey>
         }
 
         armed = true;
+        drawnSinceArm = false;
         armedKey = key;
         armedAt = timeProvider.GetUtcNow();
         return false;
@@ -72,6 +74,7 @@ public sealed class DalamudArmedConfirmButton<TKey>
     public void Disarm()
     {
         armed = false;
+        drawnSinceArm = false;
         armedKey = default;
     }
 
@@ -96,11 +99,13 @@ public sealed class DalamudArmedConfirmButton<TKey>
         ArgumentException.ThrowIfNullOrWhiteSpace(armedLabel);
 
         var frame = ImGui.GetFrameCount();
-        if (frame != lastDrawFrame && lastDrawFrame != frame - 1)
+        if (drawnSinceArm && frame != lastDrawFrame && lastDrawFrame != frame - 1)
             Disarm();
         lastDrawFrame = frame;
 
         var isArmed = enabled && IsArmed(key);
+        if (armed)
+            drawnSinceArm = true;
         bool clicked;
         ImGui.BeginDisabled(!enabled);
         using (isArmed ? DalamudUiChrome.PushDangerButton() : null)
