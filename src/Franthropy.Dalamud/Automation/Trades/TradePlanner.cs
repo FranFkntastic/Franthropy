@@ -78,21 +78,16 @@ public static class TradePlanner
         foreach (var key in orderedKeys.Where(key => key != gilKey))
         {
             var remaining = remainingByKey[key];
-            foreach (var stack in inventory
-                         .Where(value =>
-                             value.ItemId == key.ItemId && value.IsHighQuality == key.IsHighQuality &&
-                             (allowHighQualityItems || !value.IsHighQuality))
-                         .OrderBy(value => value.IsHighQuality)
-                         .ThenBy(value => value.ContainerId)
-                         .ThenBy(value => value.SlotIndex))
+            var unused = inventory
+                .Where(value =>
+                    value.ItemId == key.ItemId && value.IsHighQuality == key.IsHighQuality &&
+                    (allowHighQualityItems || !value.IsHighQuality) && value.Quantity > 0)
+                .ToList();
+            while (remaining > 0 && lines.Count < maximumSlots &&
+                   SelectSourceStack(unused, remaining) is { } stack)
             {
-                if (remaining <= 0 || lines.Count == maximumSlots)
-                    break;
-
+                unused.Remove(stack);
                 var quantity = Math.Min(remaining, stack.Quantity);
-                if (quantity <= 0)
-                    continue;
-
                 lines.Add(new(
                     stack.ContainerId,
                     stack.SlotIndex,
@@ -121,6 +116,35 @@ public static class TradePlanner
             throw new InvalidOperationException("No tradeable inventory stacks could be assigned to the next batch.");
 
         return new(lines, gilAmount, CountExactInventory(inventory));
+    }
+
+    // Picks the next source stack for `remaining` units so trades split as few stacks
+    // and use as few slots as possible: an exact match, else the largest stack that is
+    // consumed whole, else (a split is unavoidable) the smallest stack that covers it.
+    // Container/slot order breaks ties so the choice stays deterministic.
+    internal static TradeInventoryStack? SelectSourceStack(
+        IEnumerable<TradeInventoryStack> candidates,
+        int remaining)
+    {
+        if (remaining <= 0)
+            return null;
+        var eligible = candidates.Where(stack => stack.Quantity > 0).ToList();
+        return eligible
+                   .Where(stack => stack.Quantity == remaining)
+                   .OrderBy(stack => stack.ContainerId)
+                   .ThenBy(stack => stack.SlotIndex)
+                   .FirstOrDefault()
+               ?? eligible
+                   .Where(stack => stack.Quantity < remaining)
+                   .OrderByDescending(stack => stack.Quantity)
+                   .ThenBy(stack => stack.ContainerId)
+                   .ThenBy(stack => stack.SlotIndex)
+                   .FirstOrDefault()
+               ?? eligible
+                   .OrderBy(stack => stack.Quantity)
+                   .ThenBy(stack => stack.ContainerId)
+                   .ThenBy(stack => stack.SlotIndex)
+                   .FirstOrDefault();
     }
 
     public static bool HasExpectedInventoryDelta(
