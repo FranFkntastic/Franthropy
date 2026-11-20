@@ -1,5 +1,6 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Franthropy.Dalamud.UI.Layout;
 using Franthropy.Dalamud.UI.Windows;
 
 namespace Franthropy.Dalamud.UI.Inputs;
@@ -66,9 +67,7 @@ public static class DalamudSuggestionInputRenderer
                 var pos = ImGui.GetCursorPos();
                 var availableWidth = ImGui.GetContentRegionAvail().X;
                 var labelWidth = availableWidth - (string.IsNullOrEmpty(option.Note) ? 0 : ImGui.CalcTextSize(option.Note).X + 16);
-                var label = option.Label;
-                while (label.Length > 0 && ImGui.CalcTextSize(label + "…").X > labelWidth) label = label[..^1];
-                if (label.Length < option.Label.Length) label += "…";
+                var label = DalamudUiLayout.ElideText(option.Label, labelWidth);
                 if (ImGui.Selectable($"{label}##{id}{index}", state.HighlightedIndex == index))
                 {
                     state.Move(index - state.HighlightedIndex, suggestions.Count);

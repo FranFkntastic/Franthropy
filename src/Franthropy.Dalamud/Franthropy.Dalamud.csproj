@@ -134,6 +134,14 @@
     <Compile Remove="UI\Tables\DalamudProgressCell.cs" />
     <Compile Remove="UI\Tables\DalamudRowRemoveButton.cs" />
     <Compile Remove="UI\Feedback\DalamudUndoStrip.cs" />
+    <Compile Remove="UI\Feedback\DalamudTimedUndoStrip.cs" />
+    <Compile Remove="UI\Feedback\DalamudArmedConfirmButton.cs" />
+    <Compile Remove="UI\Layout\DalamudUiLayout.cs" />
+    <Compile Remove="UI\Windows\DalamudOwnedPopup.cs" />
+    <Compile Remove="UI\Windows\DalamudRootConfirmationDialog.cs" />
+    <Compile Remove="UI\Tables\DalamudSelectionBar.cs" />
+    <Compile Remove="UI\Drawing\DalamudDrawListPrimitives.cs" />
+    <Compile Remove="UI\Drawing\DalamudSegmentBar.cs" />
     <Compile Remove="Diagnostics\DalamudConditionTrustProbe.cs" />
     <Compile Remove="Diagnostics\DalamudRenderControl.cs" />
     <Compile Remove="Diagnostics\NativeCapabilityGuard.cs" />

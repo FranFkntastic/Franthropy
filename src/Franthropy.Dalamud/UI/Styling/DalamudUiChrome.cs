@@ -33,6 +33,21 @@ public static class DalamudUiChrome
         return colors;
     }
 
+    /// <summary>Resting, hovered, and active button colours for a destructive or armed action.</summary>
+    public static readonly Vector4 DangerButton = new(.78f, .2f, .2f, 1f);
+    public static readonly Vector4 DangerButtonHovered = new(.86f, .25f, .25f, 1f);
+    public static readonly Vector4 DangerButtonActive = new(.92f, .3f, .3f, 1f);
+
+    /// <summary>Pushes the fixed red destructive-action button colours; dispose to pop them.</summary>
+    /// <remarks>Palette-independent so a destructive action reads the same in every plugin theme.</remarks>
+    public static IDisposable PushDangerButton()
+    {
+        var colors = ImRaii.PushColor(ImGuiCol.Button, DangerButton);
+        colors.Push(ImGuiCol.ButtonHovered, DangerButtonHovered);
+        colors.Push(ImGuiCol.ButtonActive, DangerButtonActive);
+        return colors;
+    }
+
     public static IDisposable PushInput(
         DalamudUiPalette palette,
         DalamudUiTone tone = DalamudUiTone.Accent)

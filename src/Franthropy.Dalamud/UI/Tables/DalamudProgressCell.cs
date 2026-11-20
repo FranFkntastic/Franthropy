@@ -1,5 +1,6 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Franthropy.Dalamud.UI.Layout;
 using Franthropy.Dalamud.UI.Styling;
 
 namespace Franthropy.Dalamud.UI.Tables;
@@ -211,22 +212,9 @@ public static class DalamudProgressCellRenderer
 
     internal static string Fit(string text, float maxWidth)
     {
-        if (string.IsNullOrEmpty(text) || maxWidth <= 0)
-            return string.Empty;
-        if (ImGui.CalcTextSize(text).X <= maxWidth)
-            return text;
-        var room = maxWidth - ImGui.CalcTextSize(Ellipsis).X;
-        if (room <= 0)
-            return string.Empty;
-        int low = 0, high = text.Length;
-        while (low < high)
-        {
-            var mid = (low + high + 1) / 2;
-            if (ImGui.CalcTextSize(text[..mid]).X <= room) low = mid;
-            else high = mid - 1;
-        }
-
-        return low == 0 ? string.Empty : text[..low].TrimEnd() + Ellipsis;
+        var fitted = DalamudUiLayout.ElideText(text, maxWidth, Ellipsis);
+        // A lone ellipsis over a bar reads as a value; leave the label out instead.
+        return fitted.Length != text.Length && fitted == Ellipsis ? string.Empty : fitted;
     }
 
     private static double Clamp01(double value) => double.IsNaN(value) ? 0 : Math.Clamp(value, 0, 1);
