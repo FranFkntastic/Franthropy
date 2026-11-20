@@ -57,4 +57,10 @@ public readonly record struct DalamudUiPalette(
 
     public static Vector4 WithAlpha(Vector4 color, float alpha) =>
         new(color.X, color.Y, color.Z, Math.Clamp(alpha, 0f, 1f));
+
+    /// <summary>Darkens or brightens a colour's RGB by <paramref name="rgbFactor"/> and replaces its alpha.</summary>
+    /// <remarks>Derives tinted surfaces and borders from one accent, e.g. <c>Scale(accent, 0.16f, 0.96f)</c>
+    /// for a background and <c>Scale(accent, 0.65f, 1f)</c> for its border.</remarks>
+    public static Vector4 Scale(Vector4 color, float rgbFactor, float alpha) =>
+        new(color.X * rgbFactor, color.Y * rgbFactor, color.Z * rgbFactor, Math.Clamp(alpha, 0f, 1f));
 }
