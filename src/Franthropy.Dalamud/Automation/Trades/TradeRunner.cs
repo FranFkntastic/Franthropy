@@ -446,7 +446,15 @@ public sealed class TradeRunner : IDisposable
             Snapshot = Snapshot with { Message = result.Message };
             if (result.IsFailed)
                 Fail(result.Message);
-            else if (result.IsCompleted || !offerLineOperation.HasDispatched)
+            else if (result.IsCompleted)
+            {
+                // Completion already required a synced offer holding the line's quantity,
+                // and the next dispatch re-checks sync, numeric input, offer match and
+                // authoritative inventory, so a further pacing delay only slows multi-slot trades.
+                offerLineOperation = null;
+                nextActionAt = now;
+            }
+            else if (!offerLineOperation.HasDispatched)
             {
                 offerLineOperation = null;
                 nextActionAt = now + timing.ActionDelay;

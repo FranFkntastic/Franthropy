@@ -25,9 +25,11 @@ internal static class TradeOfferProgress
                 item.IsHighQuality == desired.Key.IsHighQuality &&
                 (item.SourceContainerId == null || item.SourceSlotIndex == null)))
                 return null;
-            var source = inventory.FirstOrDefault(stack => stack.ItemId == desired.Key.ItemId &&
-                stack.IsHighQuality == desired.Key.IsHighQuality && stack.Quantity > 0 &&
-                !offer.Items.Any(item => item.SourceContainerId == stack.ContainerId && item.SourceSlotIndex == stack.SlotIndex));
+            var source = TradePlanner.SelectSourceStack(
+                inventory.Where(stack => stack.ItemId == desired.Key.ItemId &&
+                    stack.IsHighQuality == desired.Key.IsHighQuality &&
+                    !offer.Items.Any(item => item.SourceContainerId == stack.ContainerId && item.SourceSlotIndex == stack.SlotIndex)),
+                remaining);
             if (source != null)
                 return new(source.ContainerId, source.SlotIndex, source.ItemId, source.ItemName,
                     source.IsHighQuality, Math.Min(remaining, source.Quantity), source.Quantity);
