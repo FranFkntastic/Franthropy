@@ -30,11 +30,17 @@ public sealed class TradeReceiveOperation
         this.partner = partner;
         this.deadline = deadline;
         this.warning = warning ?? throw new ArgumentNullException(nameof(warning));
-        if (remainingManifest.Count == 0 || remainingManifest.Any(x => x.ItemId <= 1 || x.Quantity <= 0))
-            throw new ArgumentException("Expected a non-empty remaining manifest of positive item quantities.", nameof(remainingManifest));
+        if (remainingManifest.Count == 0 || remainingManifest.Any(x => x.ItemId == 0 || x.Quantity <= 0 ||
+                (x.ItemId == TradePlanner.GilItemId && x.IsHighQuality)))
+            throw new ArgumentException("Expected a non-empty remaining manifest of positive item or NQ gil quantities.", nameof(remainingManifest));
         expected = remainingManifest.GroupBy(x => new TradeInventoryKey(x.ItemId, x.IsHighQuality))
             .ToDictionary(g => g.Key, g => g.Sum(x => x.Quantity));
+        expectsGil = expected.ContainsKey(GilKey);
+        expectsItems = expected.Keys.Any(k => k != GilKey);
     }
+
+    private static readonly TradeInventoryKey GilKey = new(TradePlanner.GilItemId, false);
+    private readonly bool expectsGil, expectsItems;
 
     public OperationResult Stop()
     {
@@ -138,11 +144,16 @@ public sealed class TradeReceiveOperation
         var local = io.ObserveOffer();
         var remote = io.ObserveRemoteOffer();
         if (local == null || remote == null || remote.SyncPending || local.SyncPending) return result;
+        // Gil is credited exactly like an item under (GilItemId, NQ): the inventory observation reports it that way,
+        // so SameOffer, the before/after delta and Received all account for it without a separate path.
         var actual = remote.Items.GroupBy(x => new TradeInventoryKey(x.ItemId, x.IsHighQuality))
             .ToDictionary(g => g.Key, g => g.Sum(x => x.Quantity));
-        if (remote.PartnerEntityId != entity || local.PartnerEntityId != entity || remote.Gil != 0 ||
+        if (remote.Gil > 0) actual[GilKey] = remote.Gil; // a gil-id item slot is refused below
+        if (remote.PartnerEntityId != entity || local.PartnerEntityId != entity ||
+            remote.Gil < 0 || remote.Gil > TradePlanner.MaximumGilPerTrade ||
+            (remote.Gil != 0 && !expectsGil) || (remote.Items.Count != 0 && !expectsItems) ||
             local.Gil != 0 || local.Items.Count != 0 || actual.Count == 0 ||
-            remote.Items.Any(i => i.Quantity <= 0) ||
+            remote.Items.Any(i => i.ItemId <= TradePlanner.GilItemId || i.Quantity <= 0) ||
             actual.Any(kv => kv.Value > expected.GetValueOrDefault(kv.Key)))
             return Refuse("LockedManifestMismatch", "The locked partner offer or local consideration differs from the expected manifest.");
         var canReady = io.CanClickReady;

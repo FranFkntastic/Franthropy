@@ -159,6 +159,54 @@ public sealed class TradeCustodyTests
         Assert.Equal(0, f.Confirms);
     }
 
+    [Fact]
+    public void ReceiveGilAcrossWindowsVerifiesExactDelta()
+    {
+        var io = DispatchProxy.Create<ITradeIo, TradeFixture>();
+        var f = (TradeFixture)(object)io;
+        var gil = new TradeInventoryKey(TradePlanner.GilItemId, false);
+        f.RemoteItems = [];
+        f.InventoryGil = 250;
+        var remaining = 1_500_000;
+        foreach (var window in new[] { 1_000_000, 500_000 })
+        {
+            f.Open = true;
+            f.LocalReady = false;
+            f.RemoteGil = window;
+            var op = new TradeReceiveOperation(io, Partner, [new(TradePlanner.GilItemId, false, remaining)], Now.AddMinutes(1), _ => { });
+            op.Tick(Now);
+            op.Tick(Now);
+            f.Open = false;
+            f.InventoryGil += window;
+            f.Quantity++; // an unrelated stack moved: never credit the window
+            Assert.Equal(OperationStatus.Pending, op.Tick(Now).Status);
+            f.Quantity--;
+            Assert.Equal(OperationStatus.Succeeded, op.Tick(Now).Status);
+            Assert.Equal(new KeyValuePair<TradeInventoryKey, int>(gil, window), Assert.Single(op.Received!));
+            Assert.Equal(window, op.Evidence!.After[gil] - op.Evidence.Before[gil]);
+            remaining -= op.Received![gil];
+        }
+        Assert.Equal(0, remaining);
+        Assert.Equal(2, f.Confirms);
+    }
+
+    [Theory]
+    [InlineData("gil-for-items")]
+    [InlineData("items-for-gil")]
+    [InlineData("gil-over-remaining")]
+    public void ReceiveRefusesUnexpectedGilOrItems(string change)
+    {
+        var io = DispatchProxy.Create<ITradeIo, TradeFixture>();
+        var f = (TradeFixture)(object)io;
+        TradeOfferedItem[] manifest = change == "gil-for-items" ? [Expected] : [new(TradePlanner.GilItemId, false, 500_000)];
+        f.RemoteItems = change == "items-for-gil" ? [Expected] : [];
+        f.RemoteGil = change switch { "gil-for-items" => 1, "items-for-gil" => 500_000, _ => 500_001 };
+        var op = new TradeReceiveOperation(io, Partner, manifest, Now.AddMinutes(1), _ => { });
+        Assert.Equal(OperationStatus.Failed, op.Tick(Now).Status);
+        Assert.Equal(0, f.Ready);
+        Assert.Equal(0, f.Confirms);
+    }
+
     private static readonly TradePartner Partner = new(17, "Expected", 2);
 
     private sealed class Store : ITradeIntentStore
@@ -275,7 +323,8 @@ public sealed class TradeCustodyTests
         public TradeOfferedItem[] Extra = [];
         public Action? OnConfirm;
         public uint Entity = 17;
-        public int Ready, Confirms, Offers, Quantities, RemoteGil, Quantity = 10;
+        public int Ready, Confirms, Offers, Quantities, RemoteGil, InventoryGil, Quantity = 10;
+        public TradeOfferedItem[]? RemoteItems;
         public bool Open = true, Numeric;
         public TradeOfferedItem Remote = Expected;
         public TradeOfferedItem[] Local = [];
@@ -297,8 +346,10 @@ public sealed class TradeCustodyTests
                 "TryCancelUnconfirmedTrade" or "TryCancelTrade" => !(Open = false),
                 "ObserveTradePartnerEntityId" => Entity,
                 "ObserveOffer" => new TradeOfferObservation(Entity, 0, false, Local),
-                "ObserveRemoteOffer" => new TradeOfferObservation(Entity, RemoteGil, false, Sending ? [] : [Remote, ..Extra]),
-                "ObserveTradeableInventory" => TradeInventoryObservation.Authoritative([new(0, 0, 42, "Ore", true, Quantity)]),
+                "ObserveRemoteOffer" => new TradeOfferObservation(Entity, RemoteGil, false, Sending ? [] : RemoteItems ?? [Remote, ..Extra]),
+                "ObserveTradeableInventory" => TradeInventoryObservation.Authoritative(InventoryGil > 0
+                    ? [new(uint.MaxValue, -1, TradePlanner.GilItemId, "Gil", false, InventoryGil), new(0, 0, 42, "Ore", true, Quantity)]
+                    : [new(0, 0, 42, "Ore", true, Quantity)]),
                 "TryClickReady" => LocalReady = ++Ready > 0,
                 "TryConfirmTrade" => Confirm(),
                 "TrySubmitQuantity" => ++Quantities > 0,
