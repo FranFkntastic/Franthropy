@@ -14,6 +14,14 @@ public enum ReflectedPluginWindowInputKind
     Wait,
 }
 
+/// <summary>Keyboard modifiers a surface input step may hold for its whole duration.</summary>
+public enum ReflectedPluginWindowInputModifier
+{
+    Ctrl,
+    Shift,
+    Alt,
+}
+
 public sealed record ReflectedPluginWindowInputStep(
     ReflectedPluginWindowInputKind Kind,
     float? X = null,
@@ -25,7 +33,8 @@ public sealed record ReflectedPluginWindowInputStep(
     int MouseButton = 0,
     string? Text = null,
     string? Key = null,
-    int Frames = 1);
+    int Frames = 1,
+    IReadOnlyList<string>? Modifiers = null);
 
 public sealed record ReflectedPluginWindowInputSequence(
     int SchemaVersion,
@@ -61,6 +70,15 @@ public interface IReflectedPluginWindowInputSink
     void Scroll(float deltaX, float deltaY);
     void TypeText(string text);
     bool SetKey(string key, bool down);
+
+    /// <summary>Presses or releases one modifier so <c>io.KeyCtrl</c>-style state and its left-hand key both follow it.</summary>
+    void SetModifier(ReflectedPluginWindowInputModifier modifier, bool down);
+
+    /// <summary>
+    /// Keeps held modifiers down for the coming frame. Called before ImGui drains its input queue on every
+    /// frame a modifier is held, so platform-backend resyncs cannot raise the injected state mid-step.
+    /// </summary>
+    void HoldModifiers(IReadOnlyCollection<ReflectedPluginWindowInputModifier> modifiers);
 }
 
 /// <summary>
@@ -69,7 +87,10 @@ public interface IReflectedPluginWindowInputSink
 /// </summary>
 public sealed class ReflectedPluginWindowInputController : IDisposable
 {
-    public const int SchemaVersion = 1;
+    /// <summary>Newest accepted sequence schema. Schema 2 adds per-step <c>modifiers</c>.</summary>
+    public const int SchemaVersion = 2;
+    public const int MinimumSchemaVersion = 1;
+    public const int ModifierSchemaVersion = 2;
     private const int MaximumSteps = 32;
     private const int MaximumExpandedFrames = 120;
     private const int MaximumTextLength = 1024;
@@ -113,6 +134,7 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
             if (active is not null)
                 throw new InvalidOperationException("A reflected plugin window input sequence is already active.");
             pending = new PendingInteraction(
+                sequence.SchemaVersion,
                 transactionId,
                 target.Descriptor,
                 target.Window.WindowName,
@@ -135,6 +157,10 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
 
         try
         {
+            // Runs before ImGui drains this frame's queue, including on frames that
+            // return early below, so a held modifier never drops for a frame.
+            if (pending.HeldModifiers.Count > 0)
+                sink.HoldModifiers(pending.HeldModifiers);
             if (pending.CancelRequested)
                 throw new OperationCanceledException("The reflected plugin window input sequence was cancelled.");
             var target = resolve(pending.TransactionId)
@@ -181,16 +207,19 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
         }
         if (pending is not null)
         {
-            ReleaseHeldInput(pending);
+            var releaseFailure = ReleaseHeldInput(pending);
             pending.Cancellation.Dispose();
-            pending.Completion.TrySetException(new ObjectDisposedException(nameof(ReflectedPluginWindowInputController)));
+            var disposedException = new ObjectDisposedException(nameof(ReflectedPluginWindowInputController));
+            pending.Completion.TrySetException(releaseFailure is null
+                ? disposedException
+                : DescribeReleaseFailure("the controller was disposed", disposedException, releaseFailure));
         }
     }
 
     private void Complete(PendingInteraction pending)
     {
-        if (pending.HeldButtons.Count > 0 || pending.HeldKeys.Count > 0)
-            throw new InvalidOperationException("The input sequence ended with a held button or key.");
+        if (pending.HeldButtons.Count > 0 || pending.HeldKeys.Count > 0 || pending.HeldModifiers.Count > 0)
+            throw new InvalidOperationException("The input sequence ended with a held button, key, or modifier.");
         var frame = pending.LastFrame
             ?? throw new InvalidOperationException("The target plugin window never produced input bounds.");
         lock (gate)
@@ -201,7 +230,7 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
         }
         pending.Cancellation.Dispose();
         pending.Completion.TrySetResult(new(
-            SchemaVersion,
+            pending.SchemaVersion,
             pending.TransactionId,
             pending.Descriptor.PluginInternalName,
             pending.Descriptor.Id,
@@ -225,23 +254,54 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
                 return;
             active = null;
         }
-        ReleaseHeldInput(pending);
+        var releaseFailure = ReleaseHeldInput(pending);
         pending.Cancellation.Dispose();
-        if (exception is OperationCanceledException)
+        if (releaseFailure is not null)
+            pending.Completion.TrySetException(DescribeReleaseFailure(
+                exception is OperationCanceledException ? "the sequence was cancelled" : "the sequence failed",
+                exception,
+                releaseFailure));
+        else if (exception is OperationCanceledException)
             pending.Completion.TrySetCanceled();
         else
             pending.Completion.TrySetException(exception);
     }
 
-    private void ReleaseHeldInput(PendingInteraction pending)
+    /// <summary>
+    /// Releases everything the sequence still holds. Modifiers go first so an aborted
+    /// click's button release never lands as a modified click. Every release is attempted
+    /// even when an earlier one throws.
+    /// </summary>
+    private Exception? ReleaseHeldInput(PendingInteraction pending)
     {
+        List<Exception>? failures = null;
+        foreach (var modifier in pending.HeldModifiers.ToArray())
+            TryRelease(() => sink.SetModifier(modifier, false), $"modifier {modifier}", ref failures);
         foreach (var button in pending.HeldButtons.ToArray())
-            sink.SetMouseButton(button, false);
+            TryRelease(() => sink.SetMouseButton(button, false), $"mouse button {button}", ref failures);
         foreach (var key in pending.HeldKeys.ToArray())
-            sink.SetKey(key, false);
+            TryRelease(() => sink.SetKey(key, false), $"key {key}", ref failures);
+        pending.HeldModifiers.Clear();
         pending.HeldButtons.Clear();
         pending.HeldKeys.Clear();
+        return failures is null ? null : new AggregateException(failures);
     }
+
+    private static void TryRelease(Action release, string input, ref List<Exception>? failures)
+    {
+        try
+        {
+            release();
+        }
+        catch (Exception exception)
+        {
+            (failures ??= []).Add(new InvalidOperationException($"Releasing held {input} failed: {exception.Message}", exception));
+        }
+    }
+
+    private static InvalidOperationException DescribeReleaseFailure(string reason, Exception cause, Exception releaseFailure) =>
+        new($"Held surface input could not be fully released after {reason}: {releaseFailure.Message}",
+            new AggregateException(cause, releaseFailure));
 
     private void Execute(FrameCommand command, ReflectedPluginWindowFrame frame, PendingInteraction pending)
     {
@@ -254,8 +314,9 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
                 sink.Move(ToAbsolute(frame, command.X, command.Y), frame.ViewportId);
                 return;
             case FrameCommandKind.MouseDown:
-                sink.SetMouseButton(command.MouseButton, true);
+                // Record before pressing so a throwing sink still gets a release attempt.
                 pending.HeldButtons.Add(command.MouseButton);
+                sink.SetMouseButton(command.MouseButton, true);
                 return;
             case FrameCommandKind.MouseUp:
                 sink.SetMouseButton(command.MouseButton, false);
@@ -276,6 +337,20 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
                 sink.SetKey(command.Key!, false);
                 pending.HeldKeys.Remove(command.Key!);
                 return;
+            case FrameCommandKind.ModifiersDown:
+                foreach (var modifier in command.Modifiers)
+                {
+                    pending.HeldModifiers.Add(modifier);
+                    sink.SetModifier(modifier, true);
+                }
+                return;
+            case FrameCommandKind.ModifiersUp:
+                foreach (var modifier in command.Modifiers)
+                {
+                    sink.SetModifier(modifier, false);
+                    pending.HeldModifiers.Remove(modifier);
+                }
+                return;
             default:
                 throw new ArgumentOutOfRangeException(nameof(command));
         }
@@ -286,15 +361,22 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
 
     private static Queue<FrameCommand> ValidateAndExpand(ReflectedPluginWindowInputSequence sequence)
     {
-        if (sequence.SchemaVersion != SchemaVersion)
-            throw new ArgumentException($"Surface input schema {sequence.SchemaVersion} is unsupported; expected {SchemaVersion}.");
+        if (sequence.SchemaVersion is < MinimumSchemaVersion or > SchemaVersion)
+            throw new ArgumentException(
+                $"Surface input schema {sequence.SchemaVersion} is unsupported; expected {MinimumSchemaVersion}-{SchemaVersion}.");
         if (sequence.Steps is null || sequence.Steps.Count is < 1 or > MaximumSteps)
             throw new ArgumentException($"A surface input sequence requires 1-{MaximumSteps} steps.");
 
         var commands = new Queue<FrameCommand>();
-        foreach (var step in sequence.Steps)
+        for (var stepIndex = 0; stepIndex < sequence.Steps.Count; stepIndex++)
         {
+            var step = sequence.Steps[stepIndex];
             var settle = Math.Clamp(step.Frames, 1, 30);
+            var modifiers = ValidateModifiers(sequence.SchemaVersion, stepIndex, step);
+            // Pressed a frame ahead of the step's first action and released after its
+            // final up event and settle frames, so they never overlap a neighbouring step.
+            if (modifiers.Length > 0)
+                commands.Enqueue(FrameCommand.ModifiersDown(modifiers));
             switch (step.Kind)
             {
                 case ReflectedPluginWindowInputKind.Move:
@@ -362,10 +444,45 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
                 default:
                     throw new ArgumentException($"Surface input kind '{step.Kind}' is unsupported.");
             }
+            if (modifiers.Length > 0)
+                commands.Enqueue(FrameCommand.ModifiersUp(modifiers));
         }
         if (commands.Count > MaximumExpandedFrames)
-            throw new ArgumentException($"The expanded surface input sequence exceeds {MaximumExpandedFrames} frames.");
+            throw new ArgumentException(
+                $"The expanded surface input sequence needs {commands.Count} frames, which exceeds the {MaximumExpandedFrames}-frame cap " +
+                "(modifier press and release frames count toward it).");
         return commands;
+    }
+
+    private static ReflectedPluginWindowInputModifier[] ValidateModifiers(int schemaVersion, int stepIndex, ReflectedPluginWindowInputStep step)
+    {
+        if (step.Modifiers is not { Count: > 0 } requested)
+            return [];
+        if (schemaVersion < ModifierSchemaVersion)
+            throw new ArgumentException(
+                $"Surface input steps[{stepIndex}] ({step.Kind}) carries modifiers, which require schema {ModifierSchemaVersion}; " +
+                $"the sequence declares schema {schemaVersion}.");
+        if (step.Kind is ReflectedPluginWindowInputKind.Text or ReflectedPluginWindowInputKind.Wait)
+            throw new ArgumentException(
+                $"Surface input steps[{stepIndex}] ({step.Kind}) cannot carry modifiers; modifiers are valid only on Click, Drag, Move, Scroll, and Key steps.");
+
+        var parsed = new List<ReflectedPluginWindowInputModifier>(requested.Count);
+        foreach (var value in requested)
+        {
+            var modifier = value?.Trim().ToUpperInvariant() switch
+            {
+                "CTRL" => ReflectedPluginWindowInputModifier.Ctrl,
+                "SHIFT" => ReflectedPluginWindowInputModifier.Shift,
+                "ALT" => ReflectedPluginWindowInputModifier.Alt,
+                _ => throw new ArgumentException(
+                    $"Surface input steps[{stepIndex}] ({step.Kind}) modifier '{value}' is not allowed; modifiers must be Ctrl, Shift, or Alt."),
+            };
+            if (parsed.Contains(modifier))
+                throw new ArgumentException(
+                    $"Surface input steps[{stepIndex}] ({step.Kind}) repeats modifier '{value}'; each modifier may appear only once per step.");
+            parsed.Add(modifier);
+        }
+        return [.. parsed];
     }
 
     private static void RequirePoint(float? x, float? y, ReflectedPluginWindowInputKind kind)
@@ -397,6 +514,8 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
         Text,
         KeyDown,
         KeyUp,
+        ModifiersDown,
+        ModifiersUp,
     }
 
     private sealed record FrameCommand(
@@ -407,8 +526,10 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
         float DeltaY = 0,
         int MouseButton = 0,
         string? Text = null,
-        string? Key = null)
+        string? Key = null,
+        ReflectedPluginWindowInputModifier[]? ModifierSet = null)
     {
+        public ReflectedPluginWindowInputModifier[] Modifiers => ModifierSet ?? [];
         public static FrameCommand Wait() => new(FrameCommandKind.Wait);
         public static FrameCommand Move(float x, float y) => new(FrameCommandKind.Move, X: x, Y: y);
         public static FrameCommand MouseDown(int button) => new(FrameCommandKind.MouseDown, MouseButton: button);
@@ -417,11 +538,16 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
         public static FrameCommand TextInput(string text) => new(FrameCommandKind.Text, Text: text);
         public static FrameCommand KeyDown(string key) => new(FrameCommandKind.KeyDown, Key: key);
         public static FrameCommand KeyUp(string key) => new(FrameCommandKind.KeyUp, Key: key);
+        public static FrameCommand ModifiersDown(ReflectedPluginWindowInputModifier[] modifiers) =>
+            new(FrameCommandKind.ModifiersDown, ModifierSet: modifiers);
+        public static FrameCommand ModifiersUp(ReflectedPluginWindowInputModifier[] modifiers) =>
+            new(FrameCommandKind.ModifiersUp, ModifierSet: modifiers);
     }
 
     private sealed class PendingInteraction
     {
         public PendingInteraction(
+            int schemaVersion,
             string transactionId,
             AgentBridgePluginSurfaceDescriptor descriptor,
             string windowName,
@@ -429,6 +555,7 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
             Queue<FrameCommand> commands,
             DateTimeOffset startedAtUtc)
         {
+            SchemaVersion = schemaVersion;
             TransactionId = transactionId;
             Descriptor = descriptor;
             WindowName = windowName;
@@ -437,6 +564,7 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
             StartedAtUtc = startedAtUtc;
         }
 
+        public int SchemaVersion { get; }
         public string TransactionId { get; }
         public AgentBridgePluginSurfaceDescriptor Descriptor { get; }
         public string WindowName { get; }
@@ -446,6 +574,7 @@ public sealed class ReflectedPluginWindowInputController : IDisposable
         public TaskCompletionSource<ReflectedPluginWindowInputReceipt> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public HashSet<int> HeldButtons { get; } = [];
         public HashSet<string> HeldKeys { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<ReflectedPluginWindowInputModifier> HeldModifiers { get; } = [];
         public CancellationTokenRegistration Cancellation { get; set; }
         public bool CancelRequested { get; set; }
         public int ExecutedFrames { get; set; }
@@ -489,4 +618,69 @@ public sealed class DalamudImGuiWindowInputSink : IReflectedPluginWindowInputSin
         ImGui.GetIO().AddKeyEvent(parsed, down);
         return true;
     }
+
+    // ImGui 1.88 derives io.KeyCtrl/KeyShift/KeyAlt (and io.KeyMods) only from the ModCtrl/ModShift/ModAlt
+    // keys; IsKeyDown(LeftCtrl)-style checks read the physical key. Emit both so either reading sees it.
+    public void SetModifier(ReflectedPluginWindowInputModifier modifier, bool down)
+    {
+        var (mod, key) = ModifierKeys(modifier);
+        var io = ImGui.GetIO();
+        if (down)
+        {
+            io.AddKeyEvent(mod, true);
+            io.AddKeyEvent(key, true);
+        }
+        else
+        {
+            io.AddKeyEvent(key, false);
+            io.AddKeyEvent(mod, false);
+        }
+    }
+
+    /// <summary>
+    /// Dalamud's Win32 backend queues raises for modifier keys it believes are not physically held
+    /// (LeftShift every frame, every key while the game is unfocused, Mod* on any physical key message).
+    /// Left in the queue, such a raise followed by a re-press trips ImGui's trickle rule and drops the
+    /// modifier for that frame. Rewrite only the queued raises of the keys this step holds into no-op
+    /// presses, then re-assert the hold (ImGui discards the re-press when nothing changed).
+    /// </summary>
+    public unsafe void HoldModifiers(IReadOnlyCollection<ReflectedPluginWindowInputModifier> modifiers)
+    {
+        if (modifiers.Count == 0)
+            return;
+        var context = ImGui.GetCurrentContext();
+        if (context.IsNull)
+            return;
+
+        ref var queue = ref context.Handle->InputEventsQueue;
+        for (var index = 0; index < queue.Size; index++)
+        {
+            ref var inputEvent = ref queue.Ref(index);
+            if (inputEvent.Type != ImGuiInputEventType.Key || inputEvent.Union.Key.Down != 0)
+                continue;
+            var key = inputEvent.Union.Key.Key;
+            foreach (var modifier in modifiers)
+            {
+                var (mod, physical) = ModifierKeys(modifier);
+                if (key != mod && key != physical)
+                    continue;
+                // Match the injected press exactly (AddKeyEvent uses 1.0 for down) so ImGui
+                // treats the event as unchanged and it cannot defer later events this frame.
+                inputEvent.Union.Key.Down = 1;
+                inputEvent.Union.Key.AnalogValue = 1f;
+                break;
+            }
+        }
+
+        foreach (var modifier in modifiers)
+            SetModifier(modifier, true);
+    }
+
+    private static (ImGuiKey Mod, ImGuiKey Key) ModifierKeys(ReflectedPluginWindowInputModifier modifier) => modifier switch
+    {
+        ReflectedPluginWindowInputModifier.Ctrl => (ImGuiKey.ModCtrl, ImGuiKey.LeftCtrl),
+        ReflectedPluginWindowInputModifier.Shift => (ImGuiKey.ModShift, ImGuiKey.LeftShift),
+        ReflectedPluginWindowInputModifier.Alt => (ImGuiKey.ModAlt, ImGuiKey.LeftAlt),
+        _ => throw new ArgumentOutOfRangeException(nameof(modifier), modifier, "Unsupported surface input modifier."),
+    };
 }
