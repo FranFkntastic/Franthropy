@@ -26,7 +26,7 @@ public static class DalamudOwnedPopup
         if (!ImGui.BeginPopup(id, flags))
             return false;
 
-        owner.KeepCurrentWindowAboveOwner();
+        KeepAboveOwner(owner);
         return true;
     }
 
@@ -38,7 +38,7 @@ public static class DalamudOwnedPopup
         if (!ImGui.BeginPopupModal(id, flags))
             return false;
 
-        owner.KeepCurrentWindowAboveOwner();
+        KeepAboveOwner(owner);
         return true;
     }
 
@@ -53,8 +53,19 @@ public static class DalamudOwnedPopup
         if (!ImGui.BeginPopupModal(id, ref open, flags))
             return false;
 
-        owner.KeepCurrentWindowAboveOwner();
+        KeepAboveOwner(owner);
         return true;
+    }
+
+    /// <summary>Keeps the popup above its owner, except while a popup opened from inside it is still open.</summary>
+    /// <remarks>
+    /// A combo or nested popup is a separate root window drawn just above this one. Raising this popup
+    /// to the front again every frame would draw it over that child and hide the open list.
+    /// </remarks>
+    private static void KeepAboveOwner(DalamudOwnedWindowSurface owner)
+    {
+        if (!ImGuiP.IsPopupOpen(0, ImGuiPopupFlags.AnyPopupId))
+            owner.KeepCurrentWindowAboveOwner();
     }
 
     private static DalamudOwnedWindowSurface PrepareModal()
