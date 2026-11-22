@@ -402,7 +402,16 @@ public sealed class DalamudTradeIo : ITradeIo, ITradeAutoAcceptIo
 
         try
         {
-            Callback.Fire(addon, true, 2, Callback.ZeroAtkValue);
+            // Fire the native AtkUnitBase callback directly instead of ECommons.Automation.Callback.Fire,
+            // which requires ECommonsMain.Init and throws NullReferenceException in hosts that don't initialize ECommons.
+            var values = stackalloc AtkValue[2];
+            values[0] = new AtkValue { Type = AtkValueType.Int, Int = 2 };
+            values[1] = default;
+            if (!addon->FireCallback(2, values, true))
+            {
+                error = "The trade-gil command was rejected by the game UI.";
+                return false;
+            }
             return true;
         }
         catch (Exception exception)
