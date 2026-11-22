@@ -510,7 +510,11 @@ public sealed class DalamudTradeIo : ITradeIo, ITradeAutoAcceptIo
         if (!TryGetTradeConfirmation(out var addon))
             return false;
 
-        new AddonMaster.SelectYesno(addon).Yes();
+        var yes = addon->YesButton;
+        if (yes == null || !yes->IsEnabled)
+            return false;
+
+        yes->ClickAddonButton(&addon->AtkUnitBase);
         return true;
     }
 
@@ -531,7 +535,11 @@ public sealed class DalamudTradeIo : ITradeIo, ITradeAutoAcceptIo
         }
         if (ownedUnconfirmed && TryGetTradeConfirmation(out var prompt))
         {
-            new AddonMaster.SelectYesno(prompt).No();
+            var no = prompt->NoButton;
+            if (no == null || !no->IsEnabled)
+                return false;
+
+            no->ClickAddonButton(&prompt->AtkUnitBase);
             return true;
         }
         if (!TryGetCancelButton(out var addon, out var button))
