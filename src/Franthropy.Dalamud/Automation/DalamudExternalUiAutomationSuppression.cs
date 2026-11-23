@@ -20,14 +20,16 @@ internal sealed class DalamudSharedPluginDataStore(IDalamudPluginInterface plugi
 /// Ref-counted ownership of the shared stop-request sets used by prompt-driving
 /// plugins. A scope removes only the owner entries it added, so nested product
 /// automation cannot resume another consumer's paused UI driver.
-/// Every scope holds a lease: a holder that neither renews nor disposes its scope
-/// before the lease runs out is dropped with a Warning, so a crashed holder cannot
-/// leave the other plugins paused forever. <see cref="ForceRelease"/> drops every holder.
+/// A live holder never times out: <see cref="Acquire()"/> holds until the scope is disposed,
+/// <see cref="ForceRelease"/> runs or this instance is disposed (plugin unload). A holder that also wants
+/// protection against its own owner stalling acquires with <see cref="Acquire(TimeSpan)"/> and calls
+/// <see cref="Scope.Renew"/> from its tick; if renewals stop for a whole heartbeat lease, it is dropped with a
+/// Warning. <see cref="ForceRelease"/> drops every holder.
 /// </summary>
 public sealed class DalamudExternalUiAutomationSuppression : IDisposable
 {
-    /// <summary>Lease applied by <see cref="Acquire()"/>. Holders that run longer call <see cref="Scope.Renew"/>.</summary>
-    public static readonly TimeSpan DefaultLease = TimeSpan.FromMinutes(10);
+    /// <summary>Suggested lease for <see cref="Acquire(TimeSpan)"/> holders that renew every tick.</summary>
+    public static readonly TimeSpan RecommendedHeartbeatLease = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan ExpiryCheckInterval = TimeSpan.FromSeconds(15);
     private const string TextAdvanceStopRequests = "TextAdvance.StopRequests";
     private const string YesAlreadyStopRequests = "YesAlready.StopRequests";
@@ -85,13 +87,26 @@ public sealed class DalamudExternalUiAutomationSuppression : IDisposable
         }
     }
 
-    public Scope Acquire() => Acquire(DefaultLease);
+    /// <summary>
+    /// Pauses the external UI drivers until the scope is disposed, <see cref="ForceRelease"/> runs or this instance is
+    /// disposed. Never times out, so it needs no renewal.
+    /// </summary>
+    public Scope Acquire() => AcquireCore(null);
 
-    /// <summary>Pauses the external UI drivers until the scope is disposed or its lease runs out without renewal.</summary>
-    public Scope Acquire(TimeSpan lease)
+    /// <summary>
+    /// Heartbeat hold: pauses the external UI drivers like <see cref="Acquire()"/>, but the holder must call
+    /// <see cref="Scope.Renew"/> at least once per <paramref name="heartbeatLease"/> (renewing every tick is the
+    /// intended pattern). If renewals stop for a whole lease, the holder is dropped with a Warning.
+    /// </summary>
+    public Scope Acquire(TimeSpan heartbeatLease)
     {
-        if (lease <= TimeSpan.Zero)
-            throw new ArgumentOutOfRangeException(nameof(lease), lease, "A positive suppression lease is required.");
+        if (heartbeatLease <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(heartbeatLease), heartbeatLease, "A positive heartbeat lease is required.");
+        return AcquireCore(heartbeatLease);
+    }
+
+    private Scope AcquireCore(TimeSpan? lease)
+    {
         lock (gate)
         {
             ObjectDisposedException.ThrowIf(disposed, this);
@@ -100,15 +115,16 @@ public sealed class DalamudExternalUiAutomationSuppression : IDisposable
                 textAdvanceOwned = AddOwner(TextAdvanceStopRequests, "TextAdvance") || textAdvanceOwned;
                 yesAlreadyOwned = AddOwner(YesAlreadyStopRequests, "YesAlready") || yesAlreadyOwned;
             }
-            var scope = new Scope(this, lease, clock() + lease);
+            var scope = new Scope(this, lease, lease is { } length ? clock() + length : null);
             holders.Add(scope);
             return scope;
         }
     }
 
     /// <summary>
-    /// Drops holders whose lease ran out, logging each at Warning, and restores the paused drivers when none remain.
-    /// Runs periodically on its own; callers may also invoke it. Returns the number of holders dropped.
+    /// Drops heartbeat holders that stopped renewing for a whole lease, logging each at Warning, and restores the
+    /// paused drivers when none remain. Holders from <see cref="Acquire()"/> never expire. Runs periodically on its
+    /// own; callers may also invoke it. Returns the number of holders dropped.
     /// </summary>
     public int ReleaseExpired()
     {
@@ -117,13 +133,13 @@ public sealed class DalamudExternalUiAutomationSuppression : IDisposable
             if (disposed || holders.Count == 0)
                 return 0;
             var now = clock();
-            var expired = holders.Where(scope => scope.ExpiresAt <= now).ToArray();
+            var expired = holders.Where(scope => scope.ExpiresAt is { } expiresAt && expiresAt <= now).ToArray();
             foreach (var scope in expired)
             {
                 holders.Remove(scope);
                 scope.Detach();
-                warning($"[{owner}] SuppressionLeaseExpired: a UI automation holder did not renew its {scope.Lease.TotalSeconds:N0}s lease " +
-                        $"(expired {scope.ExpiresAt:O}); dropped it.");
+                warning($"[{owner}] SuppressionHeartbeatExpired: a UI automation holder stopped renewing its " +
+                        $"{scope.Lease!.Value.TotalSeconds:N0}s heartbeat lease (expired {scope.ExpiresAt:O}); dropped it.");
             }
             if (expired.Length != 0 && holders.Count == 0)
                 RestoreAll(null);
@@ -178,7 +194,8 @@ public sealed class DalamudExternalUiAutomationSuppression : IDisposable
         {
             if (disposed || !holders.Contains(scope))
                 return false;
-            scope.ExpiresAt = clock() + scope.Lease;
+            if (scope.Lease is { } lease)
+                scope.ExpiresAt = clock() + lease;
             return true;
         }
     }
@@ -235,7 +252,7 @@ public sealed class DalamudExternalUiAutomationSuppression : IDisposable
     {
         private DalamudExternalUiAutomationSuppression? owner;
 
-        internal Scope(DalamudExternalUiAutomationSuppression owner, TimeSpan lease, DateTimeOffset expiresAt)
+        internal Scope(DalamudExternalUiAutomationSuppression owner, TimeSpan? lease, DateTimeOffset? expiresAt)
         {
             this.owner = owner;
             Lease = lease;
@@ -244,14 +261,17 @@ public sealed class DalamudExternalUiAutomationSuppression : IDisposable
 
         public List<string> RestoreFailures { get; } = [];
 
-        public TimeSpan Lease { get; }
+        /// <summary>Heartbeat lease, or null for a hold that never expires.</summary>
+        public TimeSpan? Lease { get; }
 
-        public DateTimeOffset ExpiresAt { get; internal set; }
+        /// <summary>When a heartbeat hold is dropped unless renewed first; null for a hold that never expires.</summary>
+        public DateTimeOffset? ExpiresAt { get; internal set; }
 
         /// <summary>False once the scope was disposed, expired or force-released.</summary>
         public bool IsHeld => Volatile.Read(ref owner) is not null;
 
-        /// <summary>Heartbeat: extends the lease by its full length. Returns false when the scope is no longer held.</summary>
+        /// <summary>Heartbeat: extends a leased hold by its full length (no-op for an unleased hold). Returns false
+        /// when the scope is no longer held, so a caller can tell its pause was dropped.</summary>
         public bool Renew() => Volatile.Read(ref owner)?.Renew(this) ?? false;
 
         internal void Detach() => Interlocked.Exchange(ref owner, null);

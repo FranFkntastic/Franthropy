@@ -116,6 +116,24 @@ public sealed class TradeRunner : IDisposable
             confirmationSubmitted = this.recovery.AwaitingVerification != null;
             SetActive(TradeExecutionState.ClosingTrade, pendingFinish.Value.Message, CompletionTimeout);
         }
+        if (Snapshot.State != TradeExecutionState.ClosingTrade)
+        {
+            // A previous instance may have kept auto-confirm paused across unload for a window that was still open.
+            // Keep it paused until this window closes, or release it now when no window is open.
+            if (IsTradeOpenOrUnknown())
+            {
+                try { externalAutomation.SuppressTradeAutoConfirm(); }
+                catch (Exception exception)
+                {
+                    log.Warning(exception, "[Franthropy] Could not re-own trade auto-confirm suppression for a trade window open at load.");
+                }
+                restoreAutoConfirmOnClosure = true;
+            }
+            else
+            {
+                RestoreAutoConfirm("loading with no trade window open");
+            }
+        }
     }
 
     public TradeExecutionSnapshot Snapshot { get; private set; } =
@@ -284,6 +302,8 @@ public sealed class TradeRunner : IDisposable
                 restoreAutoConfirmOnClosure = false;
                 externalAutomation.RestoreTradeAutoConfirm();
             }
+            if (IsActive || restoreAutoConfirmOnClosure)
+                externalAutomation.RenewTradeSuppression();
             if (Snapshot.State == TradeExecutionState.ClosingTrade)
             {
                 TickClosingTrade();
@@ -381,8 +401,8 @@ public sealed class TradeRunner : IDisposable
     }
 
     /// <summary>
-    /// Escape hatch: forgets the current run, any trade-closure wait and any unsettled confirmation marker, restores
-    /// trade auto-confirm and goes idle. The game is left as it is and queued quantities are not changed. Always
+    /// Escape hatch: forgets the current run, any trade-closure wait and any unsettled confirmation marker and goes
+    /// idle. Trade auto-confirm resumes now, or once the trade window closes if one is still open. The game is left as it is and queued quantities are not changed. Always
     /// succeeds, whatever the runner is doing; what was dropped is logged at Warning.
     /// </summary>
     public void Abandon(string reason = "Trade abandoned; unverified quantities remain queued.")
@@ -411,12 +431,45 @@ public sealed class TradeRunner : IDisposable
             BeginClosing(TradeExecutionState.Failed, "Unloading after confirmation; retaining trade ownership without cancellation.");
         if (IsActive && Snapshot.State != TradeExecutionState.ClosingTrade)
             Stop("Trade stopped because the plugin is unloading.");
-        // Only an unconfirmed owned window is renewed by the next load (bounded closing). A confirmation marker loads
-        // idle, so retaining for it would leave auto-confirm paused with no renewal.
-        if (recovery.CancellationPending && recovery.AwaitingVerification == null && io.IsTradeOpen)
+        // Never resume auto-confirm under a window that is still open. The next load re-owns the pause while that
+        // window stays open (bounded closing, or the idle load path) and releases it once the window closes.
+        if ((IsActive || recovery.CancellationPending || restoreAutoConfirmOnClosure) && IsTradeOpenOrUnknown())
             externalAutomation.RetainTradeSuppressionOnDispose();
         else
             externalAutomation.RestoreTradeAutoConfirm();
+    }
+
+    private bool IsTradeOpenOrUnknown()
+    {
+        try { return io.IsTradeOpen; }
+        catch (Exception exception)
+        {
+            log.Warning(exception, "[Franthropy] Could not read whether a trade window is open; treating it as open.");
+            return true;
+        }
+    }
+
+    /// <summary>Resumes trade auto-confirm now when no window is open; otherwise defers it to the first tick that
+    /// observes the window closed, so nothing auto-confirms a window this runner walked away from.</summary>
+    private void RestoreAutoConfirmWhenClosed(string context)
+    {
+        if (IsTradeOpenOrUnknown())
+        {
+            restoreAutoConfirmOnClosure = true;
+            log.Information("[Franthropy] Trade auto-confirm stays paused until the open trade window closes ({Context}).", context);
+            return;
+        }
+        restoreAutoConfirmOnClosure = false;
+        RestoreAutoConfirm(context);
+    }
+
+    private void RestoreAutoConfirm(string context)
+    {
+        try { externalAutomation.RestoreTradeAutoConfirm(); }
+        catch (Exception exception)
+        {
+            log.Error(exception, "[Franthropy] Could not restore trade auto-confirm while {Context}.", context);
+        }
     }
 
     private void TickOpeningTrade(DateTimeOffset now)
@@ -1085,7 +1138,8 @@ public sealed class TradeRunner : IDisposable
         LogTransition(previousState, state, message);
     }
 
-    /// <summary>Drops in-memory run state and closure ownership, restores auto-confirm and goes idle. Never touches
+    /// <summary>Drops in-memory run state and closure ownership, restores auto-confirm (deferred while a trade window
+    /// is open) and goes idle. Never touches
     /// the game and never changes the confirmation marker or queue; callers persist.</summary>
     private void ReleaseRun(string reason)
     {
@@ -1103,12 +1157,7 @@ public sealed class TradeRunner : IDisposable
         batch = null;
         deadline = nextActionAt = default;
         checkpointQueueSignature = string.Empty;
-        restoreAutoConfirmOnClosure = false;
-        try { externalAutomation.RestoreTradeAutoConfirm(); }
-        catch (Exception exception)
-        {
-            log.Error(exception, "[Franthropy] Could not restore trade auto-confirm while releasing the trade run.");
-        }
+        RestoreAutoConfirmWhenClosed("releasing the trade run");
         if (abandonedBatch != null)
             NotifyBatch(BatchAbandoned, abandonedBatch, "abandoned");
         Snapshot = new(
