@@ -106,19 +106,26 @@ public sealed class TradeReceiveOperation
             {
                 var after = TradePlanner.CountExactInventory(inventory.Stacks);
                 Evidence = new(partner, now, before, after);
-                if (before.Keys.Concat(after.Keys).Concat(locked.Keys).Distinct().All(k =>
-                    after.GetValueOrDefault(k) - before.GetValueOrDefault(k) == locked.GetValueOrDefault(k)))
-                {
-                    Received = locked;
-                    return new(OperationStatus.Succeeded, "IncomingDeltaVerified", "The received inventory delta equals the confirmed offer.");
-                }
+                if (MatchesLocked(after)) return Credit();
             }
             return new(OperationStatus.Pending, "AwaitingReceiveDelta", "Waiting for exact received inventory evidence.");
+        }
+        if (confirmed)
+        {
+            // A window is open again, but the sender may have opened its next window in the same frame this one
+            // completed, so closure is never observed. Credit lands only on completion: an exact delta equal to the
+            // confirmed offer proves this window completed. Only read here; the open window belongs to a later op.
+            if (before == null || locked == null || io.ObserveTradeableInventory() is not { IsAuthoritative: true } open)
+                return result;
+            var after = TradePlanner.CountExactInventory(open.Stacks);
+            if (!MatchesLocked(after)) return result;
+            closed = true;
+            Evidence = new(partner, now, before, after);
+            return Credit();
         }
         if (io.ObserveTradePartnerEntityId() is not { } entity) return result;
         if (entity != (uint)partner.GameObjectId || !io.PartnerIsAvailable(partner))
         {
-            if (confirmed) return result; // Only an observed closure releases this confirmed window.
             opened = false;
             before = null;
             locked = null;
@@ -133,7 +140,6 @@ public sealed class TradeReceiveOperation
         }
         opened = true;
         foreignEntity = null;
-        if (confirmed) return result;
         if (!io.IsRemoteLocked)
         {
             before = null;
@@ -182,6 +188,16 @@ public sealed class TradeReceiveOperation
             }
         }
         return new(OperationStatus.Pending, confirmed ? "AwaitingClosure" : "AwaitingConfirmation", "Waiting for verified transfer.");
+    }
+
+    private bool MatchesLocked(IReadOnlyDictionary<TradeInventoryKey, int> after) =>
+        before!.Keys.Concat(after.Keys).Concat(locked!.Keys).Distinct().All(k =>
+            after.GetValueOrDefault(k) - before.GetValueOrDefault(k) == locked.GetValueOrDefault(k));
+
+    private OperationResult Credit()
+    {
+        Received = locked;
+        return new(OperationStatus.Succeeded, "IncomingDeltaVerified", "The received inventory delta equals the confirmed offer.");
     }
 
     private bool SameOffer(IReadOnlyDictionary<TradeInventoryKey, int> actual) =>

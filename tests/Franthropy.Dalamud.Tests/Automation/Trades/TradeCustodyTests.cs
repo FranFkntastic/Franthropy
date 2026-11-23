@@ -190,6 +190,25 @@ public sealed class TradeCustodyTests
         Assert.Equal(2, f.Confirms);
     }
 
+    [Fact]
+    public void ConfirmedWindowSucceedsWhenSenderReopensBeforeClosureIsObserved()
+    {
+        var io = DispatchProxy.Create<ITradeIo, TradeFixture>();
+        var f = (TradeFixture)(object)io;
+        var op = new TradeReceiveOperation(io, Partner, [Expected], Now.AddMinutes(1), _ => { });
+        op.Tick(Now);
+        op.Tick(Now);
+        Assert.Equal(1, f.Confirms);
+        f.LocalReady = false; // the sender's next window, already locked with an identical offer; closure was never observed
+        Assert.Equal(OperationStatus.Pending, op.Tick(Now).Status);
+        f.Quantity += 3;
+        Assert.Equal(OperationStatus.Succeeded, op.Tick(Now).Status);
+        Assert.Equal(OperationStatus.Succeeded, op.Tick(Now).Status);
+        Assert.Equal(new KeyValuePair<TradeInventoryKey, int>(new(42, true), 3), Assert.Single(op.Received!));
+        Assert.Equal(3, op.Evidence!.After[new(42, true)] - op.Evidence.Before[new(42, true)]);
+        Assert.Equal((1, 1, true), (f.Ready, f.Confirms, f.Open));
+    }
+
     [Theory]
     [InlineData("gil-for-items")]
     [InlineData("items-for-gil")]
