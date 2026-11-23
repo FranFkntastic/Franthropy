@@ -36,14 +36,12 @@ plugin configuration, or machine-specific paths.
 
 ## Verification
 
-Run the smallest project or focused test selection that covers the changed
-contract. The solution includes projects targeting .NET 8 and .NET 10; changes
-to `Franthropy.Dalamud` also require a development Dalamud environment.
+Build and test the projects affected by your change. The solution includes
+projects targeting .NET 8 and .NET 10; changes to `Franthropy.Dalamud` also
+require a local Dalamud development environment.
 
-Live-client testing is separate from source verification. Do not run commands,
-move game state, capture a client, or reload plugins without the client owner's
-explicit permission. Record source-only and live verification separately in the
-pull request.
+Note in your pull request what was verified via automated checks versus tested
+in-game.
 
 By contributing, you agree that your contribution is licensed under GPL-3.0,
 the repository's existing license.
