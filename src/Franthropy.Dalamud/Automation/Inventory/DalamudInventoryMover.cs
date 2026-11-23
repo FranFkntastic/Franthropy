@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -22,9 +21,9 @@ public enum InventoryMoveOutcome
 {
     /// <summary>Ordinary bag merge/split path; no code is assigned.</summary>
     None,
-    /// <summary>Waiting: the executable identity check is still running.</summary>
+    /// <summary>No longer produced; validation is synchronous. Kept so existing outcome values stay stable.</summary>
     ValidatingNative,
-    /// <summary>The executable hash, module identity or native bindings are not the researched ones.</summary>
+    /// <summary>A native signature did not resolve uniquely, or disagreed with the SDK binding for the same function.</summary>
     UnresearchedExecutable,
     /// <summary>The source is not a saddlebag slot or the quantity is outside 1..source quantity.</summary>
     InvalidRequest,
@@ -68,13 +67,13 @@ public enum InventoryMoveOutcome
 }
 
 /// <summary>
-/// Serialized ordinary bag merge/split and saddlebag-to-bag retrieval boundary. Offsets/opcodes are restricted
-/// to the researched executable, not inferred from an SDK layout or return code.
+/// Serialized ordinary bag merge/split and saddlebag-to-bag retrieval boundary. Native functions are located by
+/// unique signatures and cross-checked against the SDK bindings; no executable hash or absolute offset is required.
 /// Call only on the framework thread; the receive hook only records acknowledgement.
 /// </summary>
 public sealed unsafe class DalamudInventoryMover : IDisposable
 {
-    public const string ResearchedClientSha256 = "CEB4260B2574476ACF72E7B6105D0A4F8D1BD78B4E7CAB5D8115C453F2F39339";
+    /// <summary>Client the operation layout was researched on (provenance only; not enforced).</summary>
     public const string ResearchedClientVersion = "2026.11.03.0000.0000";
     public const string ResearchedClientStructs = "433e87a565258a4174764aa24cf5405ac404ccca";
     private const string AckSignature = "4C 8B DC 55 41 54 49 8D 6B A1 48 81 EC 98 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 27 49 89 5B 18 45 33 E4 49 89 7B E8";
@@ -104,13 +103,10 @@ public sealed unsafe class DalamudInventoryMover : IDisposable
     private Pending? pending;
     private string? poison;
     private bool disposed;
-    private Task<string?>? hashCheck;
     private string? availabilityError;
     private nint validatedAck;
-    private string? binaryPath;
-    private long binaryLength;
-    private DateTime binaryWriteTime;
-    private nint moduleBase;
+    private nint validatedMove;
+    private nint validatedSplit;
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void AckDelegate(nint manager, byte* payload);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -174,25 +170,11 @@ public sealed unsafe class DalamudInventoryMover : IDisposable
     public InventoryMoveObservation Preflight()
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        var file = new FileInfo(scanner.Module.FileName);
-        if (hashCheck == null)
-        {
-            binaryPath = file.FullName;
-            binaryLength = file.Length;
-            binaryWriteTime = file.LastWriteTimeUtc;
-            moduleBase = scanner.Module.BaseAddress;
-            var path = binaryPath;
-            hashCheck = Task.Run(() => HashBinary(path));
-        }
-        if (binaryPath != file.FullName || binaryLength != file.Length || binaryWriteTime != file.LastWriteTimeUtc || moduleBase != scanner.Module.BaseAddress)
-            availabilityError = "Inventory binary/module identity changed after validation; movement is unavailable.";
-        if (!hashCheck.IsCompleted) return new(true, false, "Validating inventory native availability...");
-        availabilityError ??= hashCheck.GetAwaiter().GetResult();
         if (availabilityError != null) return new(false, false, availabilityError);
         if (validatedAck != 0)
         {
-            if ((nint)InventoryManager.MemberFunctionPointers.MoveItemSlot != moduleBase + 0x86E180 ||
-                (nint)InventoryManager.MemberFunctionPointers.SplitItem != moduleBase + 0x870380)
+            if ((nint)InventoryManager.MemberFunctionPointers.MoveItemSlot != validatedMove ||
+                (nint)InventoryManager.MemberFunctionPointers.SplitItem != validatedSplit)
                 return new(false, false, availabilityError = "Inventory SDK bindings changed after validation.");
             return new(false, true, "Inventory native availability validated; no observer installed.");
         }
@@ -201,38 +183,25 @@ public sealed unsafe class DalamudInventoryMover : IDisposable
         return new(false, availabilityError == null, availabilityError ?? "Inventory native availability validated; no observer installed.");
     }
 
-    private static string? HashBinary(string path)
-    {
-        try
-        {
-            using var stream = File.OpenRead(path);
-            return Convert.ToHexString(SHA256.HashData(stream)) == ResearchedClientSha256 ? null :
-                "Inventory operation layout is not researched for this executable hash.";
-        }
-        catch (Exception ex) { return $"Inventory executable validation failed: {ex.Message}"; }
-    }
-
+    // Each native function must resolve from a unique signature, and where the SDK binds the same function the two
+    // must agree. No executable hash or absolute offset is required, so a patch that keeps these shapes still works.
     private void ValidateBindings()
     {
         var ack = NativeCapabilityGuard.ResolveUnique(scanner, AckSignature, "Inventory operation acknowledgement");
-        NativeCapabilityGuard.RequireIdentity(ack, scanner.Module.BaseAddress + 0x872B70, "Inventory acknowledgement");
         var move = NativeCapabilityGuard.ResolveUnique(scanner, "E8 ?? ?? ?? ?? 48 8B 03 66 FF C5", "Inventory move callsite");
         move += 5 + *(int*)(move + 1);
         NativeCapabilityGuard.RequireIdentity(move, (nint)InventoryManager.MemberFunctionPointers.MoveItemSlot, "Inventory move SDK binding");
-        NativeCapabilityGuard.RequireIdentity(move, scanner.Module.BaseAddress + 0x86E180, "Inventory move identity");
         var split = NativeCapabilityGuard.ResolveUnique(scanner, "40 55 53 56 57 41 55 41 57 48 8D 6C 24 ?? 48 81 EC ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 ?? 8D B2", "Inventory split");
         NativeCapabilityGuard.RequireIdentity(split, (nint)InventoryManager.MemberFunctionPointers.SplitItem, "Inventory split SDK binding");
-        NativeCapabilityGuard.RequireIdentity(split, scanner.Module.BaseAddress + 0x870380, "Inventory split identity");
         var permission = NativeCapabilityGuard.ResolveUnique(scanner, "E8 ?? ?? ?? ?? 84 C0 75 ?? 8B FB", "Inventory permission callsite");
         permission += 5 + *(int*)(permission + 1);
         NativeCapabilityGuard.RequireIdentity(permission, (nint)Conditions.MemberFunctionPointers.HasPermission, "Inventory permission SDK binding");
         var request = NativeCapabilityGuard.ResolveUnique(scanner, ContainerRequestSignature, "Inventory container refresh request");
-        NativeCapabilityGuard.RequireIdentity(request, moduleBase + 0x86D630, "Inventory container request identity");
         validatedContainerReceive = NativeCapabilityGuard.ResolveUnique(scanner, ContainerReceiveSignature, "Inventory full container receive");
-        NativeCapabilityGuard.RequireIdentity(validatedContainerReceive, moduleBase + 0x86D800, "Inventory container receive identity");
         requestContainer = Marshal.GetDelegateForFunctionPointer<ContainerRequestDelegate>(request);
         validatedReset = NativeCapabilityGuard.ResolveUnique(scanner, ResetSignature, "Inventory pending-operation reset");
-        NativeCapabilityGuard.RequireIdentity(validatedReset, moduleBase + 0x86BE80, "Inventory reset identity");
+        validatedMove = move;
+        validatedSplit = split;
         validatedAck = ack;
     }
 
