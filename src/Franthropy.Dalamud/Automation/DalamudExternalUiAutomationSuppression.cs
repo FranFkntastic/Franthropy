@@ -25,6 +25,8 @@ internal sealed class DalamudSharedPluginDataStore(IDalamudPluginInterface plugi
 /// protection against its own owner stalling acquires with <see cref="Acquire(TimeSpan)"/> and calls
 /// <see cref="Scope.Renew"/> from its tick; if renewals stop for a whole heartbeat lease, it is dropped with a
 /// Warning. <see cref="ForceRelease"/> drops every holder.
+/// The owner name must be unique per live instance in the process: an instance adopts an existing
+/// stop-request entry with its owner name as its own, so two live instances sharing a name would release each other's pause.
 /// </summary>
 public sealed class DalamudExternalUiAutomationSuppression : IDisposable
 {
