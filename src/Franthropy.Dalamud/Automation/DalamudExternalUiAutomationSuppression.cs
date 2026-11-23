@@ -18,8 +18,8 @@ internal sealed class DalamudSharedPluginDataStore(IDalamudPluginInterface plugi
 
 /// <summary>
 /// Ref-counted ownership of the shared stop-request sets used by prompt-driving
-/// plugins. A scope removes only the owner entries it added, so nested product
-/// automation cannot resume another consumer's paused UI driver.
+/// plugins. Releases remove only this instance's owner name (including one a previous
+/// instance left behind), so another consumer's paused UI driver is never resumed.
 /// A live holder never times out: <see cref="Acquire()"/> holds until the scope is disposed,
 /// <see cref="ForceRelease"/> runs or this instance is disposed (plugin unload). A holder that also wants
 /// protection against its own owner stalling acquires with <see cref="Acquire(TimeSpan)"/> and calls
@@ -160,7 +160,7 @@ public sealed class DalamudExternalUiAutomationSuppression : IDisposable
                 scope.Detach();
             holders.Clear();
             warning($"[{owner}] SuppressionForceReleased: dropped {dropped} holder(s) and restored paused UI automation. reason={reason}");
-            RestoreAll(null);
+            RestoreAll(null, force: true);
             return dropped;
         }
     }
@@ -169,12 +169,14 @@ public sealed class DalamudExternalUiAutomationSuppression : IDisposable
     {
         if (!dataStore.TryGetData<HashSet<string>>(key, out var stopRequests) || stopRequests is null)
             return false;
+        bool added;
         lock (stopRequests)
-        {
-            if (!stopRequests.Add(owner))
-                return false;
-        }
-        diagnostic($"[{owner}] Temporarily paused {product} while UI automation is active.");
+            added = stopRequests.Add(owner);
+        // An entry under our owner name is ours even when we did not add it (a previous instance that never
+        // disposed), so every release path removes it instead of leaving the pause stuck until a game restart.
+        diagnostic(added
+            ? $"[{owner}] Temporarily paused {product} while UI automation is active."
+            : $"[{owner}] Took over an existing {product} pause under this owner name; it is released with this hold.");
         return true;
     }
 
@@ -200,19 +202,21 @@ public sealed class DalamudExternalUiAutomationSuppression : IDisposable
         }
     }
 
-    private void RestoreAll(Scope? scope)
+    private void RestoreAll(Scope? scope, bool force = false)
     {
-        RestoreOwned(TextAdvanceStopRequests, "TextAdvance", ref textAdvanceOwned, scope);
-        RestoreOwned(YesAlreadyStopRequests, "YesAlready", ref yesAlreadyOwned, scope);
+        RestoreOwned(TextAdvanceStopRequests, "TextAdvance", ref textAdvanceOwned, scope, force);
+        RestoreOwned(YesAlreadyStopRequests, "YesAlready", ref yesAlreadyOwned, scope, force);
     }
 
     private void RestoreOwned(
         string key,
         string product,
         ref bool owned,
-        Scope? scope)
+        Scope? scope,
+        bool force)
     {
-        if (!owned)
+        // force (ForceRelease) removes our owner name even when this instance never recorded owning it.
+        if (!owned && !force)
             return;
         try
         {
