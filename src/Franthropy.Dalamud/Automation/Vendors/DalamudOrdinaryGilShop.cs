@@ -1,6 +1,9 @@
+using Dalamud.Game.Addon.Lifecycle;
+using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
+using Dalamud.Utility;
 using ECommons.Automation.UIInput;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
@@ -218,12 +221,27 @@ public sealed class DalamudGilVendorAccessReader
         GilVendorAccessAssessment Assessment);
 }
 
-public sealed class DalamudOrdinaryGilShop
+public sealed class DalamudOrdinaryGilShop : IDisposable
 {
     private const string ShopAddon = "Shop";
+    private const string SelectYesnoAddon = "SelectYesno";
+    private const int MaximumPromptTextLength = 160;
     private static readonly IReadOnlySet<string> EmptyMenuEntries = new HashSet<string>();
     private readonly IGameGui gameGui;
     private readonly IReadOnlyDictionary<uint, IReadOnlySet<string>> menuEntriesByShopId;
+    private readonly IAddonLifecycle? addonLifecycle;
+    private bool disposed;
+
+    // Per-submission confirmation state, reset immediately before each Shop callback.
+    // Lifecycle callbacks and coordinator ticks both run on the framework thread.
+    private long attemptSequence;
+    private bool attemptActive;
+    private bool fireCallbackReturned = true;
+    private int promptOpenCount;
+    private bool promptClosed;
+    private bool promptConfirmedByUs;
+    private int confirmedPromptGeneration;
+    private string? promptText;
 
     public DalamudOrdinaryGilShop(IGameGui gameGui)
     {
@@ -232,11 +250,29 @@ public sealed class DalamudOrdinaryGilShop
     }
 
     public DalamudOrdinaryGilShop(IGameGui gameGui, IDataManager dataManager)
+        : this(gameGui, dataManager, addonLifecycle: null)
+    {
+    }
+
+    /// <summary>
+    /// With <paramref name="addonLifecycle"/>, SelectYesno setup/finalize events prove whether a
+    /// purchase confirmation opened at all, even when another plugin (e.g. YesAlready) confirms
+    /// it within the same frame. Dispose the shop to unregister those listeners.
+    /// </summary>
+    public DalamudOrdinaryGilShop(IGameGui gameGui, IDataManager dataManager, IAddonLifecycle? addonLifecycle)
     {
         this.gameGui = gameGui ?? throw new ArgumentNullException(nameof(gameGui));
         ArgumentNullException.ThrowIfNull(dataManager);
         menuEntriesByShopId = BuildMenuEntries(dataManager);
+        this.addonLifecycle = addonLifecycle;
+        if (addonLifecycle is not null)
+        {
+            addonLifecycle.RegisterListener(AddonEvent.PostSetup, SelectYesnoAddon, OnPromptSetup);
+            addonLifecycle.RegisterListener(AddonEvent.PreFinalize, SelectYesnoAddon, OnPromptFinalize);
+        }
     }
+
+    public bool ObservesPromptLifecycle => addonLifecycle is not null && !disposed;
 
     public unsafe bool IsOpen
     {
@@ -298,6 +334,12 @@ public sealed class DalamudOrdinaryGilShop
             error = "The ordinary-gil shop closed before purchase submission.";
             return false;
         }
+        var readiness = ReadPurchaseUiReadiness();
+        if (readiness.State != Coordination.GilVendorPurchaseUiReadinessState.Ready)
+        {
+            error = $"ShopBlocked: the ordinary-gil shop cannot accept a purchase yet ({readiness.Describe()}); nothing was submitted.";
+            return false;
+        }
 
         AtkValue* values = stackalloc AtkValue[4];
         values[0].Type = ValueType.Int;
@@ -308,14 +350,107 @@ public sealed class DalamudOrdinaryGilShop
         values[2].UInt = quantity;
         values[3].Type = ValueType.Int;
         values[3].Int = 0;
-        addon->FireCallback(4, values, true);
+        BeginAttempt();
+        // A false return is recorded, not trusted as rejection on its own: other addons
+        // (Trade) return false while still acting. When lifecycle events are attached, the
+        // coordinator proves "no confirmation ever opened" before treating it as unsent;
+        // without them, receipt verification decides and nothing is resent.
+        fireCallbackReturned = addon->FireCallback(4, values, true);
         error = string.Empty;
         return true;
     }
 
+    /// <summary>
+    /// Live, zero-wait readiness for a purchase callback: the shop is set up and visible,
+    /// owns no blocking child addon, and no SelectYesno is still on screen.
+    /// </summary>
+    public unsafe Coordination.GilVendorPurchaseUiReadiness ReadPurchaseUiReadiness()
+    {
+        var yesNoVisible = IsPresented(gameGui.GetAddonByName<AtkUnitBase>(SelectYesnoAddon, 1));
+        var addon = gameGui.GetAddonByName<AtkUnitBase>(ShopAddon, 1);
+        if (addon == null || !addon->IsVisible)
+            return new(Coordination.GilVendorPurchaseUiReadinessState.ShopClosed, false, 0, yesNoVisible);
+        var blocking = (int)addon->NumBlockingAddons;
+        var ready = addon->IsReady && blocking == 0 && !yesNoVisible;
+        return new(
+            ready ? Coordination.GilVendorPurchaseUiReadinessState.Ready : Coordination.GilVendorPurchaseUiReadinessState.Blocked,
+            addon->IsReady,
+            blocking,
+            yesNoVisible);
+    }
+
+    /// <summary>Confirmation-prompt evidence for the latest <see cref="TrySubmitPurchase"/> call.</summary>
+    public unsafe Coordination.GilVendorPurchasePromptObservation ObservePurchasePrompt()
+    {
+        var readiness = ReadPurchaseUiReadiness();
+        if (attemptActive && readiness.SelectYesnoVisible)
+        {
+            // Polling sighting covers hosts without lifecycle events; it never lowers evidence.
+            if (promptOpenCount == 0)
+                promptOpenCount = 1;
+            var yesNo = gameGui.GetAddonByName<AddonSelectYesno>(SelectYesnoAddon, 1);
+            if (ReadPromptText(yesNo) is { } visibleText)
+                promptText = visibleText;
+        }
+        return new()
+        {
+            AttemptSequence = attemptSequence,
+            LifecycleObserved = attemptActive && ObservesPromptLifecycle,
+            FireCallbackReturned = fireCallbackReturned,
+            PromptOpenCount = promptOpenCount,
+            PromptClosed = promptClosed,
+            PromptConfirmedByUs = promptConfirmedByUs,
+            PromptText = promptText,
+            ShopOpen = readiness.ShopOpen,
+            ShopBlockingAddons = readiness.ShopBlockingAddons,
+            SelectYesnoVisible = readiness.SelectYesnoVisible,
+        };
+    }
+
+    /// <summary>
+    /// Clicks Yes at most once per submission, and only on a ready SelectYesno whose text names
+    /// <paramref name="expectedGil"/> (and <paramref name="quantity"/> when above one). A visible
+    /// prompt that does not match is reported, never clicked.
+    /// </summary>
+    public unsafe Coordination.GilVendorPromptConfirmResult ConfirmPurchasePrompt(ulong expectedGil, uint quantity)
+    {
+        var addon = gameGui.GetAddonByName<AddonSelectYesno>(SelectYesnoAddon, 1);
+        if (addon == null || !addon->AtkUnitBase.IsReady || !addon->AtkUnitBase.IsVisible)
+            return new(Coordination.GilVendorPromptConfirmState.NotPresent, null);
+        if (attemptActive && promptOpenCount == 0)
+            promptOpenCount = 1;
+        var text = ReadPromptText(addon);
+        if (attemptActive && text is not null)
+            promptText = text;
+        if (promptConfirmedByUs)
+        {
+            // Only lifecycle events can tell a second prompt instance from the one still closing.
+            return ObservesPromptLifecycle && promptOpenCount > confirmedPromptGeneration
+                ? new(Coordination.GilVendorPromptConfirmState.UnexpectedPrompt, text)
+                : new(Coordination.GilVendorPromptConfirmState.AlreadyConfirmed, text);
+        }
+        if (string.IsNullOrWhiteSpace(text))
+            return new(Coordination.GilVendorPromptConfirmState.Waiting, null);
+        if (!PromptMatchesPurchase(text, expectedGil, quantity))
+            return new(Coordination.GilVendorPromptConfirmState.UnexpectedPrompt, text);
+        if (addon->YesButton == null || !addon->YesButton->IsEnabled)
+            return new(Coordination.GilVendorPromptConfirmState.Waiting, text);
+
+        addon->YesButton->ClickAddonButton(&addon->AtkUnitBase);
+        promptConfirmedByUs = true;
+        confirmedPromptGeneration = promptOpenCount;
+        return new(Coordination.GilVendorPromptConfirmState.Confirmed, text);
+    }
+
+    /// <summary>
+    /// Unvalidated legacy confirmation kept for existing callers; still clicks at most once per
+    /// submission. Prefer <see cref="ConfirmPurchasePrompt"/>.
+    /// </summary>
     public unsafe bool TryConfirmOwnedPrompt()
     {
-        var addon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno", 1);
+        if (promptConfirmedByUs)
+            return false;
+        var addon = gameGui.GetAddonByName<AddonSelectYesno>(SelectYesnoAddon, 1);
         if (addon == null ||
             !addon->AtkUnitBase.IsReady ||
             !addon->AtkUnitBase.IsVisible ||
@@ -326,7 +461,143 @@ public sealed class DalamudOrdinaryGilShop
         }
 
         addon->YesButton->ClickAddonButton(&addon->AtkUnitBase);
+        promptConfirmedByUs = true;
+        confirmedPromptGeneration = Math.Max(1, promptOpenCount);
         return true;
+    }
+
+    public void Dispose()
+    {
+        if (disposed)
+            return;
+        disposed = true;
+        if (addonLifecycle is null)
+            return;
+        addonLifecycle.UnregisterListener(AddonEvent.PreFinalize, SelectYesnoAddon, OnPromptFinalize);
+        addonLifecycle.UnregisterListener(AddonEvent.PostSetup, SelectYesnoAddon, OnPromptSetup);
+    }
+
+    /// <summary>
+    /// Matches the localized gil-shop confirmation (Addon 3406, e.g. "Purchase 99 Bronze Ingots
+    /// for 1,089 gil?") by its numbers only, so pluralized or localized item names never matter.
+    /// Thousands separators (",", ".", "'", and space variants) are ignored.
+    /// </summary>
+    internal static bool PromptMatchesPurchase(string text, ulong expectedGil, uint quantity)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+        var strict = ExtractNumbers(text, allowSpaceSeparators: false);
+        var loose = ExtractNumbers(text, allowSpaceSeparators: true);
+        bool Names(ulong value) => strict.Contains(value) || loose.Contains(value);
+        return Names(expectedGil) && (quantity <= 1 || Names(quantity));
+    }
+
+    private static HashSet<ulong> ExtractNumbers(string text, bool allowSpaceSeparators)
+    {
+        var numbers = new HashSet<ulong>();
+        ulong current = 0;
+        var inNumber = false;
+        var overflow = false;
+        for (var index = 0; index < text.Length; index++)
+        {
+            var digit = DigitValue(text[index]);
+            if (digit >= 0)
+            {
+                if (current > (ulong.MaxValue - (ulong)digit) / 10)
+                    overflow = true;
+                else
+                    current = (current * 10) + (ulong)digit;
+                inNumber = true;
+                continue;
+            }
+            if (inNumber &&
+                IsThousandsSeparator(text[index], allowSpaceSeparators) &&
+                index + 1 < text.Length &&
+                DigitValue(text[index + 1]) >= 0)
+            {
+                continue;
+            }
+            if (inNumber && !overflow)
+                numbers.Add(current);
+            current = 0;
+            inNumber = false;
+            overflow = false;
+        }
+        if (inNumber && !overflow)
+            numbers.Add(current);
+        return numbers;
+    }
+
+    private static int DigitValue(char value) => value switch
+    {
+        >= '0' and <= '9' => value - '0',
+        >= '０' and <= '９' => value - '０',
+        _ => -1,
+    };
+
+    private static bool IsThousandsSeparator(char value, bool allowSpaceSeparators) => value switch
+    {
+        ',' or '.' or '\'' or '’' => true,
+        ' ' or ' ' or ' ' or ' ' => allowSpaceSeparators,
+        _ => false,
+    };
+
+    private void BeginAttempt()
+    {
+        attemptSequence++;
+        attemptActive = true;
+        fireCallbackReturned = false;
+        promptOpenCount = 0;
+        promptClosed = false;
+        promptConfirmedByUs = false;
+        confirmedPromptGeneration = 0;
+        promptText = null;
+    }
+
+    private unsafe void OnPromptSetup(AddonEvent eventType, AddonArgs args)
+    {
+        try
+        {
+            if (!attemptActive)
+                return;
+            promptOpenCount++;
+            promptClosed = false;
+            if (ReadPromptText((AddonSelectYesno*)args.Addon.Address) is { } text)
+                promptText = text;
+        }
+        catch
+        {
+            // Opening is already recorded; text is diagnostic only.
+        }
+    }
+
+    private void OnPromptFinalize(AddonEvent eventType, AddonArgs args)
+    {
+        if (attemptActive && promptOpenCount > 0)
+            promptClosed = true;
+    }
+
+    private static unsafe string? ReadPromptText(AddonSelectYesno* addon)
+    {
+        if (addon == null)
+            return null;
+        string? text = null;
+        if (addon->PromptText != null)
+            text = addon->PromptText->NodeText.ExtractText();
+        if (string.IsNullOrWhiteSpace(text) &&
+            addon->AtkUnitBase.AtkValues != null &&
+            addon->AtkUnitBase.AtkValuesCount > 0)
+        {
+            var value = addon->AtkUnitBase.AtkValues;
+            if (value->Type is ValueType.String or ValueType.ManagedString or ValueType.WideString or ValueType.ConstString)
+                text = value->GetValueAsString();
+        }
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+        var singleLine = string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return singleLine.Length <= MaximumPromptTextLength
+            ? singleLine
+            : singleLine[..MaximumPromptTextLength] + "…";
     }
 
     public unsafe void Close()

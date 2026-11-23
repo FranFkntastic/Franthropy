@@ -155,6 +155,98 @@ public sealed class GilVendorBuyCoordinatorTests
             Assert.Null(coordinator.ActiveRun.ArmedPurchase);
     }
 
+    // Live Primary: Shop silently dropped back-to-back callbacks; only lifecycle proof that the
+    // confirmation never opened may resend, and the resend budget must end in a clean failure.
+    [Fact]
+    public void Lifecycle_proven_unopened_prompt_resends_within_budget_then_fails_cleanly()
+    {
+        var now = new DateTimeOffset(2026, 11, 23, 0, 0, 0, TimeSpan.Zero);
+        var runtime = new ScriptedRuntime
+        {
+            MaximumBatch = 2,
+            LifecycleObserved = true,
+            // The first batch proves this session's purchases prompt; every later callback is dropped.
+            PromptOpens = call => call == 1,
+            PurchaseLands = call => call == 1,
+        };
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime, () => now);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 4)], [Stop(100, 1)]), Context, out var error), error);
+
+        for (var index = 0; index < 200 && coordinator.IsRunning; index++)
+        {
+            coordinator.Tick(Context);
+            now += TimeSpan.FromMilliseconds(200);
+        }
+
+        var run = coordinator.ActiveRun!;
+        Assert.Equal(GilVendorBuyPhase.Failed, run.Phase);
+        Assert.StartsWith("VendorPromptNotOpened", run.Message);
+        Assert.Null(run.ArmedPurchase);
+        Assert.Equal(4, runtime.SubmitCalls); // first batch + dropped batch + 2 resends
+        Assert.Equal(2, Assert.Single(run.Receipts).Quantity);
+    }
+
+    // A confirmation that opened (even one an auto-confirm plugin accepted without us) or a host
+    // without lifecycle proof may have a purchase in flight: never resend, end indeterminate.
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public void Possibly_in_flight_purchase_is_never_resent(bool lifecycleObserved, bool promptOpens)
+    {
+        var now = new DateTimeOffset(2026, 11, 23, 0, 0, 0, TimeSpan.Zero);
+        var runtime = new ScriptedRuntime
+        {
+            MaximumBatch = 2,
+            LifecycleObserved = lifecycleObserved,
+            PromptOpens = call => call == 1 || promptOpens,
+            PurchaseLands = call => call == 1,
+        };
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime, () => now);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 4)], [Stop(100, 1)]), Context, out var error), error);
+
+        for (var index = 0; index < 200 && coordinator.IsRunning; index++)
+        {
+            coordinator.Tick(Context);
+            now += TimeSpan.FromMilliseconds(200);
+        }
+
+        var run = coordinator.ActiveRun!;
+        Assert.Equal(GilVendorBuyPhase.Indeterminate, run.Phase);
+        Assert.StartsWith("VendorVerificationWindowExpired", run.Message);
+        Assert.NotNull(run.ArmedPurchase);
+        Assert.Equal(2, runtime.SubmitCalls);
+    }
+
+    // A visible confirmation that does not name the batch must not be answered or resent; if it is
+    // the only prompt since the callback and nothing moved, the run fails cleanly, not indeterminate.
+    [Fact]
+    public void Unexpected_prompt_is_not_confirmed_or_resent()
+    {
+        var now = new DateTimeOffset(2026, 11, 23, 0, 0, 0, TimeSpan.Zero);
+        var runtime = new ScriptedRuntime
+        {
+            LifecycleObserved = true,
+            PurchaseLands = _ => false,
+            ConfirmResult = new(GilVendorPromptConfirmState.UnexpectedPrompt, "Discard the item?"),
+        };
+        var coordinator = new GilVendorBuyCoordinator(new MemoryStore(), runtime, () => now);
+        Assert.True(coordinator.TryStart(Plan([Line(1, 2)], [Stop(100, 1)]), Context, out var error), error);
+
+        for (var index = 0; index < 200 && coordinator.IsRunning; index++)
+        {
+            coordinator.Tick(Context);
+            now += TimeSpan.FromMilliseconds(200);
+        }
+
+        var run = coordinator.ActiveRun!;
+        Assert.Equal(GilVendorBuyPhase.Failed, run.Phase);
+        Assert.StartsWith("VendorUnexpectedPrompt", run.Message);
+        Assert.Contains("Discard the item?", run.Message);
+        Assert.Null(run.ArmedPurchase);
+        Assert.Equal(1, runtime.SubmitCalls);
+        Assert.Empty(run.Receipts);
+    }
+
     private static GilVendorBuyPlan Plan(
         IReadOnlyList<GilVendorBuyLineSnapshot> lines,
         IReadOnlyList<GilVendorBuyStopSnapshot> stops) => new()
@@ -298,16 +390,35 @@ public sealed class GilVendorBuyCoordinatorTests
                 return false;
             }
             OnSubmit?.Invoke();
-            if (MutateItemOnSubmit)
-                Counts[row.ItemId] = checked(Counts.GetValueOrDefault(row.ItemId) + (int)quantity);
-            if (MutateGilOnSubmit)
-                Gil -= row.UnitPriceGil * quantity;
+            promptOpenCount = PromptOpens(SubmitCalls) ? 1 : 0;
+            if (PurchaseLands(SubmitCalls))
+            {
+                if (MutateItemOnSubmit)
+                    Counts[row.ItemId] = checked(Counts.GetValueOrDefault(row.ItemId) + (int)quantity);
+                if (MutateGilOnSubmit)
+                    Gil -= row.UnitPriceGil * quantity;
+            }
             error = string.Empty;
             return true;
         }
 
+        public bool LifecycleObserved { get; set; }
+        public Func<int, bool> PromptOpens { get; set; } = _ => true;
+        public Func<int, bool> PurchaseLands { get; set; } = _ => true;
+        public GilVendorPromptConfirmResult ConfirmResult { get; set; } = new(GilVendorPromptConfirmState.NotPresent, null);
+        public int MaximumBatch { get; set; } = 99;
+        private int promptOpenCount;
+
+        public GilVendorPurchasePromptObservation ObservePurchasePrompt() => new()
+        {
+            AttemptSequence = SubmitCalls,
+            LifecycleObserved = LifecycleObserved && SubmitCalls > 0,
+            PromptOpenCount = promptOpenCount,
+        };
+
+        public GilVendorPromptConfirmResult ConfirmPurchasePrompt(ulong expectedGil, uint quantity) => ConfirmResult;
         public bool TryConfirmPurchasePrompt() => false;
-        public int ResolveMaximumBatch(uint itemId) => 99;
+        public int ResolveMaximumBatch(uint itemId) => MaximumBatch;
         public void CloseShop() { }
         public void BeginAutomation()
         {
