@@ -228,11 +228,12 @@ public sealed class TradeCustodyTests
         public readonly ITradeIo Io = DispatchProxy.Create<ITradeIo, TradeFixture>();
         public TradeFixture F => (TradeFixture)(object)Io;
         public Store Store = new();
+        public ITradeSuppression Suppression = DispatchProxy.Create<ITradeSuppression, Noop>();
         public TradeRunner Runner;
         private DateTimeOffset now = Now;
 
         public TradeRunner Construct() => new(Store.Remaining, new(), Store.Save, Io,
-            DispatchProxy.Create<ITradeSuppression, Noop>(), DispatchProxy.Create<IPluginLog, Noop>(), () => now, Store.Recovery);
+            Suppression, DispatchProxy.Create<IPluginLog, Noop>(), () => now, Store.Recovery);
         public Sender()
         {
             Runner = Construct();
@@ -314,6 +315,83 @@ public sealed class TradeCustodyTests
         Assert.Null(sender.Store.Recovery.AwaitingVerification);
         Assert.Equal(decision == TradeSettlement.Delivered ? 0 : 3, sender.Store.Remaining.Sum(i => i.Quantity));
         Assert.Equal(decision == TradeSettlement.NotDelivered, resumed.Start(Partner).Success);
+    }
+
+    private sealed class RecordingSuppression : ITradeSuppression
+    {
+        public int Suppressed, Restored, Retained, Renewed;
+        public void SuppressTradeAutoConfirm() => Suppressed++;
+        public void RetainTradeSuppressionOnDispose() => Retained++;
+        public void RestoreTradeAutoConfirm() => Restored++;
+        public void RenewTradeSuppression() => Renewed++;
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void EscapeHatchKeepsAutoConfirmPausedUntilWindowCloses(bool settle)
+    {
+        var sender = new Sender();
+        var suppression = new RecordingSuppression();
+        sender.Suppression = suppression;
+        sender.Runner = sender.Construct();
+        sender.ToReady();
+        if (settle)
+        {
+            sender.Tick(); // confirmed: the marker exists and the window is still open
+            Assert.NotNull(sender.Store.Recovery.AwaitingVerification);
+            Assert.True(sender.Runner.IsActive);
+        }
+        Assert.True(suppression.Renewed > 0);
+        var restoredBefore = suppression.Restored;
+
+        if (settle) sender.Runner.AcknowledgeSettlement(TradeSettlement.NotDelivered);
+        else sender.Runner.Abandon();
+
+        Assert.False(sender.Runner.IsActive);
+        Assert.Equal(restoredBefore, suppression.Restored);
+        sender.Tick();
+        Assert.Equal(restoredBefore, suppression.Restored);
+        sender.F.Open = false;
+        sender.Tick();
+        Assert.Equal(restoredBefore + 1, suppression.Restored);
+        Assert.Equal(settle ? 1 : 0, sender.F.Confirms);
+    }
+
+    [Fact]
+    public void ReloadWithMarkerAndOpenWindowKeepsAutoConfirmPausedUntilClosed()
+    {
+        var sender = new Sender();
+        var first = new RecordingSuppression();
+        sender.Suppression = first;
+        sender.Runner = sender.Construct();
+        sender.ToReady();
+        sender.Tick(); // confirmed; the window stays open
+        sender.Runner.Dispose();
+        Assert.Equal(1, first.Retained);
+        sender.Store = sender.Store.Reload();
+
+        var reloaded = new RecordingSuppression();
+        var resumed = new TradeRunner(sender.Store, new(), sender.Io, reloaded, DispatchProxy.Create<IPluginLog, Noop>());
+        Assert.False(resumed.IsActive);
+        Assert.Equal(1, reloaded.Suppressed);
+        resumed.Tick();
+        Assert.Equal(0, reloaded.Restored);
+        sender.F.Open = false;
+        resumed.Tick();
+        Assert.Equal(1, reloaded.Restored);
+    }
+
+    [Fact]
+    public void LoadWithNoWindowOpenReleasesRetainedPause()
+    {
+        var sender = new Sender();
+        sender.F.Open = false;
+        var suppression = new RecordingSuppression();
+        sender.Suppression = suppression;
+        sender.Construct();
+        Assert.Equal(0, suppression.Suppressed);
+        Assert.Equal(1, suppression.Restored);
     }
 
     public class TradeFixture : DispatchProxy

@@ -203,8 +203,20 @@ public sealed class GilVendorBuyCoordinator : IDisposable
     public bool Stop(string message = "Vendor buy stopped.")
     {
         if (activeRun is not { } run || run.Phase is
-            GilVendorBuyPhase.Completed or GilVendorBuyPhase.Stopped or GilVendorBuyPhase.Failed or GilVendorBuyPhase.Indeterminate)
+            GilVendorBuyPhase.Completed or GilVendorBuyPhase.Stopped or GilVendorBuyPhase.Failed)
             return false;
+        if (run.Phase == GilVendorBuyPhase.Indeterminate)
+        {
+            // Nothing is in flight. The armed purchase stays, so new buys remain blocked until it is reconciled or discarded.
+            run.StopRequested = false;
+            run.Phase = GilVendorBuyPhase.Stopped;
+            run.Message = run.ArmedPurchase is null
+                ? message
+                : $"{message} The unresolved purchase still needs a check or a discard before another buy.";
+            Persist();
+            runtime.EndAutomation();
+            return true;
+        }
         if (run.ArmedPurchase is not null)
         {
             run.StopRequested = true;
@@ -218,6 +230,45 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         run.Message = message;
         Persist();
         CleanupAutomation();
+        return true;
+    }
+
+    /// <summary>
+    /// Escape hatch: forgets the unresolved armed purchase without buying, checking or closing anything, and leaves
+    /// the run Stopped so new buys are allowed again. Works from any phase except while a submitted purchase is
+    /// still inside its receipt-verification window (seconds), where an outcome is genuinely pending. What was dropped
+    /// is logged at Warning.
+    /// </summary>
+    public bool DiscardIndeterminate(out string message)
+    {
+        if (activeRun is not { } run || (run.ArmedPurchase is null && run.Phase != GilVendorBuyPhase.Indeterminate))
+        {
+            message = "No unresolved vendor purchase to discard.";
+            return true;
+        }
+        if (run.ArmedPurchase is not null && run.Phase is GilVendorBuyPhase.PurchaseLine or GilVendorBuyPhase.VerifyReceipt)
+        {
+            message = "VendorPurchaseOutcomePending: the submitted purchase is still being verified; discard is available once verification ends.";
+            return false;
+        }
+        var intent = run.ArmedPurchase;
+        var dropped = intent is null
+            ? "no armed purchase"
+            : $"item={intent.ItemId} quantity={intent.Quantity} expectedGil={intent.ExpectedGil} armedAt={intent.ArmedAtUtc:O} " +
+              $"verdict={(string.IsNullOrEmpty(intent.VerificationCode) ? "none" : intent.VerificationCode)}";
+        Warn($"VendorPurchaseDiscarded run={run.RunId} phase={run.Phase} {dropped}; " +
+             "the unresolved purchase was forgotten without reconciliation and the game was left as it is.");
+        run.ArmedPurchase = null;
+        run.StopRequested = false;
+        run.Phase = GilVendorBuyPhase.Stopped;
+        run.ResumePhase = GilVendorBuyPhase.RefreshPreconditions;
+        run.Message = intent is null
+            ? "Discarded the indeterminate vendor buy; vendor buy is stopped."
+            : $"Discarded the unresolved purchase of item {intent.ItemId} x{intent.Quantity}; vendor buy is stopped.";
+        liveSubmittedIntent = null;
+        Persist();
+        runtime.EndAutomation();
+        message = run.Message;
         return true;
     }
 
