@@ -36,6 +36,7 @@ public sealed class TradeRunner : IDisposable
     private bool confirmationSubmitted;
     private ulong actor;
     private bool stopAfterBatch;
+    private bool restoreAutoConfirmOnClosure;
     public OperationResult? Result { get; private set; }
     public TradeDeltaEvidence? Evidence { get; private set; }
     private TradeBatch? unsettledBatch;
@@ -97,15 +98,16 @@ public sealed class TradeRunner : IDisposable
             partner = marker.Partner;
             unsettledBatch = marker.ToBatch();
             Result = new(OperationStatus.Indeterminate, "SettlementRequired", "A confirmation is awaiting settlement.");
-            if (io.IsTradeOpen)
-            {
-                this.recovery.CancellationPending = true;
-                this.recovery.OwnerContentId = marker.Sender;
-                this.recovery.PartnerEntityId = (uint)marker.Partner.GameObjectId;
-                this.recovery.ObserveOnly = true;
-            }
+            // Start idle with the marker kept so settlement or Abandon can resolve it; never re-enter a closure wait on load.
+            if (this.recovery.CancellationPending)
+                log.Warning("[Franthropy] Trade runner loaded with a confirmation awaiting settlement; released the previous closure ownership instead of waiting for closure again.");
+            this.recovery.CancellationPending = false;
+            this.recovery.ObserveOnly = false;
+            this.recovery.OwnerContentId = 0;
+            this.recovery.PartnerEntityId = 0;
+            Snapshot = Snapshot with { Message = "A confirmation is awaiting settlement." };
         }
-        if (this.recovery.CancellationPending)
+        else if (this.recovery.CancellationPending)
         {
             cancellationCheckpointSaved = true;
             externalAutomation.SuppressTradeAutoConfirm();
@@ -267,6 +269,7 @@ public sealed class TradeRunner : IDisposable
 
         batchNumber = completedBatchCount + 1;
         checkpointQueueSignature = ComputeQueueSignature(queue);
+        restoreAutoConfirmOnClosure = false;
         externalAutomation.SuppressTradeAutoConfirm();
         return PrepareBatch(inventory, "Opening first trade.")
             ? new(true, Snapshot.Message) : new(false, Snapshot.Message);
@@ -276,6 +279,11 @@ public sealed class TradeRunner : IDisposable
     {
         try
         {
+            if (restoreAutoConfirmOnClosure && !io.IsTradeOpen)
+            {
+                restoreAutoConfirmOnClosure = false;
+                externalAutomation.RestoreTradeAutoConfirm();
+            }
             if (Snapshot.State == TradeExecutionState.ClosingTrade)
             {
                 TickClosingTrade();
@@ -372,13 +380,40 @@ public sealed class TradeRunner : IDisposable
         Finish(TradeExecutionState.Stopped, message);
     }
 
+    /// <summary>
+    /// Escape hatch: forgets the current run, any trade-closure wait and any unsettled confirmation marker, restores
+    /// trade auto-confirm and goes idle. The game is left as it is and queued quantities are not changed. Always
+    /// succeeds, whatever the runner is doing; what was dropped is logged at Warning.
+    /// </summary>
+    public void Abandon(string reason = "Trade abandoned; unverified quantities remain queued.")
+    {
+        var dropped = new List<string>();
+        if (IsActive) dropped.Add($"active run in {Snapshot.State}");
+        if (recovery.CancellationPending) dropped.Add("trade-closure ownership");
+        if (recovery.AwaitingVerification is { } marker)
+            dropped.Add($"unsettled confirmation to {marker.Partner.Name} ({marker.Lines.Count:N0} line(s), {marker.GilAmount:N0} gil)");
+        recovery.AwaitingVerification = null;
+        unsettledBatch = null;
+        Result = new(OperationStatus.Cancelled, "Abandoned", reason);
+        ReleaseRun(reason);
+        try { save(); }
+        catch (Exception exception)
+        {
+            log.Error(exception, "[Franthropy] Trade abandon could not persist the cleared recovery state; it is cleared in memory.");
+        }
+        log.Warning("[Franthropy] Trade abandoned run={RunId} dropped={Dropped}; the game was left as it is. reason={Reason}",
+            runId ?? "none", dropped.Count == 0 ? "nothing" : string.Join("; ", dropped), reason);
+    }
+
     public void Dispose()
     {
         if (IsActive && confirmationSubmitted && Snapshot.State != TradeExecutionState.ClosingTrade && io.IsTradeOpen)
             BeginClosing(TradeExecutionState.Failed, "Unloading after confirmation; retaining trade ownership without cancellation.");
         if (IsActive && Snapshot.State != TradeExecutionState.ClosingTrade)
             Stop("Trade stopped because the plugin is unloading.");
-        if (recovery.CancellationPending)
+        // Only an unconfirmed owned window is renewed by the next load (bounded closing). A confirmation marker loads
+        // idle, so retaining for it would leave auto-confirm paused with no renewal.
+        if (recovery.CancellationPending && recovery.AwaitingVerification == null && io.IsTradeOpen)
             externalAutomation.RetainTradeSuppressionOnDispose();
         else
             externalAutomation.RestoreTradeAutoConfirm();
@@ -747,10 +782,24 @@ public sealed class TradeRunner : IDisposable
             after.GetValueOrDefault(k) == planned.ExpectedInventoryBefore.GetValueOrDefault(k)) ? TradeSettlement.NotDelivered : null;
     }
 
+    /// <summary>
+    /// Settles the pending confirmation marker as the caller decided. Stops an active run first and leaves any open
+    /// trade window as it is. Without a pending marker this is a logged no-op.
+    /// </summary>
     public void AcknowledgeSettlement(TradeSettlement decision)
     {
-        if (IsActive || io.IsTradeOpen || recovery.AwaitingVerification == null)
-            throw new InvalidOperationException("Settlement requires a stopped runner, closed window and pending confirmation.");
+        if (!Enum.IsDefined(decision)) throw new ArgumentOutOfRangeException(nameof(decision));
+        if (recovery.AwaitingVerification == null)
+        {
+            log.Information("[Franthropy] Trade settlement {Decision} acknowledged with no pending confirmation; nothing to settle.", decision);
+            return;
+        }
+        if (IsActive || recovery.CancellationPending)
+        {
+            log.Warning("[Franthropy] Settling the pending confirmation as {Decision} stopped the trade run in {State}; the game was left as it is.",
+                decision, Snapshot.State);
+            ReleaseRun($"Stopped to settle the pending confirmation as {decision}.");
+        }
         PersistSettlement(decision);
         unsettledBatch = null;
         confirmationSubmitted = readyClicked = false;
@@ -896,11 +945,17 @@ public sealed class TradeRunner : IDisposable
         nextActionAt = clock() + timing.TradeRetryDelay;
         if (deadline != default && clock() >= deadline)
         {
-            var reason = $"TradeClosureDeadline {deadline:O} expired; retaining ownership until closure is observed.";
-            Result = new(confirmationSubmitted ? OperationStatus.Indeterminate : OperationStatus.Failed, "TradeClosureDeadline", reason);
+            var windowOpen = io.IsTradeOpen;
+            var reason = $"TradeClosureDeadline {deadline:O} expired before trade closure was observed (window open={windowOpen}); " +
+                         "released trade ownership and left the game as it is.";
+            Result = new(OperationStatus.Indeterminate, "TradeClosureDeadline", reason);
             log.Warning("[Franthropy] {Reason}", reason);
-            pendingFinish = terminal = (TradeExecutionState.Failed, reason);
-            deadline = default;
+            recovery.ObserveOnly = false;
+            recovery.OwnerContentId = 0;
+            recovery.PartnerEntityId = 0;
+            // Keep trade auto-confirm paused until the abandoned window closes, so nothing confirms it unattended.
+            CompleteFinish(TradeExecutionState.Failed, reason, deferAutoConfirmRestore: windowOpen);
+            return;
         }
         if (!cancellationCheckpointSaved)
         {
@@ -990,7 +1045,7 @@ public sealed class TradeRunner : IDisposable
         }
     }
 
-    private void CompleteFinish(TradeExecutionState state, string message)
+    private void CompleteFinish(TradeExecutionState state, string message, bool deferAutoConfirmRestore = false)
     {
         var previousState = Snapshot.State;
         pendingFinish = (state, message);
@@ -998,7 +1053,9 @@ public sealed class TradeRunner : IDisposable
             return;
         pendingFinish = null;
 
-        externalAutomation.RestoreTradeAutoConfirm();
+        restoreAutoConfirmOnClosure = deferAutoConfirmRestore;
+        if (!deferAutoConfirmRestore)
+            externalAutomation.RestoreTradeAutoConfirm();
         deadline = default;
         Result ??= new(state switch
         {
@@ -1026,6 +1083,48 @@ public sealed class TradeRunner : IDisposable
             queue.Sum(item => item.Quantity),
             false);
         LogTransition(previousState, state, message);
+    }
+
+    /// <summary>Drops in-memory run state and closure ownership, restores auto-confirm and goes idle. Never touches
+    /// the game and never changes the confirmation marker or queue; callers persist.</summary>
+    private void ReleaseRun(string reason)
+    {
+        var previousState = Snapshot.State;
+        var abandonedBatch = batch;
+        recovery.CancellationPending = false;
+        recovery.ObserveOnly = false;
+        recovery.OwnerContentId = 0;
+        recovery.PartnerEntityId = 0;
+        pendingFinish = null;
+        cancellationCheckpointSaved = false;
+        confirmationSubmitted = readyClicked = readyAcknowledged = stopAfterBatch = false;
+        offerLineOperation = null;
+        offerGilOperation = null;
+        batch = null;
+        deadline = nextActionAt = default;
+        checkpointQueueSignature = string.Empty;
+        restoreAutoConfirmOnClosure = false;
+        try { externalAutomation.RestoreTradeAutoConfirm(); }
+        catch (Exception exception)
+        {
+            log.Error(exception, "[Franthropy] Could not restore trade auto-confirm while releasing the trade run.");
+        }
+        if (abandonedBatch != null)
+            NotifyBatch(BatchAbandoned, abandonedBatch, "abandoned");
+        Snapshot = new(
+            TradeExecutionState.Idle,
+            reason,
+            runId,
+            partner?.Name,
+            batchNumber,
+            0,
+            completedBatchCount,
+            initialUnitCount,
+            completedUnitCount,
+            queue.Count,
+            queue.Sum(item => item.Quantity),
+            false);
+        LogTransition(previousState, TradeExecutionState.Idle, reason);
     }
 
     private void LogTransition(TradeExecutionState previousState, TradeExecutionState state, string reason)

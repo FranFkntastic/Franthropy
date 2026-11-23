@@ -42,9 +42,17 @@ public sealed class TradeReceiveOperation
     private static readonly TradeInventoryKey GilKey = new(TradePlanner.GilItemId, false);
     private readonly bool expectsGil, expectsItems;
 
+    /// <summary>Always ends the operation. Before confirmation it cancels the owned window; after confirmation it
+    /// leaves the window as it is and reports Indeterminate (late inventory evidence is still observed).</summary>
     public OperationResult Stop()
     {
-        if (result.IsTerminal || confirmed) return result;
+        if (result.IsTerminal) return result;
+        if (confirmed)
+        {
+            warning($"{partner.Name}@{partner.HomeWorldId}: StoppedAfterConfirm; the confirmed trade was left as it is and no custody credit was applied.");
+            return result = new(OperationStatus.Indeterminate, "StoppedAfterConfirm",
+                "Stopped after confirming; the transfer outcome was not verified.");
+        }
         return result = BeginClosing(new(OperationStatus.Cancelled, "StoppedBeforeConfirm", "Stopped without confirming."));
     }
 
@@ -93,6 +101,13 @@ public sealed class TradeReceiveOperation
             return BeginClosing(new(confirmed ? OperationStatus.Indeterminate : OperationStatus.Failed, "ReceiveDeadline",
                 $"Receive deadline {deadline:O} expired. {result.Message}"));
         }
+        // A closed, unconfirmed window ends the same way whoever is logged in; identity gates only live-window actions
+        // and the confirmed-delta evidence read below.
+        if (opened && !confirmed && (closed || !io.IsTradeOpen))
+        {
+            closed = true; // a later window must never inherit this window's Ready or Confirm
+            return new(OperationStatus.Cancelled, "ClosedBeforeConfirm", "Window closed without confirmation; retry the remaining manifest.");
+        }
         if (actor == 0) return Refuse("ReceiverUnknown", "No logged-in receiver was observable when armed.");
         if (io.LocalContentId == 0) return result;
         if (io.LocalContentId != actor) return Refuse("ReceiverChanged", "Receiver identity changed during the trade.");
@@ -100,7 +115,6 @@ public sealed class TradeReceiveOperation
         {
             if (!opened) return result;
             closed = true; // a later window must never inherit this window's Ready or Confirm
-            if (!confirmed) return new(OperationStatus.Cancelled, "ClosedBeforeConfirm", "Window closed without confirmation; retry the remaining manifest.");
             var inventory = io.ObserveTradeableInventory();
             if (inventory.IsAuthoritative && before != null && locked != null)
             {
