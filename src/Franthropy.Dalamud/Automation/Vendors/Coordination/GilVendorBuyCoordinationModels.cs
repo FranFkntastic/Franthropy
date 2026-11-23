@@ -160,6 +160,9 @@ public sealed class GilVendorBuyArmedIntentSnapshot
     public int? FailureItemCount { get; set; }
     public ulong? FailureGil { get; set; }
     public bool LateMovementLogged { get; set; }
+    // Secondary prompt/shop signals captured when verification failed; diagnostic only.
+    public string PromptEvidence { get; set; } = string.Empty;
+    public bool UnexpectedPromptLogged { get; set; }
     public uint ItemId { get; set; }
     public int Quantity { get; set; }
     public ulong ExpectedGil { get; set; }

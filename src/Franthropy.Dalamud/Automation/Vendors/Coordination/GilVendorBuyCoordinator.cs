@@ -11,12 +11,24 @@ public sealed class GilVendorBuyCoordinator : IDisposable
     // Keep callers ticking a bounded diagnostic tail without retaining automation ownership.
     private static readonly TimeSpan LateObservationBudget = TimeSpan.FromSeconds(2);
     private const int MinimumReceiptPolls = 10;
+    // A shop briefly blocked by a closing confirmation is waited out; the happy path adds no delay.
+    private static readonly TimeSpan PurchaseReadinessBudget = TimeSpan.FromSeconds(3);
+    // Lifecycle-proven "confirmation never opened" (and no item/gil movement) means nothing was sent.
+    private static readonly TimeSpan PromptOpenTimeout = TimeSpan.FromMilliseconds(1500);
+    private const int MaxPromptOpenRetries = 2;
     private readonly IGilVendorBuyRunStore store;
     private readonly IGilVendorBuyRuntime runtime;
     private readonly Func<DateTimeOffset> utcNow;
     private GilVendorBuyFallbackReplanner? fallbackReplanner;
     private GilVendorBuyRunSnapshot? activeRun;
     private bool disposed;
+    private DateTimeOffset? purchaseReadinessWaitStartedAt;
+    // Prompt observations are trusted only for a submission this instance made itself, so a
+    // restored (restarted) armed intent can never be mistaken for a proven-unsent callback.
+    private GilVendorBuyArmedIntentSnapshot? liveSubmittedIntent;
+    private long liveSubmissionSequence;
+    // Retrying an unopened confirmation is safe only once this session saw purchases prompt at all.
+    private bool purchasePromptProven;
 
     public GilVendorBuyCoordinator(
         IGilVendorBuyRunStore store,
@@ -121,6 +133,8 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             Stops = plan.Stops.Select(CloneStop).ToList(),
         };
         fallbackReplanner = plan.FallbackReplanner ?? fallbackReplanner;
+        purchaseReadinessWaitStartedAt = null;
+        liveSubmittedIntent = null;
         runtime.BeginAutomation();
         Persist();
         error = string.Empty;
@@ -178,6 +192,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             ? GilVendorBuyPhase.RefreshPreconditions
             : run.ResumePhase;
         run.Message = "Vendor buy resumed.";
+        purchaseReadinessWaitStartedAt = null;
         if (RequiresAutomationOwnership(run.Phase))
             runtime.BeginAutomation();
         Persist();
@@ -491,6 +506,8 @@ public sealed class GilVendorBuyCoordinator : IDisposable
                 Fail(GilVendorBuyPhase.Failed, $"Not enough gil remains for the approved {line.ItemName} batch.");
                 return;
             }
+            if (!AwaitPurchaseUiReadiness(run, line))
+                return;
 
             run.ArmedPurchase = new GilVendorBuyArmedIntentSnapshot
             {
@@ -508,6 +525,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             run.Message = $"Buying {batch:N0} {line.ItemName}.";
             Persist();
 
+            liveSubmittedIntent = null;
             try
             {
                 if (!runtime.TrySubmitPurchase(
@@ -517,7 +535,10 @@ public sealed class GilVendorBuyCoordinator : IDisposable
                 {
                     run.ArmedPurchase = null;
                     Fail(GilVendorBuyPhase.Failed, submitError);
+                    return;
                 }
+                liveSubmittedIntent = run.ArmedPurchase;
+                liveSubmissionSequence = runtime.ObservePurchasePrompt().AttemptSequence;
             }
             catch (Exception ex)
             {
@@ -531,6 +552,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             return;
         }
 
+        purchaseReadinessWaitStartedAt = null;
         runtime.CloseShop();
         stop.ShopValidated = false;
         stop.MatchedShopRows.Clear();
@@ -557,16 +579,20 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         var windowExpired = intent.SettleStartedAtUtc is { } settleStarted &&
                             utcNow().UtcDateTime - settleStarted >= ReceiptSettleWindow &&
                             intent.SettlePolls >= MinimumReceiptPolls;
+        GilVendorPromptConfirmResult? confirm = null;
         if (elapsed < ReceiptVerificationBudget)
-            runtime.TryConfirmPurchasePrompt();
+            confirm = runtime.ConfirmPurchasePrompt(intent.ExpectedGil, checked((uint)intent.Quantity));
         intent.VerificationPolls++;
         var line = run.Lines.First(candidate => candidate.ItemId == intent.ItemId);
+        var prompt = ObserveOwnedPrompt(intent, out var promptTrusted);
+        if (promptTrusted && prompt.LifecycleObserved && prompt.PromptOpened)
+            purchasePromptProven = true;
         var snapshot = runtime.CaptureInventory([line.ItemId]);
         if (!snapshot.IsComplete || snapshot.Gil is null)
         {
             if (windowExpired)
             {
-                FinishReceiptUncertain(run, intent, snapshot, "VendorVerificationPreconditionsLost", snapshot.Message);
+                FinishReceiptUncertain(run, intent, snapshot, prompt, promptTrusted, "VendorVerificationPreconditionsLost", snapshot.Message);
                 return;
             }
             run.Message = snapshot.Message;
@@ -595,6 +621,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             line.PurchaseRetryCount = 0;
             line.Status = $"Verified {line.PurchasedQuantity:N0} bought";
             run.ArmedPurchase = null;
+            liveSubmittedIntent = null;
             if (run.StopRequested)
             {
                 FinishStopped(run, "The already-submitted purchase was verified; vendor buy is now stopped.");
@@ -605,14 +632,159 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             Persist();
             return;
         }
+        var nothingMoved = evidence.Evidence == GilVendorPurchaseEvidence.Pending;
+        // Lifecycle proof: this callback's own SelectYesno never set up (so neither we nor an
+        // auto-confirm plugin could have accepted it) and no item or gil moved.
+        var provenUnopened = promptTrusted && prompt.LifecycleObserved && !prompt.PromptOpened && nothingMoved;
+
+        if (confirm?.State == GilVendorPromptConfirmState.UnexpectedPrompt)
+        {
+            // Proven unsent only when this is the sole confirmation opened since the callback and it
+            // is still sitting unfinalized: one an auto-confirm plugin accepted would have closed.
+            if (promptTrusted && prompt.LifecycleObserved && nothingMoved &&
+                prompt.PromptOpenCount <= 1 && !prompt.PromptConfirmedByUs && !prompt.PromptClosed)
+            {
+                if (elapsed >= PromptOpenTimeout && intent.VerificationPolls >= MinimumReceiptPolls)
+                {
+                    FinishUnexpectedPrompt(run, line, intent, snapshot, prompt, confirm.PromptText);
+                    return;
+                }
+                run.Message = $"{line.ItemName}: an unexpected confirmation is open; Yes was not clicked. Not retried.";
+                return;
+            }
+            if (!intent.UnexpectedPromptLogged)
+            {
+                intent.UnexpectedPromptLogged = true;
+                Warn($"VendorUnexpectedPrompt: {ReceiptEvidence(intent, snapshot, prompt, promptTrusted, confirm.PromptText)}; " +
+                     "Yes was not clicked; an earlier confirmation may already be in flight, so the receipt is still verified; not retried.");
+                Persist();
+            }
+        }
+
+        if (provenUnopened &&
+            purchasePromptProven &&
+            elapsed >= PromptOpenTimeout &&
+            intent.VerificationPolls >= MinimumReceiptPolls)
+        {
+            RetryOrFailUnopenedPrompt(run, line, intent, snapshot, prompt);
+            return;
+        }
         if (!windowExpired)
         {
             run.Message = $"{line.ItemName}: {(elapsed >= ReceiptVerificationBudget ? "Settling receipt. " : string.Empty)}{evidence.Message} Not retried.";
             return;
         }
-        FinishReceiptUncertain(run, intent, snapshot,
-            evidence.Evidence == GilVendorPurchaseEvidence.Pending ? "VendorVerificationWindowExpired" : "VendorReceiptDeltaMismatch",
+        FinishReceiptUncertain(run, intent, snapshot, prompt, promptTrusted,
+            nothingMoved ? "VendorVerificationWindowExpired" : "VendorReceiptDeltaMismatch",
             evidence.Message);
+    }
+
+    /// <summary>
+    /// Reads the runtime's prompt evidence and reports whether it belongs to the armed intent
+    /// this coordinator instance submitted (never true for an intent restored after restart).
+    /// </summary>
+    private GilVendorPurchasePromptObservation ObserveOwnedPrompt(
+        GilVendorBuyArmedIntentSnapshot intent,
+        out bool trusted)
+    {
+        GilVendorPurchasePromptObservation observation;
+        try
+        {
+            observation = runtime.ObservePurchasePrompt();
+        }
+        catch (Exception exception)
+        {
+            Warn($"VendorPromptObservationUnavailable: {exception.GetType().Name}: {exception.Message}");
+            trusted = false;
+            return GilVendorPurchasePromptObservation.Unobserved;
+        }
+        trusted = ReferenceEquals(liveSubmittedIntent, intent) &&
+                  observation.AttemptSequence == liveSubmissionSequence;
+        return observation;
+    }
+
+    private void RetryOrFailUnopenedPrompt(
+        GilVendorBuyRunSnapshot run,
+        GilVendorBuyLineSnapshot line,
+        GilVendorBuyArmedIntentSnapshot intent,
+        GilVendorInventorySnapshot snapshot,
+        GilVendorPurchasePromptObservation prompt)
+    {
+        var evidence = $"{ReceiptEvidence(intent, snapshot, prompt, trusted: true, unexpectedPromptText: null)}; " +
+                       $"promptOpenTimeout={PromptOpenTimeout.TotalMilliseconds:F0}ms retries={line.PurchaseRetryCount}/{MaxPromptOpenRetries}";
+        run.ArmedPurchase = null;
+        liveSubmittedIntent = null;
+        if (run.StopRequested)
+        {
+            line.Status = "Stopped before buying";
+            var stopped = $"VendorPromptNotOpened: {evidence}; the purchase confirmation never opened, so nothing was bought; stopping as requested.";
+            Warn(stopped);
+            FinishStopped(run, stopped);
+            return;
+        }
+        if (line.PurchaseRetryCount < MaxPromptOpenRetries)
+        {
+            line.PurchaseRetryCount++;
+            line.Status = $"Retrying purchase ({line.PurchaseRetryCount}/{MaxPromptOpenRetries})";
+            run.Phase = GilVendorBuyPhase.PurchaseLine;
+            run.Message = $"VendorPromptNotOpened: {evidence}; the shop dropped the purchase before any confirmation opened; resubmitting ({line.PurchaseRetryCount}/{MaxPromptOpenRetries}).";
+            Warn(run.Message);
+            Persist();
+            return;
+        }
+        line.Status = "Confirmation never opened";
+        var message = $"VendorPromptNotOpened: {evidence}; the shop never opened a purchase confirmation after {MaxPromptOpenRetries} resubmissions, so nothing was bought.";
+        Warn(message);
+        Fail(GilVendorBuyPhase.Failed, message);
+    }
+
+    private void FinishUnexpectedPrompt(
+        GilVendorBuyRunSnapshot run,
+        GilVendorBuyLineSnapshot line,
+        GilVendorBuyArmedIntentSnapshot intent,
+        GilVendorInventorySnapshot snapshot,
+        GilVendorPurchasePromptObservation prompt,
+        string? promptText)
+    {
+        // The only confirmation opened since this callback is still on screen, unconfirmed, and
+        // nothing moved: no purchase was accepted. It is left untouched (not ours to answer).
+        var message = $"VendorUnexpectedPrompt: {ReceiptEvidence(intent, snapshot, prompt, trusted: true, promptText)}; " +
+                      $"the visible confirmation did not name {intent.Quantity:N0} item(s) for {intent.ExpectedGil:N0} gil, so Yes was not clicked and nothing was resent.";
+        run.ArmedPurchase = null;
+        liveSubmittedIntent = null;
+        line.Status = "Unexpected confirmation";
+        Warn(message);
+        if (run.StopRequested)
+        {
+            FinishStopped(run, message);
+            return;
+        }
+        Fail(GilVendorBuyPhase.Failed, message);
+    }
+
+    private bool AwaitPurchaseUiReadiness(GilVendorBuyRunSnapshot run, GilVendorBuyLineSnapshot line)
+    {
+        var readiness = runtime.ReadPurchaseUiReadiness();
+        if (readiness.State == GilVendorPurchaseUiReadinessState.Ready)
+        {
+            purchaseReadinessWaitStartedAt = null;
+            return true;
+        }
+        var now = utcNow();
+        purchaseReadinessWaitStartedAt ??= now;
+        var waited = now - purchaseReadinessWaitStartedAt.Value;
+        if (waited < PurchaseReadinessBudget)
+        {
+            run.Message = $"Waiting for {run.Stops[run.StopIndex].NpcName}'s shop to accept the {line.ItemName} purchase.";
+            return false;
+        }
+        purchaseReadinessWaitStartedAt = null;
+        var code = readiness.State == GilVendorPurchaseUiReadinessState.ShopClosed ? "VendorShopClosed" : "VendorShopNotReady";
+        var message = $"{code}: item={line.ItemId} waited={waited.TotalMilliseconds:F0}ms budget={PurchaseReadinessBudget.TotalMilliseconds:F0}ms; " +
+                      $"{readiness.Describe()}; the shop never became ready for a purchase, so nothing was submitted.";
+        Warn(message);
+        Fail(GilVendorBuyPhase.Failed, message);
+        return false;
     }
 
     private void TickReconcileReceipt(GilVendorBuyRunSnapshot run)
@@ -638,7 +810,7 @@ public sealed class GilVendorBuyCoordinator : IDisposable
                 (gil != intent.FailureGil || snapshot.ItemCounts.GetValueOrDefault(intent.ItemId) != intent.FailureItemCount))
             {
                 intent.LateMovementLogged = true;
-                Warn($"VendorPurchaseLateConfirmation lateBy={(utcNow().UtcDateTime - failedAt).TotalMilliseconds:F0}ms; {ReceiptEvidence(intent, snapshot)}; verdict={intent.VerificationCode}; movement observed but not an exact receipt; not accepted.");
+                Warn($"VendorPurchaseLateConfirmation lateBy={(utcNow().UtcDateTime - failedAt).TotalMilliseconds:F0}ms; {ReceiptCore(intent, snapshot)}; {intent.PromptEvidence}; verdict={intent.VerificationCode}; movement observed but not an exact receipt; not accepted.");
                 Persist();
             }
             return;
@@ -651,23 +823,51 @@ public sealed class GilVendorBuyCoordinator : IDisposable
         Persist();
     }
 
-    private string ReceiptEvidence(GilVendorBuyArmedIntentSnapshot intent, GilVendorInventorySnapshot snapshot) =>
+    private string ReceiptCore(GilVendorBuyArmedIntentSnapshot intent, GilVendorInventorySnapshot snapshot) =>
         $"item={intent.ItemId} expectedQuantity={intent.Quantity} expectedGil={intent.ExpectedGil}; " +
         $"budget={ReceiptVerificationBudget.TotalMilliseconds:F0}ms settle={ReceiptSettleWindow.TotalMilliseconds:F0}ms " +
         $"elapsed={(utcNow().UtcDateTime - intent.ArmedAtUtc).TotalMilliseconds:F0}ms polls={intent.VerificationPolls}; " +
         $"gil={intent.BeforeGil}->{snapshot.Gil?.ToString() ?? "unavailable"} " +
         $"items={intent.BeforeItemCount}->{(snapshot.IsComplete ? snapshot.ItemCounts.GetValueOrDefault(intent.ItemId).ToString() : "unavailable")}; " +
-        $"complete={snapshot.IsComplete}; not retried";
+        $"complete={snapshot.IsComplete}";
+
+    private string ReceiptEvidence(
+        GilVendorBuyArmedIntentSnapshot intent,
+        GilVendorInventorySnapshot snapshot,
+        GilVendorPurchasePromptObservation prompt,
+        bool trusted,
+        string? unexpectedPromptText) =>
+        $"{ReceiptCore(intent, snapshot)}; {PromptEvidence(prompt, trusted, unexpectedPromptText)}";
+
+    /// <summary>
+    /// Secondary UI signals. Attempt fields read "unknown" when the observation does not belong to
+    /// this coordinator's own submission (e.g. an armed intent restored after a restart).
+    /// </summary>
+    private static string PromptEvidence(
+        GilVendorPurchasePromptObservation prompt,
+        bool trusted,
+        string? unexpectedPromptText)
+    {
+        string Attempt(bool value) => trusted ? value.ToString() : "unknown";
+        var text = unexpectedPromptText ?? (trusted ? prompt.PromptText : null);
+        return $"fireCallback={Attempt(prompt.FireCallbackReturned)} lifecycle={trusted && prompt.LifecycleObserved} " +
+               $"promptOpened={Attempt(prompt.PromptOpened)} promptConfirmed={Attempt(prompt.PromptConfirmedByUs)} " +
+               $"promptClosed={Attempt(prompt.PromptClosed)} shopOpen={prompt.ShopOpen} " +
+               $"shopBlocking={prompt.ShopBlockingAddons} yesNoVisible={prompt.SelectYesnoVisible}" +
+               (string.IsNullOrWhiteSpace(text) ? string.Empty : $" promptText=\"{text}\"");
+    }
 
     private void FinishReceiptUncertain(GilVendorBuyRunSnapshot run, GilVendorBuyArmedIntentSnapshot intent,
-        GilVendorInventorySnapshot snapshot, string code, string detail)
+        GilVendorInventorySnapshot snapshot, GilVendorPurchasePromptObservation prompt, bool promptTrusted,
+        string code, string detail)
     {
         intent.VerificationCode = code;
         intent.VerificationFailedAtUtc = utcNow().UtcDateTime;
         intent.FailureGil = snapshot.Gil;
         intent.FailureItemCount = snapshot.IsComplete ? snapshot.ItemCounts.GetValueOrDefault(intent.ItemId) : null;
+        intent.PromptEvidence = PromptEvidence(prompt, promptTrusted, unexpectedPromptText: null);
         run.Phase = GilVendorBuyPhase.ReconcileReceipt;
-        run.Message = $"{code}: {ReceiptEvidence(intent, snapshot)}. Needs check. {detail}";
+        run.Message = $"{code}: {ReceiptCore(intent, snapshot)}; {intent.PromptEvidence}; not retried. Needs check. {detail}";
         Warn(run.Message);
         Persist();
         CleanupAutomation();
@@ -900,6 +1100,8 @@ public sealed class GilVendorBuyCoordinator : IDisposable
             FailureItemCount = intent.FailureItemCount,
             FailureGil = intent.FailureGil,
             LateMovementLogged = intent.LateMovementLogged,
+            PromptEvidence = intent.PromptEvidence,
+            UnexpectedPromptLogged = intent.UnexpectedPromptLogged,
         } : null,
         Receipts = run.Receipts.Select(receipt => new GilVendorBuyReceiptSnapshot
         {

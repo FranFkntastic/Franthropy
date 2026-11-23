@@ -431,6 +431,10 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     public GilVendorShopReadResult ReadShopRows() => shop.ReadRows();
     public bool TrySubmitPurchase(GilVendorShopRow row, uint quantity, out string error) => shop.TrySubmitPurchase(row, quantity, out error);
     public bool TryConfirmPurchasePrompt() => shop.TryConfirmOwnedPrompt();
+    public GilVendorPurchaseUiReadiness ReadPurchaseUiReadiness() => shop.ReadPurchaseUiReadiness();
+    public GilVendorPurchasePromptObservation ObservePurchasePrompt() => shop.ObservePurchasePrompt();
+    public GilVendorPromptConfirmResult ConfirmPurchasePrompt(ulong expectedGil, uint quantity) =>
+        shop.ConfirmPurchasePrompt(expectedGil, quantity);
     public int ResolveMaximumBatch(uint itemId) => (dataManager.GetExcelSheet<Item>().GetRowOrDefault(itemId)?.StackSize ?? 1) <= 1 ? 1 : 99;
     public void CloseShop() => shop.Close();
     public void BeginAutomation()
