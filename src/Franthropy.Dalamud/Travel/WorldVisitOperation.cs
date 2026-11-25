@@ -18,15 +18,18 @@ public sealed class WorldVisitOperation
     private readonly Action persistSubmitting;
     private readonly Action? clearSubmitting;
     private readonly Func<string?> blocker;
-    private readonly Func<bool>? lifestreamBusy;
+    private readonly Func<bool?>? lifestreamBusy;
     private bool submitted;
     private DateTimeOffset? dispatchedAt;
     private bool travelStarted;
+    private bool busyProbeUnknownWarned;
     private string? lastRefusal;
     private OperationResult result = new(OperationStatus.Pending, "AwaitingWorld", "Waiting for a current world.");
 
     /// <summary>How long after the world command Lifestream must be seen busy, or the character zoning, before the
-    /// command is treated as not taken and sent again. Applies only when Lifestream's busy state is sampled.</summary>
+    /// command is treated as not taken and sent again. Applies only when Lifestream's busy state is sampled, and is
+    /// abandoned for a dispatch as soon as any sample is unknown (IPC failure): an unreadable probe never counts as
+    /// evidence the command was not taken.</summary>
     public static readonly TimeSpan TravelStartWindow = TimeSpan.FromSeconds(5);
 
     public const string LifestreamIsBusyChannel = "Lifestream.IsBusy";
@@ -40,7 +43,10 @@ public sealed class WorldVisitOperation
     /// <summary>
     /// Also waits for Lifestream to be idle before sending the world command, re-sends the command when
     /// Lifestream never starts on it, and clears the durable marker through <paramref name="clearSubmitting"/>
-    /// whenever the command was demonstrably not taken.
+    /// whenever the command was demonstrably not taken. If <c>Lifestream.IsBusy</c> cannot be read, the readiness gate
+    /// treats Lifestream as idle (as the overload without the plugin interface does, so it never waits forever) and,
+    /// after dispatch, the command is trusted: the marker is kept, nothing is re-sent, and the deadline reports
+    /// Indeterminate.
     /// </summary>
     public WorldVisitOperation(WorldCatalog worlds, string world, IPlayerState player, ICommandManager commands,
         IClientState client, ICondition conditions, IDalamudPluginInterface pluginInterface, DateTimeOffset deadline, ulong contentId,
@@ -55,7 +61,7 @@ public sealed class WorldVisitOperation
 
     internal WorldVisitOperation(WorldCatalog worlds, string world, Func<(ulong Actor, uint World, bool Valid, bool Zoning)> observe,
         Func<string, bool> dispatch, DateTimeOffset deadline, ulong contentId, Action<string> warning, Action persistSubmitting, bool alreadySubmitted,
-        Func<string?> blocker, Func<bool>? lifestreamBusy, Action? clearSubmitting)
+        Func<string?> blocker, Func<bool?>? lifestreamBusy, Action? clearSubmitting)
     {
         worlds.TryGetWorld(world, out target!);
         this.observe = observe;
@@ -87,22 +93,24 @@ public sealed class WorldVisitOperation
             player.ContentId, player.CurrentWorld.RowId, player.CurrentWorld.IsValid,
             conditions[ConditionFlag.BetweenAreas] || conditions[ConditionFlag.BetweenAreas51]);
 
-    private static Func<bool> LifestreamBusyProbe(IDalamudPluginInterface pluginInterface)
+    /// <summary>True busy, false idle, null when the IPC call failed (channel missing or a hiccup).</summary>
+    private static Func<bool?> LifestreamBusyProbe(IDalamudPluginInterface pluginInterface)
     {
         ArgumentNullException.ThrowIfNull(pluginInterface);
         var subscriber = pluginInterface.GetIpcSubscriber<bool>(LifestreamIsBusyChannel);
-        // An unavailable channel reads as idle; the world command itself then reports a missing Lifestream.
         return () =>
         {
             try { return subscriber.InvokeFunc(); }
-            catch { return false; }
+            catch { return null; }
         };
     }
 
     private static Func<string?> ReadinessWithLifestream(ICondition conditions, IDalamudPluginInterface pluginInterface)
     {
         var busy = LifestreamBusyProbe(pluginInterface);
-        return () => busy() ? "Lifestream is still finishing another task." : DalamudPlayerActionReadiness.GetBlocker(flag => conditions[flag]);
+        // Unknown reads as idle here so the gate never blocks forever; the world command itself then reports a
+        // missing Lifestream, and post-dispatch start detection ignores unknown samples (see Advance).
+        return () => busy() == true ? "Lifestream is still finishing another task." : DalamudPlayerActionReadiness.GetBlocker(flag => conditions[flag]);
     }
 
     public OperationResult Tick(DateTimeOffset now)
@@ -151,8 +159,20 @@ public sealed class WorldVisitOperation
             return result = new(OperationStatus.Succeeded, "WorldObserved", $"Observed {target.Name}.");
         if (submitted && dispatchedAt is { } sentAt && !travelStarted)
         {
-            if (lifestreamBusy?.Invoke() == true)
+            var busy = lifestreamBusy?.Invoke();
+            if (busy == true)
                 travelStarted = true;
+            else if (busy is null)
+            {
+                // An unreadable probe is not evidence the command was dropped: trust it as the probe-less path does.
+                dispatchedAt = null;
+                if (!busyProbeUnknownWarned)
+                {
+                    busyProbeUnknownWarned = true;
+                    warning($"{target.Name}: LifestreamBusyProbeFailed: {LifestreamIsBusyChannel} could not be read after the world command; " +
+                        "trusting the command (no re-send, marker kept).");
+                }
+            }
             else if (now - sentAt >= TravelStartWindow)
             {
                 // Lifestream neither went busy nor moved the character: the command was not taken. Send it again.
