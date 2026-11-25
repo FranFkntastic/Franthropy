@@ -9,6 +9,7 @@ using FFXIVClientStructs.FFXIV.Component.GUI;
 using Franthropy.Dalamud.AgentBridge;
 using Franthropy.Dalamud.Automation.Inventory;
 using Franthropy.Dalamud.Diagnostics;
+using Franthropy.Dalamud.Travel;
 using Lumina.Excel.Sheets;
 
 namespace Franthropy.Dalamud.Automation.Retainers;
@@ -50,6 +51,13 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private long marketPriceCacheClearedAt;
     // How long a market scan waits, on framework ticks, for the price refresh to cover every listing.
     private static readonly TimeSpan MarketPriceRefreshLimit = TimeSpan.FromSeconds(5);
+    // Opening the retainer list from a bell: whole-open budget, how long the player must be able to act
+    // before the first interaction, the spacing between interactions, and how long a bell may stay
+    // missing or out of reach (for example while the zone finishes loading) before failing.
+    private static readonly TimeSpan RetainerListOpenLimit = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan BellInteractSettle = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan BellReinteractInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan BellDiscoveryGrace = TimeSpan.FromSeconds(5);
     // Pre-dispatch reprice selection: each attempt is one row activation. The budget covers
     // probing every sell-list row twice; only a persistent hard blocker can exhaust it.
     private const int RepriceSelectionAttemptBudget = 40;
@@ -289,23 +297,75 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (state.Inventory || state.Menu || state.Selling)
             return await ReturnToRetainerListAsync(cancellationToken).ConfigureAwait(false);
 
+        return await OpenRetainerListFromBellAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    // Interacting right after login, a zone change, or a closing window is ignored by the game, so wait
+    // until the player can act, re-interact while the list has not opened, and bound it all by wall-clock time.
+    private async Task<RetainerAutomationResult> OpenRetainerListFromBellAsync(CancellationToken cancellationToken)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        TimeSpan? clearSince = null, lastInteraction = null, unavailableSince = null;
         SummoningBellInteractionResult? interaction = null;
-        for (var attempt = 0; attempt < 10; attempt++)
+        string? lastBlocker = null;
+        var submitted = false;
+        while (clock.Elapsed < RetainerListOpenLimit)
         {
-            interaction = await framework.RunOnTick(bell.TryInteract, cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (interaction.State == SummoningBellInteractionState.Unavailable)
-                return RetainerAutomationResult.Failed(interaction.Code, interaction.Message);
-            if (interaction.Submitted)
-                break;
+            var now = clock.Elapsed;
+            var step = await framework.RunOnTick(() =>
+            {
+                if (IsReady(RetainerList))
+                    return (Opened: true, Blocker: (string?)null, Interaction: (SummoningBellInteractionResult?)null);
+                // An open bell session (list still animating in) also blocks, so the bell is never re-interacted.
+                if (DalamudPlayerActionReadiness.GetBlocker() is { } blocker)
+                    return (false, blocker, null);
+                clearSince ??= now;
+                if (now - clearSince.Value < BellInteractSettle ||
+                    lastInteraction is { } previous && now - previous < BellReinteractInterval)
+                    return (false, null, null);
+                return (false, null, bell.TryInteract());
+            }, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            if (step.Opened)
+                return RetainerAutomationResult.Succeeded("RetainerListReady", "Retainer list opened.");
+            if (step.Blocker is not null)
+            {
+                lastBlocker = step.Blocker;
+                clearSince = null;
+            }
+            if (step.Interaction is { } result)
+            {
+                interaction = result;
+                if (result.State == SummoningBellInteractionState.Unavailable)
+                {
+                    unavailableSince ??= now;
+                    if (now - unavailableSince.Value >= BellDiscoveryGrace)
+                        return RetainerAutomationResult.Failed(result.Code, result.Message);
+                }
+                else
+                {
+                    unavailableSince = null;
+                    if (result.Submitted)
+                    {
+                        submitted = true;
+                        lastInteraction = now;
+                    }
+                }
+            }
             await framework.DelayTicks(1, cancellationToken).ConfigureAwait(false);
         }
 
-        if (interaction is not { Submitted: true })
-            return RetainerAutomationResult.Failed("SummoningBellInteractionFailed", interaction?.Message ?? "No summoning bell was available.");
-
-        return await WaitUntilAsync(() => IsReady(RetainerList), cancellationToken).ConfigureAwait(false)
-            ? RetainerAutomationResult.Succeeded("RetainerListReady", "Retainer list opened.")
-            : RetainerAutomationResult.Failed("RetainerListTimeout", "Timed out waiting for the retainer list.");
+        var lastReason = lastBlocker is null ? "" : $" Last blocker: {lastBlocker}";
+        if (!submitted)
+        {
+            if (interaction is { State: SummoningBellInteractionState.Unavailable })
+                return RetainerAutomationResult.Failed(interaction.Code, interaction.Message + lastReason);
+            return RetainerAutomationResult.Failed("SummoningBellInteractionFailed",
+                $"Could not interact with a summoning bell within {RetainerListOpenLimit.TotalSeconds:N0} seconds. " +
+                (interaction?.Message ?? "The player never became able to act.") + lastReason);
+        }
+        return RetainerAutomationResult.Failed("RetainerListTimeout",
+            $"Timed out after {RetainerListOpenLimit.TotalSeconds:N0} seconds waiting for the retainer list.{lastReason}");
     }
 
     public Task<RetainerAutomationRosterResult> ScanAvailableRetainersAsync(CancellationToken cancellationToken = default) =>

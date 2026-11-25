@@ -58,6 +58,7 @@ public sealed class DalamudVNavmeshTravel
     public const string PathStopChannel = "vnavmesh.Path.Stop";
     public const string PathSetMovementAllowedChannel = "vnavmesh.Path.SetMovementAllowed";
     public const string MoveCloseToChannel = "vnavmesh.SimpleMove.PathfindAndMoveCloseTo";
+    public const string PathfindInProgressChannel = "vnavmesh.SimpleMove.PathfindInProgress";
 
     private readonly Func<bool> isAvailable;
     private readonly Func<bool> isReady;
@@ -65,6 +66,7 @@ public sealed class DalamudVNavmeshTravel
     private readonly Func<Vector3, bool, float, bool> moveCloseTo;
     private readonly Action stop;
     private readonly Action<bool> setMovementAllowed;
+    private readonly Func<bool> pathfindInProgress;
 
     public DalamudVNavmeshTravel(IDalamudPluginInterface pluginInterface)
         : this(
@@ -75,7 +77,8 @@ public sealed class DalamudVNavmeshTravel
             pluginInterface.GetIpcSubscriber<bool>(PathIsRunningChannel).InvokeFunc,
             pluginInterface.GetIpcSubscriber<Vector3, bool, float, bool>(MoveCloseToChannel).InvokeFunc,
             pluginInterface.GetIpcSubscriber<object>(PathStopChannel).InvokeAction,
-            pluginInterface.GetIpcSubscriber<bool, object>(PathSetMovementAllowedChannel).InvokeAction)
+            pluginInterface.GetIpcSubscriber<bool, object>(PathSetMovementAllowedChannel).InvokeAction,
+            pluginInterface.GetIpcSubscriber<bool>(PathfindInProgressChannel).InvokeFunc)
     {
     }
 
@@ -85,7 +88,8 @@ public sealed class DalamudVNavmeshTravel
         Func<bool> isRunning,
         Func<Vector3, bool, float, bool> moveCloseTo,
         Action stop,
-        Action<bool> setMovementAllowed)
+        Action<bool> setMovementAllowed,
+        Func<bool>? pathfindInProgress = null)
     {
         this.isAvailable = isAvailable;
         this.isReady = isReady;
@@ -93,6 +97,7 @@ public sealed class DalamudVNavmeshTravel
         this.moveCloseTo = moveCloseTo;
         this.stop = stop;
         this.setMovementAllowed = setMovementAllowed;
+        this.pathfindInProgress = pathfindInProgress ?? (() => false);
     }
 
     public VNavmeshLifecycleObservation Observe()
@@ -104,6 +109,9 @@ public sealed class DalamudVNavmeshTravel
         {
             if (isRunning())
                 return Observe(VNavmeshLifecycleState.Running, "PathRunning", "vnavmesh is following a path.");
+            // A path request still being computed is not idle: a second request now would be refused.
+            if (IsPathfindInProgress())
+                return Observe(VNavmeshLifecycleState.Loading, "PathfindInProgress", "vnavmesh is still computing a path.");
             if (isReady())
                 return Observe(VNavmeshLifecycleState.Ready, "Ready", "vnavmesh is ready.");
             return Observe(VNavmeshLifecycleState.Loading, "NavmeshLoading", "vnavmesh is loaded and waiting for the current territory navmesh.");
@@ -142,6 +150,13 @@ public sealed class DalamudVNavmeshTravel
         {
             return Submit(VNavmeshPathSubmissionState.IpcFailure, "IpcFailure", ex.Message);
         }
+    }
+
+    private bool IsPathfindInProgress()
+    {
+        // Older vnavmesh builds do not publish this channel; treat that as no pathfind in flight.
+        try { return pathfindInProgress(); }
+        catch { return false; }
     }
 
     public bool TryStop()

@@ -1,3 +1,4 @@
+using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Game.ClientState.Conditions;
 using Franthropy.Dalamud.Automation;
@@ -15,24 +16,55 @@ public sealed class WorldVisitOperation
     private readonly Action<string> warning;
     private readonly DateTimeOffset deadline;
     private readonly Action persistSubmitting;
+    private readonly Action? clearSubmitting;
+    private readonly Func<string?> blocker;
+    private readonly Func<bool>? lifestreamBusy;
     private bool submitted;
+    private DateTimeOffset? dispatchedAt;
+    private bool travelStarted;
+    private string? lastRefusal;
     private OperationResult result = new(OperationStatus.Pending, "AwaitingWorld", "Waiting for a current world.");
+
+    /// <summary>How long after the world command Lifestream must be seen busy, or the character zoning, before the
+    /// command is treated as not taken and sent again. Applies only when Lifestream's busy state is sampled.</summary>
+    public static readonly TimeSpan TravelStartWindow = TimeSpan.FromSeconds(5);
+
+    public const string LifestreamIsBusyChannel = "Lifestream.IsBusy";
 
     public WorldVisitOperation(WorldCatalog worlds, string world, IPlayerState player, ICommandManager commands,
         IClientState client, ICondition conditions, DateTimeOffset deadline, ulong contentId, Action<string> warning, Action persistSubmitting, bool alreadySubmitted = false)
-        : this(worlds, world, () => !client.IsLoggedIn || !player.IsLoaded ? default : (
-            player.ContentId, player.CurrentWorld.RowId, player.CurrentWorld.IsValid,
-            conditions[ConditionFlag.BetweenAreas] || conditions[ConditionFlag.BetweenAreas51]),
-            command => commands.ProcessCommand(command), deadline, contentId, warning, persistSubmitting, alreadySubmitted) { }
+        : this(worlds, world, Observer(player, client, conditions),
+            command => commands.ProcessCommand(command), deadline, contentId, warning, persistSubmitting, alreadySubmitted,
+            () => DalamudPlayerActionReadiness.GetBlocker(flag => conditions[flag]), null, null) { }
+
+    /// <summary>
+    /// Also waits for Lifestream to be idle before sending the world command, re-sends the command when
+    /// Lifestream never starts on it, and clears the durable marker through <paramref name="clearSubmitting"/>
+    /// whenever the command was demonstrably not taken.
+    /// </summary>
+    public WorldVisitOperation(WorldCatalog worlds, string world, IPlayerState player, ICommandManager commands,
+        IClientState client, ICondition conditions, IDalamudPluginInterface pluginInterface, DateTimeOffset deadline, ulong contentId,
+        Action<string> warning, Action persistSubmitting, Action clearSubmitting, bool alreadySubmitted = false)
+        : this(worlds, world, Observer(player, client, conditions),
+            command => commands.ProcessCommand(command), deadline, contentId, warning, persistSubmitting, alreadySubmitted,
+            ReadinessWithLifestream(conditions, pluginInterface), LifestreamBusyProbe(pluginInterface), clearSubmitting) { }
 
     internal WorldVisitOperation(WorldCatalog worlds, string world, Func<(ulong Actor, uint World, bool Valid, bool Zoning)> observe,
         Func<string, bool> dispatch, DateTimeOffset deadline, ulong contentId, Action<string> warning, Action persistSubmitting, bool alreadySubmitted)
+        : this(worlds, world, observe, dispatch, deadline, contentId, warning, persistSubmitting, alreadySubmitted, () => null, null, null) { }
+
+    internal WorldVisitOperation(WorldCatalog worlds, string world, Func<(ulong Actor, uint World, bool Valid, bool Zoning)> observe,
+        Func<string, bool> dispatch, DateTimeOffset deadline, ulong contentId, Action<string> warning, Action persistSubmitting, bool alreadySubmitted,
+        Func<string?> blocker, Func<bool>? lifestreamBusy, Action? clearSubmitting)
     {
         worlds.TryGetWorld(world, out target!);
         this.observe = observe;
         this.dispatch = dispatch;
         this.warning = warning;
         this.persistSubmitting = persistSubmitting;
+        this.clearSubmitting = clearSubmitting;
+        this.blocker = blocker;
+        this.lifestreamBusy = lifestreamBusy;
         this.deadline = deadline;
         actor = contentId;
         submitted = alreadySubmitted;
@@ -42,6 +74,36 @@ public sealed class WorldVisitOperation
         IClientState client, ICondition conditions, DateTimeOffset deadline, Action<string> warning, Action persistSubmitting, bool alreadySubmitted = false) =>
         new(worlds, player.HomeWorld.ValueNullable?.Name.ToString() ?? "",
             player, commands, client, conditions, deadline, player.ContentId, warning, persistSubmitting, alreadySubmitted);
+
+    /// <inheritdoc cref="WorldVisitOperation(WorldCatalog, string, IPlayerState, ICommandManager, IClientState, ICondition, IDalamudPluginInterface, DateTimeOffset, ulong, Action{string}, Action, Action, bool)"/>
+    public static WorldVisitOperation ReturnHome(WorldCatalog worlds, IPlayerState player, ICommandManager commands,
+        IClientState client, ICondition conditions, IDalamudPluginInterface pluginInterface, DateTimeOffset deadline,
+        Action<string> warning, Action persistSubmitting, Action clearSubmitting, bool alreadySubmitted = false) =>
+        new(worlds, player.HomeWorld.ValueNullable?.Name.ToString() ?? "",
+            player, commands, client, conditions, pluginInterface, deadline, player.ContentId, warning, persistSubmitting, clearSubmitting, alreadySubmitted);
+
+    private static Func<(ulong Actor, uint World, bool Valid, bool Zoning)> Observer(IPlayerState player, IClientState client, ICondition conditions) =>
+        () => !client.IsLoggedIn || !player.IsLoaded ? default : (
+            player.ContentId, player.CurrentWorld.RowId, player.CurrentWorld.IsValid,
+            conditions[ConditionFlag.BetweenAreas] || conditions[ConditionFlag.BetweenAreas51]);
+
+    private static Func<bool> LifestreamBusyProbe(IDalamudPluginInterface pluginInterface)
+    {
+        ArgumentNullException.ThrowIfNull(pluginInterface);
+        var subscriber = pluginInterface.GetIpcSubscriber<bool>(LifestreamIsBusyChannel);
+        // An unavailable channel reads as idle; the world command itself then reports a missing Lifestream.
+        return () =>
+        {
+            try { return subscriber.InvokeFunc(); }
+            catch { return false; }
+        };
+    }
+
+    private static Func<string?> ReadinessWithLifestream(ICondition conditions, IDalamudPluginInterface pluginInterface)
+    {
+        var busy = LifestreamBusyProbe(pluginInterface);
+        return () => busy() ? "Lifestream is still finishing another task." : DalamudPlayerActionReadiness.GetBlocker(flag => conditions[flag]);
+    }
 
     public OperationResult Tick(DateTimeOffset now)
     {
@@ -68,21 +130,59 @@ public sealed class WorldVisitOperation
         if (result.IsTerminal) return result;
         if (target == null || actor == 0) return result = new(OperationStatus.Failed, "InvalidDestinationOrActor", "A catalog world and exact traveler are required.");
         var current = observe();
-        if (now >= deadline) return result = new(submitted ? OperationStatus.Indeterminate : OperationStatus.Failed,
-            "WorldVisitDeadline", $"World visit deadline {deadline:O} expired for {target.Name}; observed world {current.World}.");
+        if (now >= deadline)
+        {
+            // With Lifestream's busy state sampled, a command it never started on left nothing in flight.
+            var neverStarted = submitted && dispatchedAt is not null && !travelStarted;
+            return result = new(submitted && !neverStarted ? OperationStatus.Indeterminate : OperationStatus.Failed,
+                "WorldVisitDeadline", $"World visit deadline {deadline:O} expired for {target.Name}; observed world {current.World}." +
+                (neverStarted ? " Lifestream never started travel." : "") +
+                (lastRefusal is null ? "" : $" Last refusal: {lastRefusal}"));
+        }
         if (current.Actor == 0) return result;
         if (current.Actor != actor) return result = new(submitted ? OperationStatus.Indeterminate : OperationStatus.Failed,
             "TravelerChanged", "Another character is logged in.");
-        if (current.Zoning) return result;
+        if (current.Zoning)
+        {
+            if (submitted) travelStarted = true;
+            return result;
+        }
         if (current.World == target.RowId && target.RowId != 0)
             return result = new(OperationStatus.Succeeded, "WorldObserved", $"Observed {target.Name}.");
+        if (submitted && dispatchedAt is { } sentAt && !travelStarted)
+        {
+            if (lifestreamBusy?.Invoke() == true)
+                travelStarted = true;
+            else if (now - sentAt >= TravelStartWindow)
+            {
+                // Lifestream neither went busy nor moved the character: the command was not taken. Send it again.
+                submitted = false;
+                dispatchedAt = null;
+                lastRefusal = "Lifestream did not start travel after the world command.";
+                warning($"{target.Name}: TravelNotStarted: {lastRefusal} Sending it again.");
+                try { clearSubmitting?.Invoke(); }
+                catch (Exception ex) { warning($"{target.Name}: SubmissionMarkerNotCleared: {ex.Message}"); }
+            }
+        }
         if (submitted || !current.Valid) return result;
+        if (blocker() is { } reason)
+        {
+            lastRefusal = reason;
+            return result = new(OperationStatus.Pending, "VisitBlocked", reason);
+        }
         try { persistSubmitting(); }
         catch (Exception ex) { return result = new(OperationStatus.Failed, "SubmissionNotPersisted", ex.Message); }
         submitted = true;
         try
         {
-            return result = dispatch($"/li {target.Name}") ?
+            var handled = dispatch($"/li {target.Name}");
+            // Start detection needs Lifestream's busy state; without it the command is trusted as before.
+            if (handled && lifestreamBusy is not null)
+            {
+                dispatchedAt = now;
+                travelStarted = false;
+            }
+            return result = handled ?
                 new(OperationStatus.Pending, "AwaitingArrival", $"Waiting for {target.Name}.") :
                 new(OperationStatus.Failed, "TravelCommandRejected", "Lifestream did not handle the world command.");
         }
