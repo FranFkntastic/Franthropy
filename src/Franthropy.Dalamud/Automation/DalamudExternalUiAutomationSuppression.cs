@@ -26,7 +26,8 @@ internal sealed class DalamudSharedPluginDataStore(IDalamudPluginInterface plugi
 /// <see cref="Scope.Renew"/> from its tick; if renewals stop for a whole heartbeat lease, it is dropped with a
 /// Warning. <see cref="ForceRelease"/> drops every holder.
 /// The owner name must be unique per live instance in the process: an instance adopts an existing
-/// stop-request entry with its owner name as its own, so two live instances sharing a name would release each other's pause.
+/// stop-request entry with its owner name as its own (construction clears one left behind, logged at Warning), so two
+/// live instances sharing a name would release each other's pause.
 /// </summary>
 public sealed class DalamudExternalUiAutomationSuppression : IDisposable
 {
@@ -75,6 +76,9 @@ public sealed class DalamudExternalUiAutomationSuppression : IDisposable
         this.owner = string.IsNullOrWhiteSpace(owner)
             ? throw new ArgumentException("A stop-request owner is required.", nameof(owner))
             : owner.Trim();
+        // A new instance has no holders, so any entry under its owner name was left by a previous instance that never
+        // released it. Clear it now instead of waiting for the first hold to adopt it.
+        SweepLeftoverOwnerEntries();
         if (startExpiryTimer)
             expiryTimer = new Timer(_ => ReleaseExpired(), null, ExpiryCheckInterval, ExpiryCheckInterval);
     }
@@ -164,6 +168,35 @@ public sealed class DalamudExternalUiAutomationSuppression : IDisposable
             warning($"[{owner}] SuppressionForceReleased: dropped {dropped} holder(s) and restored paused UI automation. reason={reason}");
             RestoreAll(null, force: true);
             return dropped;
+        }
+    }
+
+    private void SweepLeftoverOwnerEntries()
+    {
+        var restored = new List<string>(2);
+        SweepLeftoverOwnerEntry(TextAdvanceStopRequests, "TextAdvance", restored);
+        SweepLeftoverOwnerEntry(YesAlreadyStopRequests, "YesAlready", restored);
+        if (restored.Count != 0)
+            warning($"[{owner}] SuppressionLeftoverRestored: removed a stop request under this owner name left by a " +
+                    $"previous instance with no live holder; restored {string.Join(", ", restored)}.");
+    }
+
+    private void SweepLeftoverOwnerEntry(string key, string product, List<string> restored)
+    {
+        try
+        {
+            if (!dataStore.TryGetData<HashSet<string>>(key, out var stopRequests) || stopRequests is null)
+                return;
+            bool removed;
+            lock (stopRequests)
+                removed = stopRequests.Remove(owner);
+            if (removed)
+                restored.Add(product);
+        }
+        catch (Exception exception)
+        {
+            warning($"[{owner}] SuppressionLeftoverSweepFailed: could not check {product} for a leftover stop request " +
+                    $"under this owner name; the first hold adopts it instead. {exception.Message}");
         }
     }
 
