@@ -53,6 +53,7 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
     private DateTimeOffset? navigationSubmittedAt;
     private bool navigationObservedRunning;
     private bool automationActive;
+    private string? lastApproachRefusal;
 
     public DalamudGilVendorBuyRuntime(
         DalamudGilVendorAccessReader access,
@@ -186,7 +187,9 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
                 ? new(GilVendorReachState.Waiting, assessment.Message)
                 : new(GilVendorReachState.Unavailable, assessment.Message);
         if (utcNow() - approachStartedAt > ApproachTimeout)
-            return new(GilVendorReachState.Retryable, $"Could not reach {offer.NpcName} within two minutes; releasing this route attempt for automatic recovery.");
+            return new(GilVendorReachState.Retryable, $"Could not reach {offer.NpcName} within two minutes" +
+                (lastApproachRefusal is null ? "" : $" (last refusal: {lastApproachRefusal})") +
+                "; releasing this route attempt for automatic recovery.");
         var readiness = travelReadiness.Advance(ProtectedOwnedAddonsForPendingAethernet(requestedAethernetId));
         if (readiness.State is TravelReadinessState.Repairing or TravelReadinessState.Waiting)
             return new(GilVendorReachState.Waiting, readiness.Message);
@@ -194,6 +197,9 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         {
             if (ShouldWaitForPendingTravelUi(readiness, requestedAetheryteId is not null || requestedAethernetId is not null))
                 return new(GilVendorReachState.Waiting, "Waiting for the in-progress vendor travel to release the game UI.");
+            // A cutscene or quest dialogue releases the UI on its own; wait for it inside the approach window.
+            if (readiness.Code is "CutsceneOwnsUi" or "UnknownUiOwner")
+                return Refused(readiness.Message);
             return new(GilVendorReachState.Failed, readiness.Message);
         }
         if (clientState.TerritoryType != offer.TerritoryId)
@@ -242,8 +248,11 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
                                 travelReadiness.Reset();
                                 break;
                             case AetheryteTravelSubmissionState.Busy:
-                                return new(GilVendorReachState.Waiting, submission.Message);
+                                return Refused(submission.Message);
                             case AetheryteTravelSubmissionState.Rejected:
+                                // A refused teleport started nothing; ask again after the throttle.
+                                nextActionAt = utcNow().Add(ActionThrottle);
+                                return Refused(submission.Message);
                             case AetheryteTravelSubmissionState.Unavailable:
                             case AetheryteTravelSubmissionState.InvalidRequest:
                                 return new(GilVendorReachState.Failed, submission.Message);
@@ -373,7 +382,8 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
                 }
                 return new(GilVendorReachState.Waiting, DescribeApproach(activeTravelMode, offer.NpcName, distance));
             case GilVendorApproachDecision.BlockedByAnotherRoute:
-                return new(GilVendorReachState.Failed, "Another vnavmesh route is already active.");
+                // Not ours to stop; wait for it to end inside the approach window.
+                return Refused("Another vnavmesh route is already active.");
             case GilVendorApproachDecision.NavigationUnavailable:
                 return new(GilVendorReachState.Waiting, navigation.Message);
         }
@@ -399,6 +409,12 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
                 preparation.VNavmeshMode);
             if (movement.State == VNavmeshPathSubmissionState.Loading)
                 return new(GilVendorReachState.Waiting, movement.Message);
+            if (movement.State == VNavmeshPathSubmissionState.Rejected)
+            {
+                // vnavmesh refused before moving (a path already running or a pathfind in flight); retry after the throttle.
+                nextActionAt = utcNow().Add(ActionThrottle);
+                return Refused(movement.Message);
+            }
             if (!movement.Submitted)
                 return new(GilVendorReachState.Failed, movement.Message);
             recovery.RecordNavigationSubmission(utcNow(), distance);
@@ -411,8 +427,15 @@ public sealed class DalamudGilVendorBuyRuntime : IGilVendorBuyRuntime
         return new(GilVendorReachState.Waiting, DescribeApproach(activeTravelMode, offer.NpcName, distance));
     }
 
+    private GilVendorReachResult Refused(string message)
+    {
+        lastApproachRefusal = message;
+        return new(GilVendorReachState.Waiting, message);
+    }
+
     public void ResetVendorApproach()
     {
+        lastApproachRefusal = null;
         StopOwnedNavigation();
         approachStartedAt = utcNow();
         nextActionAt = DateTimeOffset.MinValue;

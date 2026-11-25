@@ -95,7 +95,8 @@ public sealed unsafe class DalamudDataCenterConnection(IDataManager data, IClien
                     !AddonMaster.TitleDCWorldMap.PublicDC.Contains((int)rowId) || !Ready("TitleDCWorldMap", out var map))
                     throw new DataCenterPreInputRefusal("Validated public data center or selector unavailable.");
                 if (!new AddonMaster.TitleDCWorldMap(map).Select((int)rowId))
-                    throw new InvalidOperationException("Data center selection refused.");
+                    // Select returns false without clicking when no selector entry matched.
+                    throw new DataCenterPreInputRefusal("Data center selection refused.");
                 break;
             case "ServiceAccount":
                 if (!Ready("SelectString", out var menu)) throw new DataCenterPreInputRefusal("Account prompt unavailable.");

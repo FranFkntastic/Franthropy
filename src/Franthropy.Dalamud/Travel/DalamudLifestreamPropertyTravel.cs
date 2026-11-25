@@ -18,6 +18,7 @@ public sealed record PrivateEstateTravelResult(
     string Message)
 {
     public bool Submitted => State == PrivateEstateTravelState.Submitted;
+    public bool Retryable => State == PrivateEstateTravelState.Busy;
 }
 
 /// <summary>
@@ -33,23 +34,27 @@ public sealed class DalamudLifestreamPropertyTravel
     private readonly ICallGateSubscriber<bool> isBusy;
     private readonly ICallGateSubscriber<bool?> hasPrivateHouse;
     private readonly ICallGateSubscriber<bool> teleportToHome;
+    private readonly Func<string?> playerBlocker;
 
     public DalamudLifestreamPropertyTravel(IDalamudPluginInterface pluginInterface)
         : this(
             pluginInterface.GetIpcSubscriber<bool>(IsBusyChannel),
             pluginInterface.GetIpcSubscriber<bool?>(HasPrivateHouseChannel),
-            pluginInterface.GetIpcSubscriber<bool>(TeleportToHomeChannel))
+            pluginInterface.GetIpcSubscriber<bool>(TeleportToHomeChannel),
+            DalamudPlayerActionReadiness.GetBlocker)
     {
     }
 
     internal DalamudLifestreamPropertyTravel(
         ICallGateSubscriber<bool> isBusy,
         ICallGateSubscriber<bool?> hasPrivateHouse,
-        ICallGateSubscriber<bool> teleportToHome)
+        ICallGateSubscriber<bool> teleportToHome,
+        Func<string?>? playerBlocker = null)
     {
         this.isBusy = isBusy;
         this.hasPrivateHouse = hasPrivateHouse;
         this.teleportToHome = teleportToHome;
+        this.playerBlocker = playerBlocker ?? (() => null);
     }
 
     public PrivateEstateTravelResult TrySubmit()
@@ -60,10 +65,13 @@ public sealed class DalamudLifestreamPropertyTravel
                 return Result(PrivateEstateTravelState.Busy, "LifestreamBusy", "Lifestream is already handling travel.");
 
             var availability = hasPrivateHouse.InvokeFunc();
+            // Unknown availability means Lifestream's housing data has not loaded yet; check again.
             if (availability is null)
-                return Result(PrivateEstateTravelState.Unavailable, "PrivateEstateUnknown", "Lifestream could not determine private-estate availability.");
+                return Result(PrivateEstateTravelState.Busy, "PrivateEstateUnknown", "Lifestream has not determined private-estate availability yet.");
             if (!availability.Value)
                 return Result(PrivateEstateTravelState.NoPrivateEstate, "NoPrivateEstate", "This character does not have a private estate.");
+            if (playerBlocker() is { } blocker)
+                return Result(PrivateEstateTravelState.Busy, "PlayerNotReady", blocker);
 
             return teleportToHome.InvokeFunc()
                 ? Result(PrivateEstateTravelState.Submitted, "Submitted", "Lifestream accepted private-estate travel.")

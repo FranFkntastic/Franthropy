@@ -20,8 +20,24 @@ public sealed record CharacterSwitchGameState
             CurrentDataCenterId = p?.CurrentWorld.ValueNullable?.DataCenter.RowId,
             IsConditionSet = flag => conditions[flag],
             RetainerSessionOpen = retainerSessionOpen,
-            AutomationBusyReason = automationBusyReason
+            AutomationBusyReason = automationBusyReason,
+            PlayerTargetable = p?.IsTargetable ?? false
         };
+    }
+
+    public const string LifestreamIsBusyChannel = "Lifestream.IsBusy";
+
+    /// <summary>Observes like the overload above and also samples <c>Lifestream.IsBusy</c>.</summary>
+    public static CharacterSwitchGameState Observe(global::Dalamud.Plugin.Services.IClientState client,
+        global::Dalamud.Plugin.Services.IObjectTable objects, global::Dalamud.Plugin.Services.ICondition conditions,
+        bool retainerSessionOpen, string? automationBusyReason, global::Dalamud.Plugin.IDalamudPluginInterface pluginInterface)
+    {
+        ArgumentNullException.ThrowIfNull(pluginInterface);
+        bool busy;
+        // An unavailable channel is left for the switch request itself to report.
+        try { busy = pluginInterface.GetIpcSubscriber<bool>(LifestreamIsBusyChannel).InvokeFunc(); }
+        catch { busy = false; }
+        return Observe(client, objects, conditions, retainerSessionOpen, automationBusyReason) with { LifestreamBusy = busy };
     }
 
     public bool LoggedIn { get; init; }
@@ -34,6 +50,12 @@ public sealed record CharacterSwitchGameState
 
     /// <summary>Why the caller's automation cannot be interrupted, or null when it is idle.</summary>
     public string? AutomationBusyReason { get; init; }
+
+    /// <summary>Whether Lifestream reported it is still running a task. False when not sampled.</summary>
+    public bool LifestreamBusy { get; init; }
+
+    /// <summary>Whether the local player can be targeted. True when not sampled.</summary>
+    public bool PlayerTargetable { get; init; } = true;
 }
 
 /// <summary>Decides whether a user-requested relog may start. Pure so it is testable without a client.</summary>
@@ -53,6 +75,12 @@ public static class CharacterSwitchPolicy
         ([ConditionFlag.OccupiedSummoningBell], "A retainer session is open."),
         ([ConditionFlag.OccupiedInQuestEvent], "The character is in a quest event."),
         ([ConditionFlag.OccupiedInEvent], "The character is occupied in an event."),
+        ([ConditionFlag.Casting], "The character is casting."),
+        ([ConditionFlag.Occupied, ConditionFlag.Occupied30, ConditionFlag.Occupied33, ConditionFlag.Occupied38, ConditionFlag.Occupied39],
+            "The character is occupied by another game interaction."),
+        ([ConditionFlag.MountOrOrnamentTransition], "A mount transition is in progress."),
+        ([ConditionFlag.Unconscious], "The character is unconscious."),
+        ([ConditionFlag.Jumping, ConditionFlag.Jumping61], "The character is jumping."),
     ];
 
     /// <summary>Returns why a relog must be refused right now, or null when it may start.</summary>
@@ -64,6 +92,8 @@ public static class CharacterSwitchPolicy
             return "No logged-in character is available to relog.";
         if (!string.IsNullOrWhiteSpace(state.AutomationBusyReason))
             return state.AutomationBusyReason;
+        if (state.LifestreamBusy)
+            return "Lifestream is still finishing another task.";
 
         foreach (var (flags, reason) in ConditionGuards)
         {
@@ -76,6 +106,8 @@ public static class CharacterSwitchPolicy
 
         if (state.RetainerSessionOpen)
             return "A retainer session is open.";
+        if (!state.PlayerTargetable)
+            return "The character is not interactable yet.";
 
         // The relog returns the character to its home world; refusing off the home data center avoids an
         // unexpected data-center transfer. An unknown data center is refused too rather than guessed.

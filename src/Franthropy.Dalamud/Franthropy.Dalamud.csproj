@@ -152,6 +152,7 @@
     <Compile Remove="Travel\DalamudLifestreamLogin.cs" />
     <Compile Remove="Travel\DalamudDataCenterConnection.cs" />
     <Compile Remove="Travel\DalamudTravelReadiness.cs" />
+    <Compile Remove="Travel\DalamudPlayerActionReadiness.cs" />
     <Compile Remove="Travel\DalamudVNavmeshTravel.cs" />
     <Compile Remove="Travel\DalamudLocalTravelRunner.cs" />
     <Compile Remove="Automation\Vendors\DalamudGilVendorCatalogBuilder.cs" />

@@ -29,6 +29,8 @@ public sealed class TradeRunner : IDisposable
     private (TradeExecutionState State, string Message)? pendingFinish;
     private bool cancellationCheckpointSaved;
     private DateTimeOffset batchRecoveryDeadline;
+    // Whether this trade window received any offer input; a window that closes before then moved nothing.
+    private bool offerInputIssued;
     private TradeOfferLineOperation? offerLineOperation;
     private TradeOfferGilOperation? offerGilOperation;
     private bool readyClicked;
@@ -484,6 +486,7 @@ public sealed class TradeRunner : IDisposable
         {
             offerLineOperation = null;
             offerGilOperation = null;
+            offerInputIssued = false;
             readyClicked = false;
             confirmationSubmitted = false;
             nextActionAt = now + timing.ActionDelay;
@@ -507,6 +510,19 @@ public sealed class TradeRunner : IDisposable
     {
         if (!io.IsTradeOpen)
         {
+            // A window that closes before any offer input, lock, or confirmation moved nothing:
+            // reopen the same batch within its recovery window instead of stopping on the bounce.
+            if (!offerInputIssued && !readyClicked && !confirmationSubmitted)
+            {
+                if (now < batchRecoveryDeadline)
+                {
+                    BeginClosing(TradeExecutionState.OpeningTrade,
+                        $"Trade closed before batch {batchNumber:N0} was offered; reopening it.");
+                    return;
+                }
+                Result ??= new(OperationStatus.Failed, "PreLockWindowClosed",
+                    "Trade closed before anything was offered, and the batch recovery deadline has expired.");
+            }
             Fail("Trade closed before the sender finished offering the current batch.");
             return;
         }
@@ -574,6 +590,7 @@ public sealed class TradeRunner : IDisposable
             if (offerGilOperation == null || offerGilOperation.IsCompleted)
                 offerGilOperation = new TradeOfferGilOperation(io, batch.GilAmount);
             var gilResult = offerGilOperation.Advance();
+            offerInputIssued |= gilResult.ActionIssued;
             Snapshot = Snapshot with { Message = gilResult.Message };
             if (gilResult.IsFailed)
             {
@@ -623,6 +640,7 @@ public sealed class TradeRunner : IDisposable
         }
         offerLineOperation = new TradeOfferLineOperation(io, nextLine, liveOffer, deadline);
         var dispatched = offerLineOperation.Advance(now);
+        offerInputIssued |= offerLineOperation.HasDispatched;
         Snapshot = Snapshot with { Message = dispatched.Message };
         if (dispatched.IsFailed)
             Fail(dispatched.Message);

@@ -34,6 +34,7 @@ public sealed class DalamudLifestreamAetheryteTravel
     private readonly Func<bool> isAvailable;
     private readonly ICallGateSubscriber<bool> isBusy;
     private readonly ICallGateSubscriber<uint, byte, bool> teleport;
+    private readonly Func<string?> playerBlocker;
 
     public DalamudLifestreamAetheryteTravel(IDalamudPluginInterface pluginInterface)
         : this(
@@ -41,18 +42,21 @@ public sealed class DalamudLifestreamAetheryteTravel
                 plugin.IsLoaded &&
                 string.Equals(plugin.InternalName, InternalName, StringComparison.OrdinalIgnoreCase)),
             pluginInterface.GetIpcSubscriber<bool>(IsBusyChannel),
-            pluginInterface.GetIpcSubscriber<uint, byte, bool>(TeleportChannel))
+            pluginInterface.GetIpcSubscriber<uint, byte, bool>(TeleportChannel),
+            DalamudPlayerActionReadiness.GetBlocker)
     {
     }
 
     internal DalamudLifestreamAetheryteTravel(
         Func<bool> isAvailable,
         ICallGateSubscriber<bool> isBusy,
-        ICallGateSubscriber<uint, byte, bool> teleport)
+        ICallGateSubscriber<uint, byte, bool> teleport,
+        Func<string?>? playerBlocker = null)
     {
         this.isAvailable = isAvailable;
         this.isBusy = isBusy;
         this.teleport = teleport;
+        this.playerBlocker = playerBlocker ?? (() => null);
     }
 
     public AetheryteTravelSubmissionResult TrySubmit(uint aetheryteId)
@@ -66,6 +70,9 @@ public sealed class DalamudLifestreamAetheryteTravel
         {
             if (isBusy.InvokeFunc())
                 return Result(AetheryteTravelSubmissionState.Busy, "LifestreamBusy", "Lifestream is already handling travel.");
+            // Lifestream refuses travel while the player cannot act; that refusal means "not yet".
+            if (playerBlocker() is { } blocker)
+                return Result(AetheryteTravelSubmissionState.Busy, "PlayerNotReady", blocker);
 
             return teleport.InvokeFunc(aetheryteId, 0)
                 ? Result(AetheryteTravelSubmissionState.Submitted, "Submitted", "Lifestream accepted aetheryte travel.")
