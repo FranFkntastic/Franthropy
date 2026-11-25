@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Dalamud.Plugin.Services;
+using Franthropy.Dalamud.Runtime;
 
 namespace Franthropy.Dalamud.Automation.Trades;
 
@@ -429,16 +430,28 @@ public sealed class TradeRunner : IDisposable
 
     public void Dispose()
     {
-        if (IsActive && confirmationSubmitted && Snapshot.State != TradeExecutionState.ClosingTrade && io.IsTradeOpen)
-            BeginClosing(TradeExecutionState.Failed, "Unloading after confirmation; retaining trade ownership without cancellation.");
-        if (IsActive && Snapshot.State != TradeExecutionState.ClosingTrade)
-            Stop("Trade stopped because the plugin is unloading.");
-        // Never resume auto-confirm under a window that is still open. The next load re-owns the pause while that
-        // window stays open (bounded closing, or the idle load path) and releases it once the window closes.
-        if ((IsActive || recovery.CancellationPending || restoreAutoConfirmOnClosure) && IsTradeOpenOrUnknown())
-            externalAutomation.RetainTradeSuppressionOnDispose();
-        else
-            externalAutomation.RestoreTradeAutoConfirm();
+        // Each step runs even when an earlier one throws, so a failed stop never skips the auto-confirm restore.
+        DisposalSteps.DisposeAll(
+            (step, exception) => log.Warning(exception, "[Franthropy] TradeDisposeStepFailed: {Step} threw during unload; the remaining steps still ran.", step),
+            ("trade close after confirmation", () =>
+            {
+                if (IsActive && confirmationSubmitted && Snapshot.State != TradeExecutionState.ClosingTrade && io.IsTradeOpen)
+                    BeginClosing(TradeExecutionState.Failed, "Unloading after confirmation; retaining trade ownership without cancellation.");
+            }),
+            ("trade stop", () =>
+            {
+                if (IsActive && Snapshot.State != TradeExecutionState.ClosingTrade)
+                    Stop("Trade stopped because the plugin is unloading.");
+            }),
+            ("trade auto-confirm restore", () =>
+            {
+                // Never resume auto-confirm under a window that is still open. The next load re-owns the pause while that
+                // window stays open (bounded closing, or the idle load path) and releases it once the window closes.
+                if ((IsActive || recovery.CancellationPending || restoreAutoConfirmOnClosure) && IsTradeOpenOrUnknown())
+                    externalAutomation.RetainTradeSuppressionOnDispose();
+                else
+                    externalAutomation.RestoreTradeAutoConfirm();
+            }));
     }
 
     private bool IsTradeOpenOrUnknown()
