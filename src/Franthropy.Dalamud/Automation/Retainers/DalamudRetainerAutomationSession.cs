@@ -1626,15 +1626,31 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         return RetainerAutomationResult.Succeeded("RetainerClosed", "Retainer closed.");
     }
 
+    /// <summary>
+    /// Ends the summoning-bell session through the retainer list's own close action and
+    /// succeeds only once the session is observed to have ended, not merely when the close
+    /// was requested.
+    /// </summary>
     public async Task<RetainerAutomationResult> CloseRetainerListAsync(CancellationToken cancellationToken = default)
     {
         var closed = await framework.RunOnTick(CloseRetainerList, cancellationToken: cancellationToken).ConfigureAwait(false);
         if (!closed.Success)
             return closed;
 
-        return await WaitUntilAsync(() => !IsReady(RetainerList), cancellationToken).ConfigureAwait(false)
-            ? RetainerAutomationResult.Succeeded("RetainerListClosed", "Retainer list closed.")
-            : RetainerAutomationResult.Failed("RetainerListCloseTimeout", "Timed out waiting for the retainer list to close.");
+        if (await WaitUntilAsync(() => ObserveRetainerSessionEnd().Ended, cancellationToken).ConfigureAwait(false))
+            return RetainerAutomationResult.Succeeded("RetainerSessionEnded", "Retainer list closed and the summoning-bell session ended.");
+
+        // Deliberately no fallback hide: hiding a live agent would only conceal the session
+        // the game still considers open, which is the failure this check exists to catch.
+        var observed = await framework.RunOnTick(ObserveRetainerSessionEnd, cancellationToken: cancellationToken).ConfigureAwait(false);
+        log.Warning("Retainer list close did not end the summoning-bell session within the wait budget. Observed {Observation}.", observed.Describe());
+        return observed.ListVisible
+            ? RetainerAutomationResult.Failed(
+                "RetainerListCloseTimeout",
+                $"The retainer list was still visible after its close action. Observed {observed.Describe()}.")
+            : RetainerAutomationResult.Failed(
+                "RetainerSessionStillActive",
+                $"The retainer list closed but the summoning-bell session did not end. Observed {observed.Describe()}.");
     }
 
     public unsafe void CancelActive()
@@ -2620,8 +2636,42 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (addon is null || !addon->IsReady || !addon->IsVisible)
             return RetainerAutomationResult.Failed("RetainerListUnavailable", "Retainer list is not ready.");
 
-        addon->Close(true);
+        // Callback -1 is the list's own close action (the same one Esc sends): it ends the
+        // bell interaction. Close(true) only hides the window and can leave the retainer
+        // agent and the bell event live, so the game keeps offering retainer actions.
+        var value = new AtkValue { Type = AtkValueType.Int, Int = -1 };
+        addon->FireCallback(1, &value);
         return RetainerAutomationResult.Succeeded("RetainerListCloseRequested", "Retainer list close requested.");
+    }
+
+    private unsafe RetainerSessionEndObservation ObserveRetainerSessionEnd()
+    {
+        var module = AgentModule.Instance();
+        var retainerAgent = module == null ? null : module->GetAgentByInternalId(AgentId.Retainer);
+        var listAgent = module == null ? null : module->GetAgentByInternalId(AgentId.RetainerList);
+        var conditions = Conditions.Instance();
+        return new(
+            IsReady(RetainerList),
+            retainerAgent != null && retainerAgent->IsAgentActive(),
+            listAgent != null && listAgent->IsAgentActive(),
+            conditions != null && conditions->OccupiedSummoningBell);
+    }
+
+    private readonly record struct RetainerSessionEndObservation(
+        bool ListVisible,
+        bool RetainerAgentActive,
+        bool RetainerListAgentActive,
+        bool BellOccupied)
+    {
+        // The list agent is reported for diagnosis only; the retainer agent and bell
+        // occupancy are what keep the game offering retainer actions after the list closes.
+        public bool Ended => !ListVisible && !RetainerAgentActive && !BellOccupied;
+
+        public string Describe() =>
+            $"RetainerList={(ListVisible ? "visible" : "closed")} " +
+            $"AgentRetainer={(RetainerAgentActive ? "active" : "inactive")} " +
+            $"AgentRetainerList={(RetainerListAgentActive ? "active" : "inactive")} " +
+            $"OccupiedSummoningBell={(BellOccupied ? "set" : "clear")}";
     }
 
     private string ResolveAddonText(uint rowId) => dataManager.GetExcelSheet<Addon>().GetRow(rowId).Text.ExtractText();
