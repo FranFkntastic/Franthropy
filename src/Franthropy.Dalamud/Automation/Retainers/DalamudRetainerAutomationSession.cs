@@ -46,6 +46,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     // How long a session with no retainer window left open may take to end on its own before recovery
     // reopens it, so a close that is still finishing is not mistaken for a stuck session.
     private static readonly TimeSpan SessionEndSettleLimit = TimeSpan.FromSeconds(2);
+    // How long hiding the retainer agent may take to bring back the retainer command menu before the
+    // windows it left behind are closed directly.
+    private static readonly TimeSpan RetainerAgentHideLimit = TimeSpan.FromSeconds(3);
     // Market price freshness proof. InventoryManager's 20-entry retainer market price table is a
     // client cache that is NOT tied to the RetainerMarket container's load: right after a retainer
     // switch it can still hold the previous retainer's (non-zero) prices. The game itself replaces
@@ -864,6 +867,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         var editor = gameGui.GetAddonByName<AtkUnitBase>(SellingListingEditor, 1);
         if (editor != null && editor->IsVisible)
         {
+            // The price editor is a child dialog of the sale list and owns no retainer pairing; closing it is a cancel.
             if (frame % 10 == 0 && editor->IsReady)
                 editor->Close(true);
             return false;
@@ -1554,10 +1558,14 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         if (!state.Inventory)
             return RetainerAutomationResult.Failed("RetainerInventoryUnavailable", "Retainer inventory is not open.");
 
-        await framework.RunOnTick(CloseInventory, cancellationToken: cancellationToken).ConfigureAwait(false);
-        return await WaitUntilAsync(IsCommandMenuReady, cancellationToken).ConfigureAwait(false)
-            ? RetainerAutomationResult.Succeeded("RetainerInventoryClosed", "Retainer inventory closed.")
-            : RetainerAutomationResult.Failed("RetainerMenuTimeout", "Timed out waiting for the retainer command menu after closing inventory.");
+        if (!await CloseRetainerWindowsAsync(cancellationToken).ConfigureAwait(false))
+            return RetainerAutomationResult.Failed("RetainerMenuTimeout", "Timed out waiting for the retainer command menu after closing inventory.");
+        // The window going away is not the proof; the player's inventory must no longer be paired with
+        // the retainer. A pairing that survives is reported here, and session end refuses to call it ended.
+        var after = await framework.RunOnTick(ObserveRetainerSessionEnd, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (after.InventoryPairedWithRetainer || after.InventoryWindow != RetainerInventoryWindowState.Absent)
+            log.Warning("RetainerInventoryPairingAfterClose: the retainer command menu is back but the retainer inventory was not fully torn down. Observed {Observation}.", after.Describe());
+        return RetainerAutomationResult.Succeeded("RetainerInventoryClosed", "Retainer inventory closed.");
     }
 
     public Task<RetainerSellingUiObservation> ObserveSellingUiAsync(CancellationToken cancellationToken = default) =>
@@ -1588,17 +1596,9 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             return RetainerAutomationResult.Succeeded("RetainerListReady", "Retainer list is ready.");
         }
 
-        await framework.RunOnTick(
-            () =>
-            {
-                CloseSurface(SellingListingEditor);
-                CloseSurface(SellingList);
-                CloseSurface(MarketList);
-                CloseInventory();
-            },
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-
-        if (!await WaitUntilAsync(IsCommandMenuReady, cancellationToken).ConfigureAwait(false))
+        // The price editor is a child dialog of the sale list and owns no retainer pairing; closing it is a cancel.
+        await framework.RunOnTick(() => CloseSurface(SellingListingEditor), cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (!await CloseRetainerWindowsAsync(cancellationToken).ConfigureAwait(false))
         {
             var observed = await ObserveSellingUiAsync(cancellationToken).ConfigureAwait(false);
             return RetainerAutomationResult.Failed(
@@ -1708,7 +1708,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             return (Observed: observed, Refused: RefuseSessionRecovery(refusalReason, observed));
         }, cancellationToken: cancellationToken).ConfigureAwait(false);
         if (start.Observed.Ended)
-            return RetainerAutomationResult.Succeeded("RetainerSessionAlreadyEnded", "The summoning-bell session had already ended.");
+            return Ended("RetainerSessionAlreadyEnded", "The summoning-bell session had already ended.", start.Observed);
         if (start.Refused is { } refused)
             return Warn(refused);
 
@@ -1743,7 +1743,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             if (closed.Ended)
             {
                 await framework.RunOnTick(ForgetBellSession, cancellationToken: cancellationToken).ConfigureAwait(false);
-                return RetainerAutomationResult.Succeeded("RetainerSessionEnded", "Retainer list closed and the summoning-bell session ended.");
+                return Ended("RetainerSessionEnded", "Retainer list closed and the summoning-bell session ended.", closed);
             }
             firstAttempt = $"the list's close action left {closed.Describe()}";
         }
@@ -1753,10 +1753,15 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             // the game still offers retainer actions with no retainer window left to close.
             if (await WaitUntilAsync(() => ObserveRetainerSessionEnd().Ended, cancellationToken, SessionEndSettleLimit).ConfigureAwait(false))
             {
-                await framework.RunOnTick(ForgetBellSession, cancellationToken: cancellationToken).ConfigureAwait(false);
-                return RetainerAutomationResult.Succeeded("RetainerSessionEnded", "The summoning-bell session ended without further action.");
+                var settled = await framework.RunOnTick(() =>
+                {
+                    ForgetBellSession();
+                    return ObserveRetainerSessionEnd();
+                }, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return Ended("RetainerSessionEnded", "The summoning-bell session ended without further action.", settled);
             }
-            firstAttempt = "no retainer window was open to close";
+            var lingering = await framework.RunOnTick(ObserveRetainerSessionEnd, cancellationToken: cancellationToken).ConfigureAwait(false);
+            firstAttempt = $"no retainer window was open to close, yet {lingering.Describe()}";
         }
         log.Warning("RetainerSessionStillOpen: {FirstAttempt}; reopening the retainer list from the bell once to close it properly.", firstAttempt);
 
@@ -1775,7 +1780,7 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             if (after.Ended)
             {
                 await framework.RunOnTick(ForgetBellSession, cancellationToken: cancellationToken).ConfigureAwait(false);
-                return RetainerAutomationResult.Succeeded("RetainerSessionEnded", "The summoning-bell session ended while the bell was being reopened.");
+                return Ended("RetainerSessionEnded", "The summoning-bell session ended while the bell was being reopened.", after);
             }
             return Warn(RetainerAutomationResult.Failed(
                 "RetainerSessionReopenFailed",
@@ -1793,14 +1798,23 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         {
             await framework.RunOnTick(ForgetBellSession, cancellationToken: cancellationToken).ConfigureAwait(false);
             log.Information("RetainerSessionRecoveredByReopen: {FirstAttempt}; reopening the list from the bell and closing it again ended the session.", firstAttempt);
-            return RetainerAutomationResult.Succeeded(
+            return Ended(
                 "RetainerSessionEndedAfterReopen",
-                $"The summoning-bell session did not end at first ({firstAttempt}); reopening the list from the bell and closing it again ended it.");
+                $"The summoning-bell session did not end at first ({firstAttempt}); reopening the list from the bell and closing it again ended it.",
+                second);
         }
         return Warn(RetainerAutomationResult.Failed(
             "RetainerSessionStuckAfterReopen",
             $"The summoning-bell session is still open after reopening the retainer list from the bell and closing it again " +
             $"(first attempt: {firstAttempt}). Observed {second.Describe()}. Not retried further; the agent was not hidden."));
+    }
+
+    // Every ended outcome, AlreadyEnded included, logs what ended looked like, so a session the game
+    // still treats as open after a reported success can be told apart from dalamud.log alone.
+    private RetainerAutomationResult Ended(string code, string message, RetainerSessionEndObservation observed)
+    {
+        log.Information("RetainerSessionEndObserved: {Code}. Observed {Observation}.", code, observed.Describe());
+        return RetainerAutomationResult.Succeeded(code, message);
     }
 
     private RetainerAutomationResult Warn(RetainerAutomationResult result)
@@ -1873,8 +1887,12 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
     public unsafe void CancelActive()
     {
-        CloseInventory();
-        foreach (var addonName in new[] { "InputNumeric", "ContextMenu", SellingListingEditor, SellingList, MarketList, SelectString })
+        // Stock teardown of the retainer's own windows first (see CloseRetainerWindowsAsync). The rest are
+        // child dialogs and the command menu: a stop must not choose an entry, so they are hidden, and
+        // EnsureRetainerSessionEndedAsync is what verifies and recovers the bell session afterwards.
+        if (!HideRetainerAgent())
+            CloseRetainerWindowsDirectly();
+        foreach (var addonName in new[] { "InputNumeric", "ContextMenu", SellingListingEditor, SelectString })
         {
             var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
             if (addon is not null && addon->IsReady && addon->IsVisible)
@@ -2834,6 +2852,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
     private unsafe bool AddonExists(string name) => gameGui.GetAddonByName<AtkUnitBase>(name, 1) is not null;
 
+    // Plain hide. Callers use it only for windows that own no retainer state (the price editor);
+    // the retainer's own windows go through CloseRetainerWindowsAsync.
     private unsafe void CloseSurface(string addonName)
     {
         var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName, 1);
@@ -2841,13 +2861,41 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
             addon->Close(true);
     }
 
-    private unsafe void CloseInventory()
+    // Closes the retainer's inventory and sale windows the way the game does, then waits for the
+    // retainer command menu. AgentRetainer owns those windows and is the inventory context handler
+    // that the player's inventory is paired with while they are open (the source of "Entrust to
+    // Retainer" and "Put Up for Sale"). Hiding the agent is the stock teardown, and how AutoRetainer
+    // closes the retainer inventory. Close(true) on a window only hides it and can leave that pairing
+    // registered, which keeps offering retainer actions after the session ends; choosing one is then
+    // sent for a retainer that is no longer there and the server disconnects the client.
+    private async Task<bool> CloseRetainerWindowsAsync(CancellationToken cancellationToken)
     {
-        var addon = gameGui.GetAddonByName<AtkUnitBase>(InventoryLarge, 1);
-        if (addon == null)
-            addon = gameGui.GetAddonByName<AtkUnitBase>(InventorySmall, 1);
-        if (addon != null && addon->IsReady && addon->IsVisible)
-            addon->Close(true);
+        var hidden = await framework.RunOnTick(HideRetainerAgent, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (hidden && await WaitUntilAsync(IsCommandMenuReady, cancellationToken, RetainerAgentHideLimit).ConfigureAwait(false))
+            return true;
+        // No live agent owned what is still open, or the hide left a window up: close what remains directly.
+        await framework.RunOnTick(CloseRetainerWindowsDirectly, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return await WaitUntilAsync(IsCommandMenuReady, cancellationToken).ConfigureAwait(false);
+    }
+
+    // Framework thread. True when a live retainer agent was hidden.
+    private unsafe bool HideRetainerAgent()
+    {
+        var module = AgentModule.Instance();
+        var agent = module == null ? null : module->GetAgentByInternalId(AgentId.Retainer);
+        if (agent == null || !agent->IsAgentActive())
+            return false;
+        agent->Hide();
+        return true;
+    }
+
+    // Framework thread. Fallback only: with no live agent behind them these windows hold no pairing to tear down.
+    private unsafe void CloseRetainerWindowsDirectly()
+    {
+        CloseSurface(SellingList);
+        CloseSurface(MarketList);
+        CloseSurface(InventoryLarge);
+        CloseSurface(InventorySmall);
     }
 
     private unsafe RetainerAutomationResult CloseRetainerList()
@@ -2870,28 +2918,60 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         var retainerAgent = module == null ? null : module->GetAgentByInternalId(AgentId.Retainer);
         var listAgent = module == null ? null : module->GetAgentByInternalId(AgentId.RetainerList);
         var conditions = Conditions.Instance();
+        var inventoryWindow = gameGui.GetAddonByName<AtkUnitBase>(InventoryLarge, 1);
+        if (inventoryWindow == null)
+            inventoryWindow = gameGui.GetAddonByName<AtkUnitBase>(InventorySmall, 1);
         return new(
             IsReady(RetainerList),
             retainerAgent != null && retainerAgent->IsAgentActive(),
             listAgent != null && listAgent->IsAgentActive(),
-            conditions != null && conditions->OccupiedSummoningBell);
+            conditions != null && conditions->OccupiedSummoningBell,
+            inventoryWindow == null ? RetainerInventoryWindowState.Absent
+                : inventoryWindow->IsVisible ? RetainerInventoryWindowState.Visible : RetainerInventoryWindowState.Hidden,
+            ReadPlayerInventoryContext(module, retainerAgent));
     }
+
+    // Framework thread. Which inventory context handler the player's inventory is paired with
+    // (AgentInventory.CurrentInventoryContextEvent): AgentRetainer's handler there is what makes the
+    // player's item menu offer "Entrust to Retainer".
+    private static unsafe PlayerInventoryContext ReadPlayerInventoryContext(AgentModule* module, AgentInterface* retainerAgent)
+    {
+        var inventoryAgent = module == null ? null : (AgentInventory*)module->GetAgentByInternalId(AgentId.Inventory);
+        if (inventoryAgent == null || inventoryAgent->CurrentInventoryContextEvent == null)
+            return PlayerInventoryContext.None;
+        return retainerAgent != null && (nint)inventoryAgent->CurrentInventoryContextEvent == RetainerNativeCommandCapability.Context(retainerAgent)
+            ? PlayerInventoryContext.Retainer
+            : PlayerInventoryContext.Other;
+    }
+
+    private enum RetainerInventoryWindowState { Absent, Hidden, Visible }
+
+    private enum PlayerInventoryContext { None, Retainer, Other }
 
     private readonly record struct RetainerSessionEndObservation(
         bool ListVisible,
         bool RetainerAgentActive,
         bool RetainerListAgentActive,
-        bool BellOccupied)
+        bool BellOccupied,
+        RetainerInventoryWindowState InventoryWindow,
+        PlayerInventoryContext InventoryContext)
     {
-        // The list agent is reported for diagnosis only; the retainer agent and bell
-        // occupancy are what keep the game offering retainer actions after the list closes.
-        public bool Ended => !ListVisible && !RetainerAgentActive && !BellOccupied;
+        // The list agent is reported for diagnosis only. Besides the retainer agent and bell occupancy,
+        // a retainer inventory window that still exists (even hidden) or a player inventory still paired
+        // with the retainer agent keeps the game offering retainer actions after everything visible closed.
+        // Another context handler (a shop, a trade) is not a retainer session and is reported only.
+        public bool Ended => !ListVisible && !RetainerAgentActive && !BellOccupied &&
+            InventoryWindow == RetainerInventoryWindowState.Absent && InventoryContext != PlayerInventoryContext.Retainer;
+
+        public bool InventoryPairedWithRetainer => InventoryContext == PlayerInventoryContext.Retainer;
 
         public string Describe() =>
             $"RetainerList={(ListVisible ? "visible" : "closed")} " +
             $"AgentRetainer={(RetainerAgentActive ? "active" : "inactive")} " +
             $"AgentRetainerList={(RetainerListAgentActive ? "active" : "inactive")} " +
-            $"OccupiedSummoningBell={(BellOccupied ? "set" : "clear")}";
+            $"OccupiedSummoningBell={(BellOccupied ? "set" : "clear")} " +
+            $"InventoryRetainer={InventoryWindow switch { RetainerInventoryWindowState.Visible => "visible", RetainerInventoryWindowState.Hidden => "hidden", _ => "absent" }} " +
+            $"PlayerInventoryContext={InventoryContext switch { PlayerInventoryContext.Retainer => "retainer", PlayerInventoryContext.Other => "other", _ => "none" }}";
     }
 
     private string ResolveAddonText(uint rowId) => dataManager.GetExcelSheet<Addon>().GetRow(rowId).Text.ExtractText();
