@@ -29,14 +29,11 @@ jobs:
       - name: Pack reusable projects
         shell: pwsh
         run: |
-          $projects = @(
-            'src/Franthropy.AgentBridge/Franthropy.AgentBridge.csproj',
-            'src/Franthropy.Filtering/Franthropy.Filtering.csproj',
-            'src/Franthropy.FFXIV/Franthropy.FFXIV.csproj',
-            'src/Franthropy.Observations/Franthropy.Observations.csproj',
-            'src/Franthropy.Web/Franthropy.Web.csproj'
-          )
+          $list = 'eng/published-projects.txt'
+          $projects = @(Get-Content -LiteralPath $list | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') })
+          if ($projects.Count -eq 0) { throw "Pack reusable projects: $list lists no projects." }
           foreach ($project in $projects) {
+            if (-not (Test-Path -LiteralPath $project -PathType Leaf)) { throw "Pack reusable projects: $project, listed by $list, does not exist." }
             dotnet pack $project -c Release -o artifacts/packages -p:ContinuousIntegrationBuild=true
             if ($LASTEXITCODE -ne 0) { throw "Pack failed: $project" }
           }

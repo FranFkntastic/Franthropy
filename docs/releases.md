@@ -3,7 +3,15 @@
 Franthropy uses semantic version tags such as `v0.1.0`. A tag on `main` builds,
 tests, packs, and attaches the reusable NuGet packages to a GitHub release.
 
+Individual commits on `main` can also be published as prereleases versioned
+`0.1.0-commit.<full commit SHA>`, so tools that pin an exact commit restore the
+same package bytes from nuget.org on every machine. See
+[Commit prereleases](#commit-prereleases).
+
 ## Published packages
+
+`eng/published-projects.txt` is the single list of published projects. CI and
+the release workflow both read it.
 
 - `Franthropy.AgentBridge`
 - `Franthropy.Filtering`
@@ -43,3 +51,21 @@ git push origin v0.1.0
 The workflow verifies that every project packs with the tag-derived version,
 publishes `.nupkg` and `.snupkg` files, and creates GitHub release notes.
 Package versions are immutable; fixes require a new patch version.
+
+## Commit prereleases
+
+Run the Release workflow manually with the `commit` input set to a full
+40-character SHA:
+
+```powershell
+gh workflow run release.yml --ref main -f commit=<full-sha>
+```
+
+The workflow checks out exactly that commit and refuses it unless it is
+already merged into `main`. It packs the projects listed in that commit's
+`eng/published-projects.txt` (commits that predate the file use the five
+packages above) as `0.1.0-commit.<sha>`, with assembly and file version
+`0.1.0.0` and the SHA as the informational version. It then verifies that every
+Franthropy dependency in each package names the same version and is itself
+published, and pushes with `--skip-duplicate`, so re-running for a published
+commit is a no-op. Commit prereleases create no tag or GitHub release.

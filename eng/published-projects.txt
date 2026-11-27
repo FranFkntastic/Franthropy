@@ -1,0 +1,8 @@
+# Projects published to nuget.org, one repository-relative .csproj path per line.
+# The package id is the project file name. CI packs, and the release workflow
+# publishes, exactly this list for both tagged releases and commit prereleases.
+src/Franthropy.AgentBridge/Franthropy.AgentBridge.csproj
+src/Franthropy.Filtering/Franthropy.Filtering.csproj
+src/Franthropy.FFXIV/Franthropy.FFXIV.csproj
+src/Franthropy.Observations/Franthropy.Observations.csproj
+src/Franthropy.Web/Franthropy.Web.csproj

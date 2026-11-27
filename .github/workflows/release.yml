@@ -1,20 +1,61 @@
 name: Release
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Publish Franthropy commit {0}', inputs.commit) || format('Release {0}', github.ref_name) }}
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full 40-character commit on main to publish as prerelease 0.1.0-commit.<sha>
+        required: true
+        type: string
 
 permissions:
   contents: write
   id-token: write
 
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.commit || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: windows-latest
     environment: release
+    env:
+      RELEASE_COMMIT: ${{ inputs.commit }}
     steps:
+      - name: Validate commit input
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_COMMIT -cnotmatch '^[0-9a-f]{40}$') {
+            throw "Validate commit input: '$env:RELEASE_COMMIT' is not a full lowercase 40-character commit SHA."
+          }
+
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit || '' }}
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && '0' || '1' }}
+
+      - name: Verify commit is on main
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ($LASTEXITCODE -ne 0) { throw 'Verify commit is on main: fetching origin/main failed.' }
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -cne $env:RELEASE_COMMIT) {
+            throw "Verify commit is on main: checked out $head, expected $env:RELEASE_COMMIT."
+          }
+          git merge-base --is-ancestor $env:RELEASE_COMMIT origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Verify commit is on main: $env:RELEASE_COMMIT is not an ancestor of origin/main; only merged commits are published."
+          }
+
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: |
@@ -25,11 +66,46 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME -replace '^v', ''
-          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid release tag: $env:GITHUB_REF_NAME" }
-          "value=$version" >> $env:GITHUB_OUTPUT
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            "value=0.1.0-commit.$env:RELEASE_COMMIT" >> $env:GITHUB_OUTPUT
+            "mode=commit" >> $env:GITHUB_OUTPUT
+          } else {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+            if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Resolve version: invalid release tag $env:GITHUB_REF_NAME" }
+            "value=$version" >> $env:GITHUB_OUTPUT
+            "mode=stable" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Resolve published projects
+        id: projects
+        shell: pwsh
+        run: |
+          $list = 'eng/published-projects.txt'
+          if (Test-Path -LiteralPath $list -PathType Leaf) {
+            $projects = @(Get-Content -LiteralPath $list | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') })
+            $source = $list
+          } else {
+            # Commits from before the list existed published exactly these projects.
+            $projects = @(
+              'src/Franthropy.AgentBridge/Franthropy.AgentBridge.csproj',
+              'src/Franthropy.Filtering/Franthropy.Filtering.csproj',
+              'src/Franthropy.FFXIV/Franthropy.FFXIV.csproj',
+              'src/Franthropy.Observations/Franthropy.Observations.csproj',
+              'src/Franthropy.Web/Franthropy.Web.csproj'
+            )
+            $source = "the built-in list (this commit predates $list)"
+          }
+          if ($projects.Count -eq 0) { throw "Resolve published projects: $list lists no projects." }
+          foreach ($project in $projects) {
+            if (-not (Test-Path -LiteralPath $project -PathType Leaf)) {
+              throw "Resolve published projects: $project, listed by $source, does not exist at this commit."
+            }
+          }
+          Write-Host "Publishing $($projects.Count) projects from $source"
+          "list=$($projects -join ';')" >> $env:GITHUB_OUTPUT
 
       - name: Test publishable projects
+        if: steps.version.outputs.mode == 'stable'
         shell: pwsh
         run: |
           $tests = @(
@@ -42,19 +118,83 @@ jobs:
 
       - name: Pack
         shell: pwsh
+        env:
+          PUBLISHED_PROJECTS: ${{ steps.projects.outputs.list }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.value }}
+          PACK_MODE: ${{ steps.version.outputs.mode }}
         run: |
-          $projects = @(
-            'src/Franthropy.AgentBridge/Franthropy.AgentBridge.csproj',
-            'src/Franthropy.Filtering/Franthropy.Filtering.csproj',
-            'src/Franthropy.FFXIV/Franthropy.FFXIV.csproj',
-            'src/Franthropy.Observations/Franthropy.Observations.csproj',
-            'src/Franthropy.Web/Franthropy.Web.csproj'
-          )
-          foreach ($project in $projects) {
-            dotnet pack $project -c Release -o artifacts/packages `
-              -p:Version=${{ steps.version.outputs.value }} `
-              -p:ContinuousIntegrationBuild=true
-            if ($LASTEXITCODE -ne 0) { throw "Pack failed: $project" }
+          foreach ($project in $env:PUBLISHED_PROJECTS -split ';') {
+            if ($env:PACK_MODE -eq 'commit') {
+              # Same identity properties as local commit packages, so a version has one meaning everywhere.
+              dotnet pack $project -c Release -o artifacts/packages `
+                "-p:Version=$env:PACKAGE_VERSION" "-p:PackageVersion=$env:PACKAGE_VERSION" `
+                '-p:AssemblyVersion=0.1.0.0' '-p:FileVersion=0.1.0.0' `
+                "-p:InformationalVersion=$env:RELEASE_COMMIT" '-p:IncludeSourceRevisionInInformationalVersion=false' `
+                "-p:RepositoryCommit=$env:RELEASE_COMMIT" '-p:ContinuousIntegrationBuild=true' `
+                '-p:IsPackable=true' '-p:NuGetAudit=false'
+            } else {
+              dotnet pack $project -c Release -o artifacts/packages `
+                "-p:Version=$env:PACKAGE_VERSION" `
+                -p:ContinuousIntegrationBuild=true
+            }
+            if ($LASTEXITCODE -ne 0) { throw "Pack failed for $project ($env:PACKAGE_VERSION)." }
+          }
+
+      - name: Verify commit packages
+        if: steps.version.outputs.mode == 'commit'
+        shell: pwsh
+        env:
+          PUBLISHED_PROJECTS: ${{ steps.projects.outputs.list }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $version = $env:PACKAGE_VERSION
+          $ids = @($env:PUBLISHED_PROJECTS -split ';' | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) })
+          $expected = @($ids | ForEach-Object { "$_.$version.nupkg" })
+          $produced = @(Get-ChildItem -LiteralPath artifacts/packages -Filter *.nupkg -File)
+          foreach ($name in $expected) {
+            if (-not ($produced.Name -contains $name)) { throw "Verify commit packages: Pack did not produce $name." }
+          }
+          foreach ($package in $produced) {
+            if (-not ($expected -contains $package.Name)) { throw "Verify commit packages: unexpected package $($package.Name) would be published." }
+          }
+          $probeRoot = Join-Path $env:RUNNER_TEMP 'franthropy-dll-probe'
+          New-Item -ItemType Directory -Path $probeRoot -Force | Out-Null
+          foreach ($id in $ids) {
+            $path = Join-Path artifacts/packages "$id.$version.nupkg"
+            $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $path).Path)
+            try {
+              $specs = @($zip.Entries | Where-Object { $_.FullName -notlike '*/*' -and $_.FullName -like '*.nuspec' })
+              if ($specs.Count -ne 1) { throw "Verify commit packages: $id has $($specs.Count) root nuspec files, expected 1." }
+              $reader = [IO.StreamReader]::new($specs[0].Open())
+              try { [xml]$manifest = $reader.ReadToEnd() } finally { $reader.Dispose() }
+              $metadata = $manifest.package.metadata
+              if ($metadata.id -cne $id -or $metadata.version -cne $version) {
+                throw "Verify commit packages: $id nuspec declares $($metadata.id) $($metadata.version), expected $id $version."
+              }
+              foreach ($dependency in $manifest.SelectNodes("//*[local-name()='dependency']")) {
+                if ($dependency.id -notlike 'Franthropy.*') { continue }
+                if ($dependency.version.Trim('[', ']') -cne $version) {
+                  throw "Verify commit packages: $id depends on $($dependency.id) $($dependency.version); every Franthropy dependency must be exactly $version."
+                }
+                if (-not ($ids -contains $dependency.id)) {
+                  throw "Verify commit packages: $id depends on $($dependency.id), which is not in the published project list, so nuget.org consumers could not restore it."
+                }
+              }
+              $assemblies = @($zip.Entries | Where-Object { $_.FullName -like "lib/*/$id.dll" })
+              if ($assemblies.Count -eq 0) { throw "Verify commit packages: $id contains no lib/*/$id.dll." }
+              foreach ($assembly in $assemblies) {
+                $probe = Join-Path $probeRoot ([guid]::NewGuid().ToString('N') + '.dll')
+                [IO.Compression.ZipFileExtensions]::ExtractToFile($assembly, $probe)
+                try {
+                  $product = [Diagnostics.FileVersionInfo]::GetVersionInfo($probe).ProductVersion
+                  if ($product -cne $env:RELEASE_COMMIT) {
+                    throw "Verify commit packages: $id $($assembly.FullName) has informational version '$product', expected $env:RELEASE_COMMIT."
+                  }
+                } finally { Remove-Item -LiteralPath $probe }
+              }
+            } finally { $zip.Dispose() }
+            Write-Host "Verified $id $version"
           }
 
       - name: NuGet login
@@ -67,16 +207,17 @@ jobs:
         shell: pwsh
         run: |
           $packages = Get-ChildItem artifacts/packages -Filter *.nupkg -File
-          if ($packages.Count -eq 0) { throw 'No NuGet packages were produced.' }
+          if ($packages.Count -eq 0) { throw 'Publish to nuget.org: no NuGet packages were produced.' }
           foreach ($package in $packages) {
             dotnet nuget push $package.FullName `
               --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" `
               --source https://api.nuget.org/v3/index.json `
               --skip-duplicate
-            if ($LASTEXITCODE -ne 0) { throw "Publish failed: $($package.Name)" }
+            if ($LASTEXITCODE -ne 0) { throw "Publish to nuget.org failed for $($package.Name)." }
           }
 
       - name: Create GitHub release
+        if: steps.version.outputs.mode == 'stable'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
