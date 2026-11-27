@@ -346,7 +346,11 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 if (now - clearSince.Value < BellInteractSettle ||
                     lastInteraction is { } previous && now - previous < BellReinteractInterval)
                     return (false, null, null);
-                return (false, null, bell.TryInteract());
+                var interacted = bell.TryInteract();
+                // The session this interaction opens is ours to close, even if the list never becomes ready.
+                if (interacted.Submitted)
+                    AdoptBellSession();
+                return (false, null, interacted);
             }, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (step.Opened)
