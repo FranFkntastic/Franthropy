@@ -239,6 +239,16 @@ public interface IRetainerAutomationSession
     Task<RetainerAutomationResult> CloseInventoryAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> CloseRetainerAsync(CancellationToken cancellationToken = default);
     Task<RetainerAutomationResult> CloseRetainerListAsync(CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Leaves no summoning-bell session open after a finished, failed or cancelled run: succeeds at once
+    /// when it already ended, otherwise closes the list (reopening it from the bell once when the session
+    /// stays live) and verifies the end. <paramref name="refusalReason"/> returning a reason stops it
+    /// before any game action. Sessions without bell recovery fall back to closing the list.
+    /// </summary>
+    Task<RetainerAutomationResult> EnsureRetainerSessionEndedAsync(
+        Func<string?>? refusalReason = null,
+        CancellationToken cancellationToken = default) =>
+        CloseRetainerListAsync(cancellationToken);
     void CancelActive();
 }
 

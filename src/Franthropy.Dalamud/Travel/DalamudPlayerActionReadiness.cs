@@ -31,15 +31,34 @@ public static unsafe class DalamudPlayerActionReadiness
 
     private static readonly string[] LoadingScreenAddons = ["NowLoading", "FadeMiddle", "FadeBack"];
 
+    // Flags a still-open summoning-bell session holds on its own. Only these are tolerated when the
+    // caller is re-interacting with the bell to end that session; quest events, cutscenes, trades and
+    // every other guard still block.
+    private static readonly ConditionFlag[] SummoningBellSessionFlags =
+    [
+        ConditionFlag.OccupiedSummoningBell, ConditionFlag.OccupiedInEvent, ConditionFlag.Occupied,
+        ConditionFlag.Occupied30, ConditionFlag.Occupied33, ConditionFlag.Occupied38, ConditionFlag.Occupied39,
+    ];
+
     /// <summary>Returns why the local player cannot act right now, or null when it can.</summary>
-    public static string? GetBlocker()
+    public static string? GetBlocker() => GetBlocker(tolerateSummoningBellSession: false);
+
+    /// <summary>
+    /// Returns why the local player cannot act right now, or null when it can. With
+    /// <paramref name="tolerateSummoningBellSession"/>, a summoning-bell session that is still open does
+    /// not block: the occupancy flags it holds are ignored while <see cref="ConditionFlag.OccupiedSummoningBell"/>
+    /// is set. Use it only to re-interact with that bell in order to close the session.
+    /// </summary>
+    public static string? GetBlocker(bool tolerateSummoningBellSession)
     {
         try
         {
             var conditions = Conditions.Instance();
             if (conditions == null)
                 return "Game conditions are unavailable.";
-            var blocker = GetBlocker(flag => *((bool*)conditions + (int)flag));
+            bool Read(ConditionFlag flag) => *((bool*)conditions + (int)flag);
+            var bellSession = tolerateSummoningBellSession && Read(ConditionFlag.OccupiedSummoningBell);
+            var blocker = GetBlocker(flag => !(bellSession && SummoningBellSessionFlags.Contains(flag)) && Read(flag));
             if (blocker is not null)
                 return blocker;
 

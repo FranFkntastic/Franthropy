@@ -40,6 +40,12 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     private readonly DalamudRenderedUiTextActionDispatcher renderedUi;
     private readonly IPluginLog log;
     private RetainerAutomationTarget? active;
+    // Content ID of the character whose summoning-bell session this instance opened or adopted (0 = none).
+    // Recovery only ever reopens and closes that session, for that character. Framework thread only.
+    private ulong bellSessionOwner;
+    // How long a session with no retainer window left open may take to end on its own before recovery
+    // reopens it, so a close that is still finishing is not mistaken for a stuck session.
+    private static readonly TimeSpan SessionEndSettleLimit = TimeSpan.FromSeconds(2);
     // Market price freshness proof. InventoryManager's 20-entry retainer market price table is a
     // client cache that is NOT tied to the RetainerMarket container's load: right after a retainer
     // switch it can still hold the previous retainer's (non-zero) prices. The game itself replaces
@@ -265,6 +271,15 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
 
     public async Task<RetainerAutomationResult> EnsureRetainerListAsync(CancellationToken cancellationToken = default)
     {
+        var result = await EnsureRetainerListCoreAsync(allowBell: true, cancellationToken).ConfigureAwait(false);
+        if (result.Success)
+            await framework.RunOnTick(AdoptBellSession, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return result;
+    }
+
+    // allowBell: false backs out of an open retainer surface to the list but never interacts with the bell.
+    private async Task<RetainerAutomationResult> EnsureRetainerListCoreAsync(bool allowBell, CancellationToken cancellationToken)
+    {
         var state = await framework.RunOnTick(
             () => (
                 List: IsReady(RetainerList),
@@ -296,13 +311,17 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
         }
         if (state.Inventory || state.Menu || state.Selling)
             return await ReturnToRetainerListAsync(cancellationToken).ConfigureAwait(false);
+        if (!allowBell)
+            return RetainerAutomationResult.Failed("RetainerListUnavailable", "No retainer window is open to return from.");
 
-        return await OpenRetainerListFromBellAsync(cancellationToken).ConfigureAwait(false);
+        return await OpenRetainerListFromBellAsync(recovering: false, cancellationToken).ConfigureAwait(false);
     }
 
     // Interacting right after login, a zone change, or a closing window is ignored by the game, so wait
     // until the player can act, re-interact while the list has not opened, and bound it all by wall-clock time.
-    private async Task<RetainerAutomationResult> OpenRetainerListFromBellAsync(CancellationToken cancellationToken)
+    // recovering: the bell session this instance owns is stuck open, so the occupancy it holds on its own
+    // does not count as a blocker; everything else (zoning, casting, cutscenes, trades) still does.
+    private async Task<RetainerAutomationResult> OpenRetainerListFromBellAsync(bool recovering, CancellationToken cancellationToken)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
         TimeSpan? clearSince = null, lastInteraction = null, unavailableSince = null;
@@ -317,8 +336,12 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
                 if (IsReady(RetainerList))
                     return (Opened: true, Blocker: (string?)null, Interaction: (SummoningBellInteractionResult?)null);
                 // An open bell session (list still animating in) also blocks, so the bell is never re-interacted.
-                if (DalamudPlayerActionReadiness.GetBlocker() is { } blocker)
+                if (DalamudPlayerActionReadiness.GetBlocker(tolerateSummoningBellSession: recovering) is { } blocker)
                     return (false, blocker, null);
+                // Recovery tolerates the bell's own occupancy, so it needs its own guard: once it has
+                // interacted, a list that exists but is not ready yet is still opening; never re-interact then.
+                if (recovering && submitted && AddonExists(RetainerList))
+                    return (false, "The reopened retainer list is still opening.", null);
                 clearSince ??= now;
                 if (now - clearSince.Value < BellInteractSettle ||
                     lastInteraction is { } previous && now - previous < BellReinteractInterval)
@@ -1534,16 +1557,17 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     }
 
     public Task<RetainerSellingUiObservation> ObserveSellingUiAsync(CancellationToken cancellationToken = default) =>
-        framework.RunOnTick(
-            () => new RetainerSellingUiObservation(
-                IsReady(MarketList),
-                IsReady(SellingList),
-                IsReady(SellingListingEditor),
-                IsReady(YesNo),
-                IsInventoryReady(),
-                IsCommandMenuReady(),
-                IsReady(RetainerList)),
-            cancellationToken: cancellationToken);
+        framework.RunOnTick(ObserveSellingUiNow, cancellationToken: cancellationToken);
+
+    private RetainerSellingUiObservation ObserveSellingUiNow() =>
+        new(
+            IsReady(MarketList),
+            IsReady(SellingList),
+            IsReady(SellingListingEditor),
+            IsReady(YesNo),
+            IsInventoryReady(),
+            IsCommandMenuReady(),
+            IsReady(RetainerList));
 
     public async Task<RetainerAutomationResult> ReturnToRetainerListAsync(CancellationToken cancellationToken = default)
     {
@@ -1629,28 +1653,218 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     /// <summary>
     /// Ends the summoning-bell session through the retainer list's own close action and
     /// succeeds only once the session is observed to have ended, not merely when the close
-    /// was requested.
+    /// was requested. Calling it on an open list adopts that session; if the close leaves the
+    /// session open, it is recovered once as <see cref="EnsureRetainerSessionEndedAsync"/> does.
     /// </summary>
     public async Task<RetainerAutomationResult> CloseRetainerListAsync(CancellationToken cancellationToken = default)
     {
-        var closed = await framework.RunOnTick(CloseRetainerList, cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (!closed.Success)
-            return closed;
+        var listVisible = await framework.RunOnTick(() => IsReady(RetainerList), cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (!listVisible)
+            return RetainerAutomationResult.Failed("RetainerListUnavailable", "Retainer list is not ready.");
+        return await EndRetainerSessionAsync(null, adoptOpenList: true, cancellationToken).ConfigureAwait(false);
+    }
 
-        if (await WaitUntilAsync(() => ObserveRetainerSessionEnd().Ended, cancellationToken).ConfigureAwait(false))
-            return RetainerAutomationResult.Succeeded("RetainerSessionEnded", "Retainer list closed and the summoning-bell session ended.");
+    /// <summary>
+    /// Leaves no summoning-bell session open, from whatever state a finished, failed or cancelled
+    /// run left behind. Succeeds at once when the session has already ended. Otherwise it backs out
+    /// of any open retainer window to the list and closes the list with its own close action; when
+    /// no retainer window is open but the session is still live (the game keeps offering retainer
+    /// actions), or the close did not end it, it reopens the list from the bell once, closes it
+    /// again and re-verifies. It never hides the agent and never moves the player.
+    /// </summary>
+    /// <remarks>
+    /// It acts only on a session this instance opened or adopted (through
+    /// <see cref="EnsureRetainerListAsync"/> or <see cref="CloseRetainerListAsync"/>), only for the
+    /// character that owned it, and never while <paramref name="refusalReason"/> returns a reason
+    /// (for example another plugin holding the bell). The predicate is evaluated on the framework
+    /// thread before each step that touches the game.
+    /// Failure codes: RetainerSessionNotOwned, RetainerSessionCharacterChanged,
+    /// RetainerSessionRecoveryRefused, RetainerConfirmationOwnershipUnknown,
+    /// RetainerSessionBackOutFailed, RetainerSessionReopenFailed, RetainerSessionStuckAfterReopen.
+    /// Success codes: RetainerSessionAlreadyEnded, RetainerSessionEnded, RetainerSessionEndedAfterReopen.
+    /// </remarks>
+    public Task<RetainerAutomationResult> EnsureRetainerSessionEndedAsync(
+        Func<string?>? refusalReason = null,
+        CancellationToken cancellationToken = default) =>
+        EndRetainerSessionAsync(refusalReason, adoptOpenList: false, cancellationToken);
 
+    private async Task<RetainerAutomationResult> EndRetainerSessionAsync(
+        Func<string?>? refusalReason, bool adoptOpenList, CancellationToken cancellationToken)
+    {
+        var start = await framework.RunOnTick(() =>
+        {
+            var observed = ObserveRetainerSessionEnd();
+            if (observed.Ended)
+            {
+                bellSessionOwner = 0;
+                return (Observed: observed, Refused: (RetainerAutomationResult?)null);
+            }
+            if (adoptOpenList && observed.ListVisible)
+                AdoptBellSession();
+            return (Observed: observed, Refused: RefuseSessionRecovery(refusalReason, observed));
+        }, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (start.Observed.Ended)
+            return RetainerAutomationResult.Succeeded("RetainerSessionAlreadyEnded", "The summoning-bell session had already ended.");
+        if (start.Refused is { } refused)
+            return Warn(refused);
+
+        // 1. The stock close: back out of any open retainer window to the list, then close the list.
+        var surfaces = await framework.RunOnTick(
+            () => (Ui: ObserveSellingUiNow(), Talk: IsReady(Talk)),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (surfaces.Ui.ConfirmationReady)
+            return Warn(RetainerAutomationResult.Failed(
+                "RetainerConfirmationOwnershipUnknown",
+                "A confirmation dialog is visible and this session cannot prove it owns it, so it and the summoning-bell " +
+                $"session were left open. Observed {start.Observed.Describe()}."));
+        var otherSurface = surfaces.Talk || surfaces.Ui.InventoryReady || surfaces.Ui.CommandMenuReady || surfaces.Ui.SellListReady ||
+            surfaces.Ui.MarketListReady || surfaces.Ui.ListingEditorReady;
+        if (!surfaces.Ui.RetainerListReady && otherSurface)
+        {
+            var back = await EnsureRetainerListCoreAsync(allowBell: false, cancellationToken).ConfigureAwait(false);
+            if (!back.Success)
+            {
+                var after = await framework.RunOnTick(ObserveRetainerSessionEnd, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return Warn(RetainerAutomationResult.Failed(
+                    "RetainerSessionBackOutFailed",
+                    $"Could not return from {FormatSellingUiObservation(surfaces.Ui)}{(surfaces.Talk ? ", Talk" : string.Empty)} to the retainer list " +
+                    $"to close the summoning-bell session ({back.Code}: {back.Message}). Observed {after.Describe()}."));
+            }
+        }
+
+        string firstAttempt;
+        if (await framework.RunOnTick(() => IsReady(RetainerList), cancellationToken: cancellationToken).ConfigureAwait(false))
+        {
+            var closed = await CloseRetainerListAndObserveAsync(cancellationToken).ConfigureAwait(false);
+            if (closed.Ended)
+            {
+                await framework.RunOnTick(ForgetBellSession, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return RetainerAutomationResult.Succeeded("RetainerSessionEnded", "Retainer list closed and the summoning-bell session ended.");
+            }
+            firstAttempt = $"the list's close action left {closed.Describe()}";
+        }
+        else
+        {
+            // Nothing is open: either a close that is still finishing, or the stale state in which
+            // the game still offers retainer actions with no retainer window left to close.
+            if (await WaitUntilAsync(() => ObserveRetainerSessionEnd().Ended, cancellationToken, SessionEndSettleLimit).ConfigureAwait(false))
+            {
+                await framework.RunOnTick(ForgetBellSession, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return RetainerAutomationResult.Succeeded("RetainerSessionEnded", "The summoning-bell session ended without further action.");
+            }
+            firstAttempt = "no retainer window was open to close";
+        }
+        log.Warning("RetainerSessionStillOpen: {FirstAttempt}; reopening the retainer list from the bell once to close it properly.", firstAttempt);
+
+        // 2. Recovery, at most once: reopen the list from the bell, close it again, re-verify.
         // Deliberately no fallback hide: hiding a live agent would only conceal the session
-        // the game still considers open, which is the failure this check exists to catch.
-        var observed = await framework.RunOnTick(ObserveRetainerSessionEnd, cancellationToken: cancellationToken).ConfigureAwait(false);
-        log.Warning("Retainer list close did not end the summoning-bell session within the wait budget. Observed {Observation}.", observed.Describe());
-        return observed.ListVisible
-            ? RetainerAutomationResult.Failed(
-                "RetainerListCloseTimeout",
-                $"The retainer list was still visible after its close action. Observed {observed.Describe()}.")
+        // the game still considers open, which is the failure this exists to clear.
+        var guard = await framework.RunOnTick(
+            () => RefuseSessionRecovery(refusalReason, ObserveRetainerSessionEnd()),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (guard is not null)
+            return Warn(guard);
+        var reopened = await OpenRetainerListFromBellAsync(recovering: true, cancellationToken).ConfigureAwait(false);
+        if (!reopened.Success)
+        {
+            var after = await framework.RunOnTick(ObserveRetainerSessionEnd, cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (after.Ended)
+            {
+                await framework.RunOnTick(ForgetBellSession, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return RetainerAutomationResult.Succeeded("RetainerSessionEnded", "The summoning-bell session ended while the bell was being reopened.");
+            }
+            return Warn(RetainerAutomationResult.Failed(
+                "RetainerSessionReopenFailed",
+                $"The summoning-bell session did not end ({firstAttempt}), and the retainer list could not be reopened from the bell to " +
+                $"close it: {DescribeBellReopenFailure(reopened.Code)} ({reopened.Code}: {reopened.Message}). Observed {after.Describe()}."));
+        }
+
+        var guardAfterReopen = await framework.RunOnTick(
+            () => RefuseSessionRecovery(refusalReason, ObserveRetainerSessionEnd()),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (guardAfterReopen is not null)
+            return Warn(guardAfterReopen);
+        var second = await CloseRetainerListAndObserveAsync(cancellationToken).ConfigureAwait(false);
+        if (second.Ended)
+        {
+            await framework.RunOnTick(ForgetBellSession, cancellationToken: cancellationToken).ConfigureAwait(false);
+            log.Information("RetainerSessionRecoveredByReopen: {FirstAttempt}; reopening the list from the bell and closing it again ended the session.", firstAttempt);
+            return RetainerAutomationResult.Succeeded(
+                "RetainerSessionEndedAfterReopen",
+                $"The summoning-bell session did not end at first ({firstAttempt}); reopening the list from the bell and closing it again ended it.");
+        }
+        return Warn(RetainerAutomationResult.Failed(
+            "RetainerSessionStuckAfterReopen",
+            $"The summoning-bell session is still open after reopening the retainer list from the bell and closing it again " +
+            $"(first attempt: {firstAttempt}). Observed {second.Describe()}. Not retried further; the agent was not hidden."));
+    }
+
+    private RetainerAutomationResult Warn(RetainerAutomationResult result)
+    {
+        log.Warning("{Code}: {Message}", result.Code, result.Message);
+        return result;
+    }
+
+    // Fires the list's own close action and reports what the session looks like once it ended or the wait ran out.
+    private async Task<RetainerSessionEndObservation> CloseRetainerListAndObserveAsync(CancellationToken cancellationToken)
+    {
+        var requested = await framework.RunOnTick(CloseRetainerList, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (requested.Success)
+            await WaitUntilAsync(() => ObserveRetainerSessionEnd().Ended, cancellationToken).ConfigureAwait(false);
+        return await framework.RunOnTick(ObserveRetainerSessionEnd, cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    // Framework thread. Null when this instance may act on the live bell session now.
+    private RetainerAutomationResult? RefuseSessionRecovery(Func<string?>? refusalReason, RetainerSessionEndObservation observed)
+    {
+        if (bellSessionOwner == 0)
+            return RetainerAutomationResult.Failed(
+                "RetainerSessionNotOwned",
+                "A summoning-bell session is open, but this automation session did not open or adopt it, so it was left untouched. " +
+                $"Observed {observed.Describe()}.");
+        if (ReadLocalContentId() != bellSessionOwner)
+        {
+            bellSessionOwner = 0;
+            return RetainerAutomationResult.Failed(
+                "RetainerSessionCharacterChanged",
+                "The logged-in character is not the one whose summoning-bell session this automation opened, so nothing was touched. " +
+                $"Observed {observed.Describe()}.");
+        }
+        string? reason;
+        try { reason = refusalReason?.Invoke(); }
+        catch (Exception exception) { reason = $"the caller's authority check threw {exception.GetType().Name}: {exception.Message}"; }
+        return reason is null
+            ? null
             : RetainerAutomationResult.Failed(
-                "RetainerSessionStillActive",
-                $"The retainer list closed but the summoning-bell session did not end. Observed {observed.Describe()}.");
+                "RetainerSessionRecoveryRefused",
+                $"The summoning-bell session is still open, but ending it was refused: {reason} Observed {observed.Describe()}.");
+    }
+
+    private static string DescribeBellReopenFailure(string code) => code switch
+    {
+        "NoInteractableSummoningBell" => "the nearest summoning bell is out of interact range (the player was not moved)",
+        "NoNearbySummoningBell" => "no summoning bell is loaded nearby",
+        "PlayerUnavailable" or "TargetSystemUnavailable" => "the bell could not be interacted with",
+        "SummoningBellInteractionFailed" => "the player never became able to interact with the bell",
+        "RetainerListTimeout" => "the bell was interacted with but the retainer list did not open",
+        _ => "the bell reopen failed",
+    };
+
+    // Framework thread.
+    private void ForgetBellSession() => bellSessionOwner = 0;
+
+    // Framework thread.
+    private void AdoptBellSession()
+    {
+        var contentId = ReadLocalContentId();
+        if (contentId != 0)
+            bellSessionOwner = contentId;
+    }
+
+    private static unsafe ulong ReadLocalContentId()
+    {
+        var state = FFXIVClientStructs.FFXIV.Client.Game.UI.PlayerState.Instance();
+        return state == null ? 0 : state->ContentId;
     }
 
     public unsafe void CancelActive()
@@ -2613,6 +2827,8 @@ public sealed class DalamudRetainerAutomationSession : IRetainerAutomationSessio
     }
 
     private bool IsInventoryReady() => IsReady(InventoryLarge) || IsReady(InventorySmall);
+
+    private unsafe bool AddonExists(string name) => gameGui.GetAddonByName<AtkUnitBase>(name, 1) is not null;
 
     private unsafe void CloseSurface(string addonName)
     {
