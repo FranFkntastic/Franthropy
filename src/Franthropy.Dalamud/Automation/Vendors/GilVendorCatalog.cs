@@ -4,6 +4,8 @@ public sealed class GilVendorCatalog
 {
     private readonly Dictionary<uint, IReadOnlyList<GilVendorOffer>> offersByItemId;
     private readonly Dictionary<uint, IReadOnlyList<GilVendorOffer>> pendingByItemId;
+    // The catalog is immutable, so the NPC index is built at most once per instance, on first use.
+    private readonly Lazy<IReadOnlyDictionary<uint, IReadOnlyList<GilVendorOffer>>> pendingByNpcId;
 
     private GilVendorCatalog(
         Dictionary<uint, IReadOnlyList<GilVendorOffer>> offersByItemId,
@@ -11,6 +13,7 @@ public sealed class GilVendorCatalog
     {
         this.offersByItemId = offersByItemId;
         this.pendingByItemId = pendingByItemId;
+        pendingByNpcId = new(() => IndexByNpc(pendingByItemId), LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
     public static GilVendorCatalog Create(IEnumerable<GilVendorOffer> offers)
@@ -65,13 +68,17 @@ public sealed class GilVendorCatalog
     /// ENpcBase id. When the observer reports that NPC's live territory and
     /// position, its pending offers graduate into the executable catalog.
     /// </summary>
-    public IReadOnlyDictionary<uint, IReadOnlyList<GilVendorOffer>> PendingByNpcId =>
-        pendingByItemId
-            .SelectMany(pair => pair.Value, (_, offer) => offer)
-            .GroupBy(offer => offer.NpcId)
-            .ToDictionary(
-                group => group.Key,
-                group => (IReadOnlyList<GilVendorOffer>)group.ToList());
+    public IReadOnlyDictionary<uint, IReadOnlyList<GilVendorOffer>> PendingByNpcId => pendingByNpcId.Value;
+
+    private static IReadOnlyDictionary<uint, IReadOnlyList<GilVendorOffer>> IndexByNpc(
+        Dictionary<uint, IReadOnlyList<GilVendorOffer>> pendingByItemId) =>
+        new System.Collections.ObjectModel.ReadOnlyDictionary<uint, IReadOnlyList<GilVendorOffer>>(
+            pendingByItemId
+                .SelectMany(pair => pair.Value, (_, offer) => offer)
+                .GroupBy(offer => offer.NpcId)
+                .ToDictionary(
+                    group => group.Key,
+                    group => (IReadOnlyList<GilVendorOffer>)group.ToArray()));
 
     /// <summary>
     /// Promotes pending offers for the given NPC to executable offers at the
@@ -86,7 +93,7 @@ public sealed class GilVendorCatalog
     {
         ArgumentNullException.ThrowIfNull(travelRoutes);
         ArgumentNullException.ThrowIfNull(routeAetheryteIds);
-        if (!pendingByItemId.Values.Any(offers => offers.Any(offer => offer.NpcId == npcId)))
+        if (!PendingByNpcId.ContainsKey(npcId))
             return this;
 
         var promoted = new List<GilVendorOffer>();
